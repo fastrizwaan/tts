@@ -331,9 +331,9 @@ class PiperTTSApp(Adw.Application):
             self.move_to_next_sentence()
 
     def generate_speech_with_piper(self, text, output_path):
-        """Generate speech using Piper TTS with language-specific preprocessing"""
+        """Generate speech using Piper TTS with language-specific preprocessing and speed control"""
         try:
-            print(f"Generating speech for: {text[:50]}...")
+            print(f"Generating speech for: {text[:50]}... at speed {self.speech_rate}")
             
             # Preprocess text based on current voice language
             lang_code = self.current_voice_name.split('-')[0]
@@ -349,22 +349,32 @@ class PiperTTSApp(Adw.Application):
                 clean_text = ' '.join(clean_text.split()) # Just normalize whitespace
             else:
                 # More aggressive cleaning for English
-                clean_text = re.sub(r'[^\w\s\.,!?\-\'"]', ' ', clean_text)
+                clean_text = re.sub(r'[^\w\s\.,!?\-\'"\•]', ' ', clean_text)
                 clean_text = ' '.join(clean_text.split())
             
             print(f"Preprocessed text for {lang_code}: {clean_text}")
             
             if self.use_cli:
-                # Use CLI method with better error handling
+                # Use CLI method with speed control
                 if not self.current_voice_path or not os.path.exists(self.current_voice_path):
                     print(f"Voice model not found: {self.current_voice_path}")
                     return False
-                    
+                
+                # Create temporary WAV file for original speech
+                temp_wav = output_path + "_temp.wav"
+                
                 cmd = [
                     'piper',
                     '--model', self.current_voice_path,
-                    '--output_file', output_path
+                    '--output_file', temp_wav
                 ]
+                
+                # Add speed control if available in Piper CLI
+                # Note: Some versions of Piper CLI support --length_scale parameter
+                if self.speech_rate != 1.0:
+                    # length_scale is inverse of speed (smaller = faster, larger = slower)
+                    length_scale = 1.0 / self.speech_rate
+                    cmd.extend(['--length_scale', str(length_scale)])
                 
                 print(f"Running command: {' '.join(cmd)}")
                 
@@ -383,7 +393,26 @@ class PiperTTSApp(Adw.Application):
                     if process.stderr:
                         print(f"Piper stderr: {process.stderr}")
                     
-                    if process.returncode == 0 and os.path.exists(output_path):
+                    if process.returncode == 0 and os.path.exists(temp_wav):
+                        # If Piper CLI doesn't support speed control, use sox for post-processing
+                        if self.speech_rate != 1.0 and '--length_scale' not in ' '.join(cmd):
+                            print(f"Applying speed change using sox: {self.speech_rate}x")
+                            try:
+                                sox_cmd = ['sox', temp_wav, output_path, 'tempo', str(self.speech_rate)]
+                                sox_result = subprocess.run(sox_cmd, capture_output=True, text=True)
+                                if sox_result.returncode == 0:
+                                    os.unlink(temp_wav)  # Remove temp file
+                                else:
+                                    print(f"Sox failed, using original speed: {sox_result.stderr}")
+                                    # Fallback: just rename temp file
+                                    os.rename(temp_wav, output_path)
+                            except FileNotFoundError:
+                                print("Sox not found, using original speed")
+                                os.rename(temp_wav, output_path)
+                        else:
+                            # Piper handled speed or speed is 1.0
+                            os.rename(temp_wav, output_path)
+                        
                         file_size = os.path.getsize(output_path)
                         print(f"Audio generated successfully via CLI: {output_path} ({file_size} bytes)")
                         
@@ -412,7 +441,7 @@ class PiperTTSApp(Adw.Application):
                     return False
             
             else:
-                # Use Python API with proper synthesis handling
+                # Use Python API with speed control
                 if not self.piper_voice:
                     print("Piper voice not loaded")
                     return False
@@ -429,36 +458,101 @@ class PiperTTSApp(Adw.Application):
                         sample_rate = 22050
                         print("No voice config found, using default sample rate")
                     
+                    # Create temporary file for original synthesis
+                    temp_wav = output_path + "_temp.wav"
+                    
                     # Try direct synthesis to bytes first
                     print("Attempting direct synthesis...")
                     audio_bytes = b""
                     
                     try:
+                        # Check if Piper voice supports length_scale parameter
+                        synthesis_kwargs = {}
+                        if hasattr(self.piper_voice, 'synthesize') and self.speech_rate != 1.0:
+                            # Try to pass length_scale parameter (inverse of speed)
+                            try:
+                                length_scale = 1.0 / self.speech_rate
+                                synthesis_kwargs['length_scale'] = length_scale
+                                print(f"Using Piper length_scale: {length_scale}")
+                            except:
+                                print("Piper voice doesn't support length_scale parameter")
+                        
                         # Use the synthesize method that returns audio data
-                        for audio_chunk in self.piper_voice.synthesize_stream_raw(clean_text):
-                            audio_bytes += audio_chunk
+                        try:
+                            if hasattr(self.piper_voice, 'synthesize_stream_raw'):
+                                for audio_chunk in self.piper_voice.synthesize_stream_raw(clean_text, **synthesis_kwargs):
+                                    audio_bytes += audio_chunk
+                            else:
+                                # Fallback method - synthesize to temp file first
+                                with wave.open(temp_wav, "wb") as wav_file:
+                                    wav_file.setnchannels(1)
+                                    wav_file.setsampwidth(2)
+                                    wav_file.setframerate(sample_rate)
+                                    self.piper_voice.synthesize(clean_text, wav_file, **synthesis_kwargs)
+                                
+                                # Read the temp file
+                                if os.path.exists(temp_wav):
+                                    with wave.open(temp_wav, 'rb') as wf:
+                                        audio_bytes = wf.readframes(wf.getnframes())
+                        
+                        except TypeError:
+                            # synthesis_kwargs not supported, synthesize without speed control
+                            print("Voice synthesis doesn't support speed parameters")
+                            if hasattr(self.piper_voice, 'synthesize_stream_raw'):
+                                for audio_chunk in self.piper_voice.synthesize_stream_raw(clean_text):
+                                    audio_bytes += audio_chunk
+                            else:
+                                with wave.open(temp_wav, "wb") as wav_file:
+                                    wav_file.setnchannels(1)
+                                    wav_file.setsampwidth(2)
+                                    wav_file.setframerate(sample_rate)
+                                    self.piper_voice.synthesize(clean_text, wav_file)
+                                
+                                if os.path.exists(temp_wav):
+                                    with wave.open(temp_wav, 'rb') as wf:
+                                        audio_bytes = wf.readframes(wf.getnframes())
                         
                         print(f"Generated {len(audio_bytes)} bytes of raw audio")
                         
                         if len(audio_bytes) > 0:
-                            # Write to WAV file manually
-                            with wave.open(output_path, "wb") as wav_file:
+                            # Write to temp WAV file first
+                            with wave.open(temp_wav, "wb") as wav_file:
                                 wav_file.setnchannels(1)
                                 wav_file.setsampwidth(2) # 16-bit
                                 wav_file.setframerate(sample_rate)
                                 wav_file.writeframes(audio_bytes)
+                            
+                            # Apply speed change if needed and not handled by Piper
+                            if self.speech_rate != 1.0 and 'length_scale' not in synthesis_kwargs:
+                                print(f"Applying speed change using sox: {self.speech_rate}x")
+                                try:
+                                    sox_cmd = ['sox', temp_wav, output_path, 'tempo', str(self.speech_rate)]
+                                    sox_result = subprocess.run(sox_cmd, capture_output=True, text=True)
+                                    if sox_result.returncode == 0:
+                                        os.unlink(temp_wav)  # Remove temp file
+                                    else:
+                                        print(f"Sox failed: {sox_result.stderr}")
+                                        # Fallback: use original speed
+                                        os.rename(temp_wav, output_path)
+                                except FileNotFoundError:
+                                    print("Sox not found, using original speed")
+                                    os.rename(temp_wav, output_path)
+                            else:
+                                # Speed was handled by Piper or is 1.0
+                                os.rename(temp_wav, output_path)
                             
                             file_size = os.path.getsize(output_path)
                             print(f"Wrote WAV file: {file_size} bytes")
                             return file_size > 44
                         else:
                             print("No audio data generated")
+                            return False
                             
                     except AttributeError:
-                        print("synthesize_stream_raw not available, trying alternative method")
+                        print("Direct synthesis method not available, trying file-based method")
                         
                         # Alternative: use the file-based synthesis
-                        with wave.open(output_path, "wb") as wav_file:
+                        with wave.open(temp_wav, "wb") as wav_file:
                             wav_file.setnchannels(1)
                             wav_file.setsampwidth(2)
                             wav_file.setframerate(sample_rate)
@@ -469,6 +563,23 @@ class PiperTTSApp(Adw.Application):
                             except Exception as synth_error:
                                 print(f"Synthesis failed: {synth_error}")
                                 return False
+                        
+                        # Apply speed change if needed
+                        if self.speech_rate != 1.0:
+                            print(f"Applying speed change using sox: {self.speech_rate}x")
+                            try:
+                                sox_cmd = ['sox', temp_wav, output_path, 'tempo', str(self.speech_rate)]
+                                sox_result = subprocess.run(sox_cmd, capture_output=True, text=True)
+                                if sox_result.returncode == 0:
+                                    os.unlink(temp_wav)
+                                else:
+                                    print(f"Sox failed: {sox_result.stderr}")
+                                    os.rename(temp_wav, output_path)
+                            except FileNotFoundError:
+                                print("Sox not found, using original speed")
+                                os.rename(temp_wav, output_path)
+                        else:
+                            os.rename(temp_wav, output_path)
                     
                     # Validate the final result
                     if os.path.exists(output_path):
@@ -909,13 +1020,19 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         lang_info.add_css_class("dim-label")
         content.append(lang_info)
         
+        # Speed control info
+        speed_info = Gtk.Label(label="Speed Control:\n• Uses Piper's length_scale parameter when available\n• Falls back to Sox for post-processing speed changes\n• Requires Sox for full speed control: sudo apt install sox")
+        speed_info.set_halign(Gtk.Align.START)
+        speed_info.add_css_class("dim-label")
+        content.append(speed_info)
+        
         # Troubleshooting
         trouble_label = Gtk.Label(label="Troubleshooting:")
         trouble_label.set_halign(Gtk.Align.START)
         trouble_label.add_css_class("heading")
         content.append(trouble_label)
         
-        trouble_text = Gtk.Label(label="If TTS is not working:\n• Install piper binary: sudo apt install piper\n• Or try: pip install piper-phonemize\n• For Hindi: Ensure proper Unicode fonts are installed")
+        trouble_text = Gtk.Label(label="If TTS is not working:\n• Install piper binary: sudo apt install piper\n• Or try: pip install piper-phonemize\n• For speed control: sudo apt install sox\n• For Hindi: Ensure proper Unicode fonts are installed")
         trouble_text.set_halign(Gtk.Align.START)
         trouble_text.add_css_class("dim-label")
         content.append(trouble_text)
