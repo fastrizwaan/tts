@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Piper TTS
+Exec=piper5
+Icon=io.github.fastrizwaan.tts
+Categories=Utility;

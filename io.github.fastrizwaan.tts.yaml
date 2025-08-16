@@ -1,0 +1,332 @@
+app-id: io.github.fastrizwaan.tts
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+command: tts
+separate-locales: false
+
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --share=network
+  - --filesystem=home
+  - --device=dri
+  - --env=PYTHONPATH=/app/lib/python3.12/site-packages
+
+modules:
+
+  - name: numpy
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app numpy*.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/6e/45/c51cb248e679a6c6ab14b7a8e3ead3f4a3fe7425fc7a6f98b3f147bec532/numpy-2.3.1-cp312-cp312-manylinux_2_28_x86_64.whl
+        sha256: e7cbf5a5eafd8d230a3ce356d892512185230e4781a361229bd902ff403bc660
+        only-arches: [x86_64]
+        x-checker-data: {type: pypi, name: numpy, packagetype: bdist_wheel}
+
+      - type: file
+        url: https://files.pythonhosted.org/packages/??/??/numpy-2.3.1-cp312-cp312-manylinux_2_28_aarch64.whl
+        sha256: 8e333040d069eba1652fb08962ec5b76af7f2c7bce1df7e1418c8055cf776f25 :contentReference[oaicite:1]{index=1}
+        only-arches: [aarch64]
+        x-checker-data: {type: pypi, name: numpy, packagetype: bdist_wheel}
+
+  - name: protobuf
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app protobuf*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/9c/f2/80ffc4677aac1bc3519b26bc7f7f5de7fce0ee2f7e36e59e27d8beb32dd1/protobuf-6.32.0-py3-none-any.whl
+      sha256: ba377e5b67b908c8f3072a57b63e2c6a4cbd18aea4ed98d2584350dbf46f2783
+      x-checker-data:
+        type: pypi
+        name: protobuf
+        packagetype: bdist_wheel
+
+  - name: mpmath
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app mpmath*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl
+      sha256: a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c
+      x-checker-data:
+        type: pypi
+        name: mpmath
+        packagetype: bdist_wheel
+        
+  - name: sympy
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app sympy*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
+      sha256: e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5
+      x-checker-data:
+        type: pypi
+        name: sympy
+        packagetype: bdist_wheel
+                        
+  - name: flatbuffers
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app flatbuffers*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/b8/25/155f9f080d5e4bc0082edfda032ea2bc2b8fab3f4d25d46c1e9dd22a1a89/flatbuffers-25.2.10-py2.py3-none-any.whl
+      sha256: ebba5f4d5ea615af3f7fd70fc310636fbb2bbd1f566ac0a23d98dd412de50051
+      x-checker-data:
+        type: pypi
+        name: flatbuffers
+        packagetype: bdist_wheel
+        
+  - name: humanfriendly
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app humanfriendly*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/f0/0f/310fb31e39e2d734ccaa2c0fb981ee41f7bd5056ce9bc29b2248bd569169/humanfriendly-10.0-py2.py3-none-any.whl
+      sha256: 1697e1a8a8f550fd43c2865cd84542fc175a61dcb779b6fee18cf6b6ccba1477
+      x-checker-data:
+        type: pypi
+        name: humanfriendly
+        packagetype: bdist_wheel
+        
+  - name: coloredlogs
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app coloredlogs*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/a7/06/3d6badcf13db419e25b07041d9c7b4a2c331d3f4e7134445ec5df57714cd/coloredlogs-15.0.1-py2.py3-none-any.whl
+      sha256: 612ee75c546f53e92e70049c9dbfcc18c935a2b9a53b66085ce9ef6a6e5c0934
+      x-checker-data:
+        type: pypi
+        name: coloredlogs
+        packagetype: bdist_wheel
+
+  - name: onnxruntime
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app onnxruntime*.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/0a/50/519828a5292a6ccd8d5cd6d2f72c6b36ea528a2ef68eca69647732539ffa/onnxruntime-1.22.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+        sha256: 2d39a530aff1ec8d02e365f35e503193991417788641b184f5b1e8c9a6d5ce8d
+        only-arches:
+          - x86_64
+        x-checker-data:
+          type: pypi
+          name: onnxruntime
+          packagetype: bdist_wheel
+      - type: file
+        url: https://files.pythonhosted.org/packages/29/e5/00b099b4d4f6223b610421080d0eed9327ef9986785c9141819bbba0d396/onnxruntime-1.22.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl
+        sha256: 984cea2a02fcc5dfea44ade9aca9fe0f7a8a2cd6f77c258fc4388238618f3928
+        only-arches:
+          - aarch64
+        x-checker-data:
+          type: pypi
+          name: onnxruntime
+          packagetype: bdist_wheel
+
+  - name: typing-extensions
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app typing*.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/8b/54/b1ae86c0973cc6f0210b53d508ca3641fb6d0c56823f288d108bc7ab3cc8/typing_extensions-4.13.2-py3-none-any.whl
+        sha256: a439e7c04b49fec3e5d3e2beaa21755cadbbdc391694e28ccdd36ca4a1408f8c
+        x-checker-data:
+          type: pypi
+          name: typing-extensions
+          packagetype: bdist_wheel
+
+  - name: networkx
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app networkx*.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/eb/8d/776adee7bbf76365fdd7f2552710282c79a4ead5d2a46408c9043a2b70ba/networkx-3.5-py3-none-any.whl
+        sha256: 0030d386a9a06dee3565298b4a734b68589749a544acbb6c412dc9e2489ec6ec
+        x-checker-data:
+          type: pypi
+          name: networkx
+          packagetype: bdist_wheel
+
+  - name: fsspec
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app fsspec*.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/2f/e0/014d5d9d7a4564cf1c40b5039bc882db69fd881111e03ab3657ac0b218e2/fsspec-2025.7.0-py3-none-any.whl
+        sha256: 8b012e39f63c7d5f10474de957f3ab793b47b45ae7d39f2fb735f8bbe25c0e21
+        x-checker-data:
+          type: pypi
+          name: fsspec
+          packagetype: bdist_wheel
+          
+  - name: filelock
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app filelock*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/42/14/42b2651a2f46b022ccd948bca9f2d5af0fd8929c4eec235b8d6d844fbe67/filelock-3.19.1-py3-none-any.whl
+      sha256: d38e30481def20772f5baf097c122c3babc4fcdb7e14e57049eb9d88c6dc017d
+      x-checker-data:
+        type: pypi
+        name: filelock
+        packagetype: bdist_wheel
+
+  - name: regex
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app regex*.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/37/a8/b05ccf33ceca0815a1e253693b2c86544932ebcc0049c16b0fbdf18b688b/regex-2025.7.34-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+        sha256: e4636a7f3b65a5f340ed9ddf53585c42e3ff37101d383ed321bfe5660481744b
+        only-arches:
+          - x86_64
+        x-checker-data:
+          type: pypi
+          name: regex
+          packagetype: bdist_wheel
+      - type: file
+        url: https://files.pythonhosted.org/packages/b0/73/536a216d5f66084fb577bb0543b5cb7de3272eb70a157f0c3a542f1c2551/regex-2025.7.34-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+        sha256: 739a74970e736df0773788377969c9fea3876c2fc13d0563f98e5503e5185f46
+        only-arches:
+          - aarch64
+        x-checker-data:
+          type: pypi
+          name: regex
+          packagetype: bdist_wheel
+
+  - name: tqdm
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app tqdm*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/d0/30/dc54f88dd4a2b5dc8a0279bdd7270e735851848b762aeb1c1184ed1f6b14/tqdm-4.67.1-py3-none-any.whl
+      sha256: 26445eca388f82e72884e0d580d5464cd801a3ea01e63e5601bdff9ba6a48de2
+      x-checker-data:
+        type: pypi
+        name: tqdm
+        packagetype: bdist_wheel
+        
+  - name: joblib
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app joblib*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/7d/4f/1195bbac8e0c2acc5f740661631d8d750dc38d4a32b23ee5df3cde6f4e0d/joblib-1.5.1-py3-none-any.whl
+      sha256: 4719a31f054c7d766948dcd83e9613686b27114f190f717cec7eaa2084f8a74a
+      x-checker-data:
+        type: pypi
+        name: joblib
+        packagetype: bdist_wheel
+        
+  - name: click
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app click*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/85/32/10bb5764d90a8eee674e9dc6f4db6a0ab47c8c4d0d83c27f7c39ac415a4d/click-8.2.1-py3-none-any.whl
+      sha256: 61a3265b914e850b85317d0b3109c7f8cd35a670f963866005d6ef1d5175a12b
+      x-checker-data:
+        type: pypi
+        name: click
+        packagetype: bdist_wheel
+
+  - name: nltk
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app nltk*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/4d/66/7d9e26593edda06e8cb531874633f7c2372279c3b0f46235539fe546df8b/nltk-3.9.1-py3-none-any.whl
+      sha256: 4fa26829c5b00715afe3061398a8989dc643b92ce7dd93fb4585a70930d168a1
+      x-checker-data:
+        type: pypi
+        name: nltk
+        packagetype: bdist_wheel
+
+  - name: urllib3
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app urllib3*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/6b/11/cc635220681e93a0183390e26485430ca2c7b5f9d33b15c74c2861cb8091/urllib3-2.4.0-py3-none-any.whl
+      sha256: 4e16665048960a0900c702d4a66415956a584919c03361cac9f1df5c5dd7e813
+      x-checker-data:
+        type: pypi
+        name: urllib3
+        packagetype: bdist_wheel 
+
+          
+  - name: piper-tts
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app piper_tts*.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/2b/73/3d29175cfd93e791baaef3335819778d3f8c8898e2fe16cd0cc8b8163f84/piper_tts-1.3.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux_2_28_x86_64.whl
+        sha256: 234c25474655b26f3418b84522c815c43e9b1bc8a1fdb13c2b28514290c165f0
+        only-arches:
+          - x86_64
+        x-checker-data:
+          type: pypi
+          name: piper_tts
+          packagetype: bdist_wheel
+      - type: file
+        url: https://files.pythonhosted.org/packages/8c/92/f37e5111440fc6c6336f42f8dab88afaa545394784dc930f808a68883c48/piper_tts-1.3.0-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.manylinux_2_28_aarch64.whl
+        sha256: 8d39f85c3f4b6ade512976849579344fc72595ec613f374dbcf8521716398907
+        only-arches:
+          - aarch64
+        x-checker-data:
+          type: pypi
+          name: piper_tts
+          packagetype: bdist_wheel
+
+  - name: alsa-utils
+    buildsystem: simple
+    build-commands:
+      - ./configure --prefix=/app --disable-alsactl --with-udev-rules-dir=/app/lib/udev/rules.d
+      - make
+      - make -C aplay install
+    sources:
+      - type: archive
+        url: https://www.alsa-project.org/files/pub/utils/alsa-utils-1.2.12.tar.bz2
+        sha256: 98bc6677d0c0074006679051822324a0ab0879aea558a8f68b511780d30cd924
+                  
+  - name: python3
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 tts.sh /app/bin/tts
+      - install -Dm755 speech7.py /app/bin/speech7.py
+      - install -Dm755 io.github.fastrizwaan.tts.desktop /app/share/applications/io.github.fastrizwaan.tts.desktop
+    sources:
+      - type: file
+        path: tts.sh
+      - type: file
+        path: speech7.py
+      - type: file
+        path: io.github.fastrizwaan.tts.desktop
+        
+
+
+
