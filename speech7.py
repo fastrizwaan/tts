@@ -2,7 +2,7 @@ import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 gi.require_version('Gdk', '4.0')
-from gi.repository import Gtk, Adw, GLib, Gdk, Gio
+from gi.repository import Gtk, Adw, GLib, Gdk, Gio, Pango
 import subprocess
 import time
 import tempfile
@@ -18,7 +18,6 @@ import json
 import wave
 import urllib
 import string 
-
 # Piper TTS imports - try different import methods
 PIPER_AVAILABLE = False
 piper_tts = None
@@ -55,7 +54,6 @@ class PiperTTSApp(Adw.Application):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.connect('activate', self.on_activate)
-        
         # Initialize voice settings FIRST (before init_piper_tts)
         self.current_voice_name = "en_US-lessac-medium" # Default voice
         self.current_voice_path = None
@@ -64,22 +62,18 @@ class PiperTTSApp(Adw.Application):
         self.piper_voice = None
         self.available_voices = []
         self.use_cli = False
-        
         # Check Piper availability and initialize
         print("Checking Piper TTS availability...")
         self.init_piper_tts()
-        
         # Sentence processing
         self.sentences = []
         self.current_sentence_idx = 0
         self.resume_sentence_idx = 0  # For pause/resume functionality
-        
         # Processing queue and threading
         self.processing_queue = queue.Queue()
         self.processing_thread = None
         self.processing_active = False
         self.processing_event = threading.Event()
-        
         # Playback state
         self.current_player = None
         self.current_timer = None
@@ -88,14 +82,17 @@ class PiperTTSApp(Adw.Application):
         self.highlight_tag = None
         self.is_playing = False
         self.is_paused = False
-        
+        self.highlight_all_words = False
+        self.use_bold_highlight = True
         # Reading mode options
         self.reading_mode = "from_start"  # "from_start", "from_cursor", "from_current_sentence"
-        
         # Word highlighting optimization
         self.current_highlighted_word = -1
         self.highlight_refresh_rate = 25 # ms
         
+        # Zoom settings
+        self.default_font_size = 12
+        self.current_font_size = self.default_font_size
         print("Piper TTS App initialized successfully!")
 
     def init_piper_tts(self):
@@ -119,7 +116,6 @@ class PiperTTSApp(Adw.Application):
                 return
             else:
                 raise Exception("No Piper TTS method available")
-                
         except Exception as e:
             print(f"Error initializing Piper TTS: {e}")
             raise Exception("Piper TTS not available")
@@ -156,22 +152,17 @@ class PiperTTSApp(Adw.Application):
         model_name = self.current_voice_name
         model_dir = os.path.expanduser("~/.var/app/io.github.fastrizwaan.tts/data/piper_models")
         os.makedirs(model_dir, exist_ok=True)
-        
         model_onnx = os.path.join(model_dir, f"{model_name}.onnx")
         model_json = os.path.join(model_dir, f"{model_name}.onnx.json")
-        
         if not os.path.exists(model_onnx) or not os.path.exists(model_json):
             print(f"Downloading Piper model {model_name}...")
             voice_parts = model_name.split('-')
             lang = voice_parts[0] # e.g., en_US, hi_IN
             speaker = voice_parts[1] # e.g., lessac, pratham
             quality = voice_parts[2] # e.g., medium
-            
             # Handle different language codes for download URLs
             lang_code = lang.split('_')[0]  # en, hi, es, fr, de, etc.
-            
             base_url = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/{lang_code}/{lang}/{speaker}/{quality}/"
-            
             try:
                 print(f"Downloading from: {base_url}")
                 urllib.request.urlretrieve(base_url + f"{model_name}.onnx", model_onnx)
@@ -180,7 +171,6 @@ class PiperTTSApp(Adw.Application):
             except Exception as e:
                 print(f"Error downloading model: {e}")
                 raise
-        
         self.current_voice_path = model_onnx
 
     def get_cursor_position(self):
@@ -193,16 +183,13 @@ class PiperTTSApp(Adw.Application):
     def find_sentence_at_cursor(self):
         """Find the sentence index that contains the cursor position"""
         cursor_pos = self.get_cursor_position()
-        
         for i, sentence in enumerate(self.sentences):
             if sentence.start_char <= cursor_pos <= sentence.end_char:
                 return i
-        
         # If cursor is between sentences, find the next sentence
         for i, sentence in enumerate(self.sentences):
             if cursor_pos < sentence.start_char:
                 return i
-        
         return len(self.sentences) - 1 if self.sentences else 0
 
     def determine_start_sentence(self):
@@ -241,19 +228,16 @@ class PiperTTSApp(Adw.Application):
             # For Hindi text, ensure proper Unicode normalization
             import unicodedata
             text = unicodedata.normalize('NFC', text)
-            
             # Add some basic Hindi-specific preprocessing
             # Replace common English words that might be mixed in
             english_to_hindi_numbers = {
                 '0': '०', '1': '१', '2': '२', '3': '३', '4': '४',
                 '5': '५', '6': '६', '7': '७', '8': '८', '9': '९'
             }
-            
             # Only replace if the text seems to contain Devanagari
             if any('\u0900' <= c <= '\u097F' for c in text):
                 for eng, hin in english_to_hindi_numbers.items():
                     text = text.replace(eng, hin)
-        
         return text
 
     def start_sentence_playback(self, sentence):
@@ -262,29 +246,24 @@ class PiperTTSApp(Adw.Application):
             print(f"Audio file not found for sentence: {sentence.audio_file}")
             self.move_to_next_sentence()
             return
-        
         # Validate the audio file
         try:
             file_size = os.path.getsize(sentence.audio_file)
             print(f"Playing audio file: {sentence.audio_file}, size: {file_size} bytes")
-            
             if file_size < 100: # WAV files should be at least 100+ bytes
                 print("Audio file too small, likely empty")
                 self.move_to_next_sentence()
                 return
-                
             # Validate it's a proper WAV file
             with wave.open(sentence.audio_file, 'rb') as wf:
                 frames = wf.getnframes()
                 rate = wf.getframerate()
                 duration = frames / float(rate)
                 print(f"Audio duration: {duration:.2f} seconds")
-                
         except Exception as e:
             print(f"Audio file validation error: {e}")
             self.move_to_next_sentence()
             return
-        
         try:
             # Start audio playback with better error handling
             print(f"Starting aplay for: {sentence.audio_file}")
@@ -293,7 +272,6 @@ class PiperTTSApp(Adw.Application):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
-            
             # Check if process started successfully
             time.sleep(0.1) # Give it a moment
             if self.current_player.poll() is not None:
@@ -303,9 +281,7 @@ class PiperTTSApp(Adw.Application):
                 self.update_status(f"Audio playback failed: {stderr.decode()}")
                 self.move_to_next_sentence()
                 return
-            
             print(f"Audio playback started successfully")
-            
             # Start precise word highlighting
             self.playback_start_time = time.time()
             self.current_highlighted_word = -1
@@ -313,15 +289,11 @@ class PiperTTSApp(Adw.Application):
                 self.highlight_refresh_rate,
                 lambda: self.update_word_highlight(sentence)
             )
-            
             self.update_status(f"Playing sentence {self.current_sentence_idx + 1}")
-            
             # Calculate duration and schedule next sentence
             duration = self.get_audio_duration(sentence.audio_file)
-            
             # Schedule moving to next sentence
             GLib.timeout_add(int(duration * 1000) + 500, self.move_to_next_sentence)
-            
         except FileNotFoundError:
             print("aplay command not found")
             self.update_status("aplay not found - install alsa-utils: sudo apt install alsa-utils")
@@ -341,18 +313,15 @@ class PiperTTSApp(Adw.Application):
             # For English text, clean more aggressively using string.punctuation
             # First handle some special characters that should become spaces
             text = text.replace('•', ' ').replace('—', ' ').replace('–', ' ').replace('…', ' ')
-            
             # Split into words and clean each word individually
             words = text.split()
             cleaned_words = []
-            
             for word in words:
                 # Strip punctuation from both ends, but preserve apostrophes and hyphens in the middle
                 cleaned_word = word.strip(string.punctuation)
                 # Only keep non-empty words
                 if cleaned_word:
                     cleaned_words.append(cleaned_word)
-            
             # Join back and normalize whitespace
             return ' '.join(cleaned_words)
 
@@ -360,48 +329,37 @@ class PiperTTSApp(Adw.Application):
         """Generate speech using Piper TTS with language-specific preprocessing and speed control"""
         try:
             print(f"Generating speech for: {text[:50]}... at speed {self.speech_rate}")
-            
             # Preprocess text based on current voice language
             lang_code = self.current_voice_name.split('-')[0]
             preprocessed_text = self.preprocess_text_for_language(text.strip(), lang_code)
-            
             if not preprocessed_text:
                 print("Empty text after preprocessing, skipping")
                 return False
-            
             # Clean the text using the new method
             clean_text = self.clean_text_for_tts(preprocessed_text, lang_code)
-            
             if not clean_text:
                 print("Empty text after cleaning, skipping")
                 return False
-            
             print(f"Cleaned text for {lang_code}: {clean_text}")
-            
             if self.use_cli:
                 # Use CLI method with speed control
                 if not self.current_voice_path or not os.path.exists(self.current_voice_path):
                     print(f"Voice model not found: {self.current_voice_path}")
                     return False
-                
                 # Create temporary WAV file for original speech
                 temp_wav = output_path + "_temp.wav"
-                
                 cmd = [
                     'piper',
                     '--model', self.current_voice_path,
                     '--output_file', temp_wav
                 ]
-                
                 # Add speed control if available in Piper CLI
                 # Note: Some versions of Piper CLI support --length_scale parameter
                 if self.speech_rate != 1.0:
                     # length_scale is inverse of speed (smaller = faster, larger = slower)
                     length_scale = 1.0 / self.speech_rate
                     cmd.extend(['--length_scale', str(length_scale)])
-                
                 print(f"Running command: {' '.join(cmd)}")
-                
                 try:
                     process = subprocess.run(
                         cmd,
@@ -410,13 +368,11 @@ class PiperTTSApp(Adw.Application):
                         capture_output=True,
                         timeout=30
                     )
-                    
                     print(f"Piper return code: {process.returncode}")
                     if process.stdout:
                         print(f"Piper stdout: {process.stdout}")
                     if process.stderr:
                         print(f"Piper stderr: {process.stderr}")
-                    
                     if process.returncode == 0 and os.path.exists(temp_wav):
                         # If Piper CLI doesn't support speed control, use sox for post-processing
                         if self.speech_rate != 1.0 and '--length_scale' not in ' '.join(cmd):
@@ -436,10 +392,8 @@ class PiperTTSApp(Adw.Application):
                         else:
                             # Piper handled speed or speed is 1.0
                             os.rename(temp_wav, output_path)
-                        
                         file_size = os.path.getsize(output_path)
                         print(f"Audio generated successfully via CLI: {output_path} ({file_size} bytes)")
-                        
                         # Validate the generated file
                         try:
                             with wave.open(output_path, 'rb') as wf:
@@ -456,20 +410,17 @@ class PiperTTSApp(Adw.Application):
                     else:
                         print(f"CLI generation failed or file not created")
                         return False
-                        
                 except subprocess.TimeoutExpired:
                     print("Piper CLI timeout")
                     return False
                 except Exception as e:
                     print(f"CLI error: {e}")
                     return False
-            
             else:
                 # Use Python API with speed control
                 if not self.piper_voice:
                     print("Piper voice not loaded")
                     return False
-                
                 try:
                     # Get config for proper audio parameters
                     model_json = self.current_voice_path + '.json'
@@ -481,14 +432,11 @@ class PiperTTSApp(Adw.Application):
                     else:
                         sample_rate = 22050
                         print("No voice config found, using default sample rate")
-                    
                     # Create temporary file for original synthesis
                     temp_wav = output_path + "_temp.wav"
-                    
                     # Try direct synthesis to bytes first
                     print("Attempting direct synthesis...")
                     audio_bytes = b""
-                    
                     try:
                         # Check if Piper voice supports length_scale parameter
                         synthesis_kwargs = {}
@@ -500,7 +448,6 @@ class PiperTTSApp(Adw.Application):
                                 print(f"Using Piper length_scale: {length_scale}")
                             except:
                                 print("Piper voice doesn't support length_scale parameter")
-                        
                         # Use the synthesize method that returns audio data
                         try:
                             if hasattr(self.piper_voice, 'synthesize_stream_raw'):
@@ -513,12 +460,10 @@ class PiperTTSApp(Adw.Application):
                                     wav_file.setsampwidth(2)
                                     wav_file.setframerate(sample_rate)
                                     self.piper_voice.synthesize(clean_text, wav_file, **synthesis_kwargs)
-                                
                                 # Read the temp file
                                 if os.path.exists(temp_wav):
                                     with wave.open(temp_wav, 'rb') as wf:
                                         audio_bytes = wf.readframes(wf.getnframes())
-                        
                         except TypeError:
                             # synthesis_kwargs not supported, synthesize without speed control
                             print("Voice synthesis doesn't support speed parameters")
@@ -531,13 +476,10 @@ class PiperTTSApp(Adw.Application):
                                     wav_file.setsampwidth(2)
                                     wav_file.setframerate(sample_rate)
                                     self.piper_voice.synthesize(clean_text, wav_file)
-                                
                                 if os.path.exists(temp_wav):
                                     with wave.open(temp_wav, 'rb') as wf:
                                         audio_bytes = wf.readframes(wf.getnframes())
-                        
                         print(f"Generated {len(audio_bytes)} bytes of raw audio")
-                        
                         if len(audio_bytes) > 0:
                             # Write to temp WAV file first
                             with wave.open(temp_wav, "wb") as wav_file:
@@ -545,7 +487,6 @@ class PiperTTSApp(Adw.Application):
                                 wav_file.setsampwidth(2) # 16-bit
                                 wav_file.setframerate(sample_rate)
                                 wav_file.writeframes(audio_bytes)
-                            
                             # Apply speed change if needed and not handled by Piper
                             if self.speech_rate != 1.0 and 'length_scale' not in synthesis_kwargs:
                                 print(f"Applying speed change using sox: {self.speech_rate}x")
@@ -564,30 +505,25 @@ class PiperTTSApp(Adw.Application):
                             else:
                                 # Speed was handled by Piper or is 1.0
                                 os.rename(temp_wav, output_path)
-                            
                             file_size = os.path.getsize(output_path)
                             print(f"Wrote WAV file: {file_size} bytes")
                             return file_size > 44
                         else:
                             print("No audio data generated")
                             return False
-                            
                     except AttributeError:
                         print("Direct synthesis method not available, trying file-based method")
-                        
                         # Alternative: use the file-based synthesis
                         with wave.open(temp_wav, "wb") as wav_file:
                             wav_file.setnchannels(1)
                             wav_file.setsampwidth(2)
                             wav_file.setframerate(sample_rate)
-                            
                             # Try the original method
                             try:
                                 self.piper_voice.synthesize(clean_text, wav_file)
                             except Exception as synth_error:
                                 print(f"Synthesis failed: {synth_error}")
                                 return False
-                        
                         # Apply speed change if needed
                         if self.speech_rate != 1.0:
                             print(f"Applying speed change using sox: {self.speech_rate}x")
@@ -604,12 +540,10 @@ class PiperTTSApp(Adw.Application):
                                 os.rename(temp_wav, output_path)
                         else:
                             os.rename(temp_wav, output_path)
-                    
                     # Validate the final result
                     if os.path.exists(output_path):
                         file_size = os.path.getsize(output_path)
                         print(f"Final file size: {file_size} bytes")
-                        
                         if file_size > 44:
                             try:
                                 with wave.open(output_path, 'rb') as wf:
@@ -626,13 +560,11 @@ class PiperTTSApp(Adw.Application):
                     else:
                         print("Output file not created")
                         return False
-                        
                 except Exception as synth_error:
                     print(f"Synthesis error: {synth_error}")
                     import traceback
                     traceback.print_exc()
                     return False
-                
         except Exception as e:
             print(f"Error generating speech: {e}")
             import traceback
@@ -683,7 +615,6 @@ class PiperTTSApp(Adw.Application):
         info_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         info_box.add_css_class("card")
         info_box.set_margin_bottom(6)
-        
         tts_status = "✅ Piper Available"
         lang_info = self.get_language_info()
         info_label = Gtk.Label(label=f"{tts_status} | {lang_info}")
@@ -707,16 +638,16 @@ class PiperTTSApp(Adw.Application):
         # Add sample text with Hindi example
         buffer = self.textview.get_buffer()
         sample_text = """Welcome to Piper TTS with enhanced reading features! 
-
 This application now supports:
 • Reading from cursor position
 • Pause and resume functionality
 • Multi-language support including Hindi
-
 नमस्ते! यह एक हिंदी का उदाहरण है। पाइपर टीटीएस अब हिंदी भाषा का भी समर्थन करता है।
-
 Try placing your cursor anywhere in the text and selecting "From Cursor" mode to start reading from that position."""
         buffer.set_text(sample_text)
+        
+        # Set initial font size
+        self.set_font_size(self.current_font_size)
         
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_child(self.textview)
@@ -737,7 +668,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         self.speed_scale.set_value_pos(Gtk.PositionType.RIGHT)
         self.speed_scale.set_hexpand(True)
         self.speed_scale.connect("value-changed", self.on_speed_changed)
-        
         speed_box.append(speed_label)
         speed_box.append(self.speed_scale)
         control_panel.append(speed_box)
@@ -745,7 +675,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         # Button container
         button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         button_box.set_halign(Gtk.Align.CENTER)
-        
         self.speak_button = Gtk.Button(label="🔊 Speak")
         self.speak_button.add_css_class("suggested-action")
         self.speak_button.connect("clicked", self.on_speak)
@@ -765,7 +694,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         test_button = Gtk.Button(label="🎵 Test Voice")
         test_button.connect("clicked", self.test_voice)
         button_box.append(test_button)
-        
         control_panel.append(button_box)
         main_box.append(control_panel)
         
@@ -787,26 +715,214 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         
         # Set up highlight tags
         buffer = self.textview.get_buffer()
-        
         # Word highlighting
         rgba_word = Gdk.RGBA()
         rgba_word.parse("rgba(255, 255, 0, 0.8)")
-        self.highlight_tag = buffer.create_tag("highlight",
-                                             background="yellow",
-                                             background_rgba=rgba_word,
-                                             weight=700)
+        self.use_bold_highlight = True
+        self.use_underline_highlight = False
+        self.use_italics_highlight = False
+        self.use_color_highlight = False
+        if self.use_bold_highlight: 
+            self.highlight_tag = buffer.create_tag("highlight",
+                                                 background="yellow",
+                                                 background_rgba=rgba_word,
+                                                 weight=700)
+            # Sentence highlighting
+            rgba_sentence = Gdk.RGBA()
+            rgba_sentence.parse("rgba(135, 206, 250, 0.3)")
+            self.sentence_tag = buffer.create_tag("sentence",
+                                                background_rgba=rgba_sentence)
+            # Next word preview
+            rgba_next = Gdk.RGBA()
+            rgba_next.parse("rgba(144, 238, 144, 0.4)")
+            self.next_word_tag = buffer.create_tag("next_word",
+                                                 background_rgba=rgba_next,
+                                                 weight=700)
+        elif self.use_underline_highlight:
+            self.highlight_tag = buffer.create_tag("highlight",
+                                                 background="yellow",
+                                                 background_rgba=rgba_word,
+                                                 weight=400)
+            # Sentence highlighting
+            rgba_sentence = Gdk.RGBA()
+            rgba_sentence.parse("rgba(135, 206, 250, 0.3)")
+            self.sentence_tag = buffer.create_tag("sentence",
+                                                background_rgba=rgba_sentence)
+            # Next word preview
+            rgba_next = Gdk.RGBA()
+            rgba_next.parse("rgba(144, 238, 144, 0.4)")
+            self.next_word_tag = buffer.create_tag("next_word",
+                                                 background_rgba=rgba_next,
+                                                 weight=400)
+        elif self.use_italics_highlight:
+            self.highlight_tag = buffer.create_tag("highlight",
+                                                 background="yellow",
+                                                 background_rgba=rgba_word,
+                                                 weight=400)
+            # Sentence highlighting
+            rgba_sentence = Gdk.RGBA()
+            rgba_sentence.parse("rgba(135, 206, 250, 0.3)")
+            self.sentence_tag = buffer.create_tag("sentence",
+                                                background_rgba=rgba_sentence)
+            # Next word preview
+            rgba_next = Gdk.RGBA()
+            rgba_next.parse("rgba(144, 238, 144, 0.4)")
+            self.next_word_tag = buffer.create_tag("next_word",
+                                                 background="yellow",
+                                                 weight=400)
+        elif self.use_color_highlight:
+            self.highlight_tag = buffer.create_tag("highlight",
+                                                 background="yellow",
+                                                 background_rgba=rgba_word,
+                                                 weight=400)
+            # Sentence highlighting
+            rgba_sentence = Gdk.RGBA()
+            rgba_sentence.parse("rgba(135, 206, 250, 0.3)")
+            self.sentence_tag = buffer.create_tag("sentence",
+                                                background_rgba=rgba_sentence)
+            # Next word preview
+            rgba_next = Gdk.RGBA()
+            rgba_next.parse("rgba(144, 238, 144, 0.4)")
+            self.next_word_tag = buffer.create_tag("next_word",
+                                                background_rgba=rgba_next,                           
+                                                weight=400)                                                               
+                                                  
+        else:
+            '''Do not highlight individual words'''
+            self.highlight_tag = buffer.create_tag("highlight",
+                                                 background="yellow",
+                                                 background_rgba=rgba_word
+                                                 )
+            # Sentence highlighting
+            rgba_sentence = Gdk.RGBA()
+            rgba_sentence.parse("rgba(135, 206, 250, 0.3)")
+            self.sentence_tag = buffer.create_tag("sentence",
+                                                background_rgba=rgba_sentence)
+            # Next word preview
+            rgba_next = Gdk.RGBA()
+            rgba_next.parse("rgba(144, 238, 144, 0.4)")
+            self.next_word_tag = buffer.create_tag("next_word",
+                                                 background_rgba=rgba_next
+                                                )
         
-        # Sentence highlighting
-        rgba_sentence = Gdk.RGBA()
-        rgba_sentence.parse("rgba(135, 206, 250, 0.3)")
-        self.sentence_tag = buffer.create_tag("sentence",
-                                            background_rgba=rgba_sentence)
+        # Setup keyboard shortcuts
+        self.setup_keyboard_shortcuts()
+
+    def setup_keyboard_shortcuts(self):
+        """Setup keyboard shortcuts for the application"""
+        # Create key controller for the window
+        key_controller = Gtk.EventControllerKey.new()
+        key_controller.connect("key-pressed", self.on_key_pressed)
+        self.window.add_controller(key_controller)
         
-        # Next word preview
-        rgba_next = Gdk.RGBA()
-        rgba_next.parse("rgba(144, 238, 144, 0.4)")
-        self.next_word_tag = buffer.create_tag("next_word",
-                                             background_rgba=rgba_next)
+        # Setup scroll zoom
+        self.setup_scroll_zoom()
+
+    def setup_scroll_zoom(self):
+        """Set up zooming with Ctrl+scroll wheel"""
+        # Create a scroll controller for handling wheel events
+        scroll_controller = Gtk.EventControllerScroll.new(
+            Gtk.EventControllerScrollFlags.VERTICAL | 
+            Gtk.EventControllerScrollFlags.DISCRETE
+        )
+        
+        # Connect to the scroll event
+        scroll_controller.connect("scroll", self.on_scroll)
+        
+        # Add the controller to the textview
+        self.textview.add_controller(scroll_controller)
+        
+        # Store the controller reference
+        self.scroll_controller = scroll_controller
+
+    def on_scroll(self, controller, dx, dy):
+        """Handle scroll events for zooming"""
+        # Check if Ctrl key is pressed
+        state = controller.get_current_event_state()
+        ctrl_pressed = (state & Gdk.ModifierType.CONTROL_MASK) != 0
+        
+        if ctrl_pressed:
+            # Calculate new font size - use larger steps for faster zooming
+            step = 1  # 1 point step size
+            
+            if dy < 0:
+                # Scroll up - zoom in
+                new_size = min(self.current_font_size + step, 72)  # Max 72pt
+            else:
+                # Scroll down - zoom out
+                new_size = max(self.current_font_size - step, 6)   # Min 6pt
+            
+            # Only update if there's a change
+            if new_size != self.current_font_size:
+                self.current_font_size = new_size
+                self.set_font_size(self.current_font_size)
+                self.update_status(f"Font size: {int(new_size)}pt")
+            
+            # Prevent further handling of this scroll event
+            return True
+        
+        # Not zooming, let the event propagate for normal scrolling
+        return False
+
+    def on_key_pressed(self, controller, keyval, keycode, state):
+        """Handle key press events"""
+        ctrl = (state & Gdk.ModifierType.CONTROL_MASK) != 0
+        shift = (state & Gdk.ModifierType.SHIFT_MASK) != 0
+        
+        if ctrl and not shift:
+            if keyval == Gdk.KEY_equal:  # Ctrl+Plus (usually key = on US keyboards)
+                self.zoom_in()
+                return True
+            elif keyval == Gdk.KEY_minus:  # Ctrl+Minus
+                self.zoom_out()
+                return True
+            elif keyval == Gdk.KEY_0:  # Ctrl+0
+                self.reset_zoom()
+                return True
+                
+        return False  # Let other key events propagate
+
+    def zoom_in(self):
+        """Zoom in by increasing font size"""
+        new_size = min(self.current_font_size + 1, 72)  # Max 72pt
+        if new_size != self.current_font_size:
+            self.current_font_size = new_size
+            self.set_font_size(self.current_font_size)
+            self.update_status(f"Font size: {int(new_size)}pt")
+
+    def zoom_out(self):
+        """Zoom out by decreasing font size"""
+        new_size = max(self.current_font_size - 1, 6)  # Min 6pt
+        if new_size != self.current_font_size:
+            self.current_font_size = new_size
+            self.set_font_size(self.current_font_size)
+            self.update_status(f"Font size: {int(new_size)}pt")
+
+    def reset_zoom(self):
+        """Reset zoom to default font size"""
+        self.current_font_size = self.default_font_size
+        self.set_font_size(self.current_font_size)
+        self.update_status(f"Font size reset to {int(self.default_font_size)}pt")
+
+    def set_font_size(self, size):
+        """Set the font size for the text view"""
+        buffer = self.textview.get_buffer()
+        start, end = buffer.get_bounds()
+        
+        # Remove any existing font size tags
+        tag_table = buffer.get_tag_table()
+        font_tag = tag_table.lookup("font-size")
+        if font_tag:
+            buffer.remove_tag(font_tag, start, end)
+        else:
+            # Create a new font tag
+            font_tag = buffer.create_tag("font-size")
+        
+        # Set the font size
+        font_tag.set_property("size", size * Pango.SCALE)
+        
+        # Apply the tag to the entire buffer
+        buffer.apply_tag(font_tag, start, end)
 
     def get_language_info(self):
         """Get current voice language info"""
@@ -825,22 +941,18 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         """Create reading mode selection menu"""
         menu = Gtk.PopoverMenu()
         menu_model = Gio.Menu()
-        
         reading_modes = [
             ("📖 From Start", "from_start"),
             ("📍 From Cursor", "from_cursor"),
             ("📄 From Current Sentence", "from_current_sentence")
         ]
-        
         for label, mode in reading_modes:
             action_name = f"app.reading_mode_{mode}"
             menu_model.append(label, action_name)
-            
             # Create action
             action = Gio.SimpleAction.new(f"reading_mode_{mode}", None)
             action.connect("activate", lambda a, p, m=mode: self.on_reading_mode_selected(m))
             self.add_action(action)
-        
         menu.set_menu_model(menu_model)
         self.reading_mode_button.set_popover(menu)
 
@@ -859,14 +971,12 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         """Create voice selection menu with language grouping"""
         menu = Gtk.PopoverMenu()
         menu_model = Gio.Menu()
-        
         # Group voices by language
         voice_groups = {
             'English': [],
             'हिंदी (Hindi)': [],
             'Other Languages': []
         }
-        
         for voice in self.available_voices:
             if voice.startswith('en_'):
                 voice_groups['English'].append(voice)
@@ -874,7 +984,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                 voice_groups['हिंदी (Hindi)'].append(voice)
             else:
                 voice_groups['Other Languages'].append(voice)
-        
         # Add voices to menu by groups
         for group_name, voices in voice_groups.items():
             if voices:
@@ -882,14 +991,11 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                 for voice in voices:
                     action_name = f"app.select_voice_{voice.replace('-', '_').replace('.', '_')}"
                     group_section.append(voice, action_name)
-                    
                     # Create action
                     action = Gio.SimpleAction.new(f"select_voice_{voice.replace('-', '_').replace('.', '_')}", None)
                     action.connect("activate", lambda a, p, v=voice: self.on_voice_selected(v))
                     self.add_action(action)
-                
                 menu_model.append_section(group_name, group_section)
-        
         menu.set_menu_model(menu_model)
         self.voice_button.set_popover(menu)
 
@@ -897,12 +1003,10 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         """Handle voice selection with language detection"""
         self.current_voice_name = voice_name
         self.voice_button.set_label(f"Voice: {voice_name}")
-        
         try:
             self.load_current_voice()
             if not self.use_cli and PIPER_AVAILABLE:
                 self.piper_voice = PiperVoice.load(self.current_voice_path)
-            
             lang_info = self.get_language_info()
             self.update_status(f"Voice changed to {voice_name} ({lang_info})")
         except Exception as e:
@@ -916,7 +1020,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         """Test the current voice with language-appropriate text"""
         # Choose test text based on language
         lang_code = self.current_voice_name.split('-')[0]
-        
         if lang_code.startswith('hi'):
             test_text = "नमस्ते, यह हिंदी आवाज़ का परीक्षण है। पाइपर टीटीएस हिंदी भाषा का समर्थन करता है।"
         elif lang_code.startswith('es'):
@@ -927,23 +1030,18 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
             test_text = "Hallo, das ist ein Test der deutschen Stimme."
         else:
             test_text = "Hello, this is a test of the current voice with enhanced features."
-        
         def test_in_thread():
             try:
                 with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                     wav_file = f.name
-                
                 success = self.generate_speech_with_piper(test_text, wav_file)
-                
                 if success and os.path.exists(wav_file):
                     # Play the test audio
                     GLib.idle_add(lambda: self.play_test_audio(wav_file))
                 else:
                     GLib.idle_add(lambda: self.update_status("Test generation failed"))
-                    
             except Exception as e:
                 GLib.idle_add(lambda: self.update_status(f"Test error: {e}"))
-        
         self.update_status("Testing voice...")
         threading.Thread(target=test_in_thread, daemon=True).start()
 
@@ -953,7 +1051,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
             print(f"Attempting to play audio file: {wav_file}")
             print(f"File exists: {os.path.exists(wav_file)}")
             print(f"File size: {os.path.getsize(wav_file) if os.path.exists(wav_file) else 0} bytes")
-            
             # Check if file is valid WAV
             try:
                 with wave.open(wav_file, 'rb') as wf:
@@ -962,7 +1059,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                 print(f"WAV file validation error: {wav_error}")
                 self.update_status("Generated audio file is invalid")
                 return
-            
             # Try aplay with explicit error capture
             try:
                 result = subprocess.run(['aplay', wav_file],
@@ -978,7 +1074,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                 self.update_status("Audio playback timed out")
             except FileNotFoundError:
                 self.update_status("aplay not found - install alsa-utils")
-            
             # Clean up after a delay
             def cleanup():
                 time.sleep(3)
@@ -987,7 +1082,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                 except:
                     pass
             threading.Thread(target=cleanup, daemon=True).start()
-            
         except Exception as e:
             print(f"Playback error: {e}")
             self.update_status(f"Playback error: {e}")
@@ -996,89 +1090,72 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         """Show performance optimization settings"""
         dialog = Gtk.Dialog(title="Performance Settings", parent=self.window, modal=True)
         dialog.set_default_size(450, 400)
-        
         content = dialog.get_content_area()
         content.set_spacing(12)
         content.set_margin_top(12)
         content.set_margin_bottom(12)
         content.set_margin_start(12)
         content.set_margin_end(12)
-        
         # TTS Status
         tts_status_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         tts_label = Gtk.Label(label="TTS Engine Status:")
         tts_label.add_css_class("heading")
         tts_label.set_halign(Gtk.Align.START)
-        
         status_text = "Piper CLI Available" if self.use_cli else "Piper Python Available"
         status_detail = Gtk.Label(label=status_text)
         status_detail.add_css_class("dim-label")
-        
         tts_status_box.append(tts_label)
         tts_status_box.append(status_detail)
         content.append(tts_status_box)
-        
         # Highlight refresh rate
         rate_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         rate_label = Gtk.Label(label="Word highlight refresh rate (ms):")
         rate_label.set_hexpand(True)
         rate_label.set_halign(Gtk.Align.START)
-        
         rate_spin = Gtk.SpinButton()
         rate_spin.set_range(25, 200)
         rate_spin.set_value(self.highlight_refresh_rate)
         rate_spin.set_increments(25, 25)
-        
         rate_box.append(rate_label)
         rate_box.append(rate_spin)
         content.append(rate_box)
-        
         # Voice info
         voice_info = Gtk.Label(label=f"Current Voice: {self.current_voice_name}")
         voice_info.add_css_class("heading")
         content.append(voice_info)
-        
         # Language support info
         lang_info = Gtk.Label(label="Supported Languages:\n• English (en_US, en_GB)\n• हिंदी Hindi (hi_IN)\n• Español Spanish (es_ES)\n• Français French (fr_FR)\n• Deutsch German (de_DE)")
         lang_info.set_halign(Gtk.Align.START)
         lang_info.add_css_class("dim-label")
         content.append(lang_info)
-        
         # Speed control info
         speed_info = Gtk.Label(label="Speed Control:\n• Uses Piper's length_scale parameter when available\n• Falls back to Sox for post-processing speed changes\n• Requires Sox for full speed control: sudo apt install sox")
         speed_info.set_halign(Gtk.Align.START)
         speed_info.add_css_class("dim-label")
         content.append(speed_info)
-        
         # Troubleshooting
         trouble_label = Gtk.Label(label="Troubleshooting:")
         trouble_label.set_halign(Gtk.Align.START)
         trouble_label.add_css_class("heading")
         content.append(trouble_label)
-        
         trouble_text = Gtk.Label(label="If TTS is not working:\n• Install piper binary: sudo apt install piper\n• Or try: pip install piper-phonemize\n• For speed control: sudo apt install sox\n• For Hindi: Ensure proper Unicode fonts are installed")
         trouble_text.set_halign(Gtk.Align.START)
         trouble_text.add_css_class("dim-label")
         content.append(trouble_text)
-        
         # Action buttons
         button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         button_box.set_halign(Gtk.Align.END)
-        
         apply_button = Gtk.Button(label="Apply")
         apply_button.add_css_class("suggested-action")
         apply_button.connect("clicked", lambda b: self.apply_performance_settings(
             rate_spin.get_value_as_int(),
             dialog
         ))
-        
         cancel_button = Gtk.Button(label="Cancel")
         cancel_button.connect("clicked", lambda b: dialog.close())
-        
         button_box.append(cancel_button)
         button_box.append(apply_button)
         content.append(button_box)
-        
         dialog.show()
 
     def apply_performance_settings(self, refresh_rate, dialog):
@@ -1108,7 +1185,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         try:
             # Check if text contains Hindi or other non-Latin scripts
             has_devanagari = any('\u0900' <= c <= '\u097F' for c in text)
-            
             if has_devanagari:
                 # For Hindi text, use simpler sentence splitting
                 # Hindi sentences typically end with । (devanagari danda) or . ! ?
@@ -1122,33 +1198,26 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                 except LookupError:
                     print("Downloading NLTK punkt tokenizer...")
                     nltk.download('punkt', quiet=True)
-                
                 sentences = nltk.sent_tokenize(text)
         except:
             # Fallback to simple splitting
             sentences = re.split(r'[.!?।]+', text)
             sentences = [s.strip() for s in sentences if s.strip()]
-        
         sentence_data = []
         current_pos = 0
-        
         for sentence in sentences:
             sentence = sentence.strip()
             if not sentence:
                 continue
-                
             # Find the sentence in the original text
             start_pos = text.find(sentence, current_pos)
             if start_pos == -1:
                 start_pos = current_pos
-            
             end_pos = start_pos + len(sentence)
-            
             # Split sentence into words and calculate positions
             words = sentence.split()
             word_starts = []
             word_pos = 0
-            
             for word in words:
                 word_idx = sentence.find(word, word_pos)
                 if word_idx != -1:
@@ -1157,7 +1226,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                 else:
                     word_starts.append(start_pos + word_pos)
                     word_pos += len(word) + 1
-            
             sentence_data.append(SentenceData(
                 text=sentence,
                 start_char=start_pos,
@@ -1165,9 +1233,7 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                 words=words,
                 word_starts=word_starts
             ))
-            
             current_pos = end_pos
-        
         return sentence_data
 
     def on_speak(self, button):
@@ -1175,47 +1241,36 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         buffer = self.textview.get_buffer()
         start, end = buffer.get_bounds()
         text = buffer.get_text(start, end, False).strip()
-        
         if not text:
             self.update_status("No text to speak")
             return
-        
         # Stop any current processing/playback
         self.on_stop(None)
-        
         # Split text into sentences
         self.sentences = self.split_into_sentences(text)
         if not self.sentences:
             self.update_status("No sentences found")
             return
-        
         print(f"Split into {len(self.sentences)} sentences")
-        
         # Determine starting sentence based on reading mode
         start_sentence = self.determine_start_sentence()
-        
         # Reset state
         self.current_sentence_idx = start_sentence
         self.resume_sentence_idx = start_sentence
         self.is_playing = True
         self.is_paused = False
         self.current_highlighted_word = -1
-        
         # Start processing and playback
         self.set_buttons_state(False, True, True)
-        
         mode_info = {
             "from_start": "from beginning",
             "from_cursor": f"from cursor position (sentence {start_sentence + 1})",
             "from_current_sentence": f"from current sentence ({start_sentence + 1})"
         }
-        
         self.update_status(f"Processing sentences {mode_info[self.reading_mode]}...")
         self.update_progress(f"Sentence {self.current_sentence_idx + 1} of {len(self.sentences)}")
-        
         # Start background processing
         self.start_processing_thread()
-        
         # Start with selected sentence
         self.process_and_play_next()
 
@@ -1226,29 +1281,23 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
             self.is_paused = True
             self.is_playing = False
             self.resume_sentence_idx = self.current_sentence_idx
-            
             # Stop current audio immediately
             self.stop_audio_immediately()
-            
             # Stop word highlighting
             if self.word_highlight_timer:
                 GLib.source_remove(self.word_highlight_timer)
                 self.word_highlight_timer = None
-            
             self.pause_button.set_label("▶ Resume")
             self.set_buttons_state(True, True, True)
             self.update_status(f"Paused at sentence {self.current_sentence_idx + 1}")
-            
         else:
             # Resume
             self.is_paused = False
             self.is_playing = True
             self.current_sentence_idx = self.resume_sentence_idx
-            
             self.pause_button.set_label("⏸ Pause")
             self.set_buttons_state(False, True, True)
             self.update_status(f"Resuming from sentence {self.current_sentence_idx + 1}")
-            
             # Resume playback
             self.process_and_play_next()
 
@@ -1258,7 +1307,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         self.processing_event.clear()
         self.processing_thread = threading.Thread(target=self.background_processor, daemon=True)
         self.processing_thread.start()
-        
         # Queue initial processing tasks
         self.queue_upcoming_sentences()
 
@@ -1277,10 +1325,8 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         while self.processing_active:
             try:
                 self.processing_event.wait(timeout=1.0)
-                
                 if not self.processing_active:
                     break
-                
                 processed_any = False
                 while not self.processing_queue.empty() and self.processing_active:
                     try:
@@ -1288,17 +1334,13 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                         if sentence_idx < len(self.sentences) and not self.sentences[sentence_idx].processed:
                             sentence = self.sentences[sentence_idx]
                             print(f"Background processing sentence {sentence_idx + 1}: {sentence.text[:50]}...")
-                            
                             # Generate audio with Piper
                             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                                 wav_file = f.name
-                            
                             try:
                                 success = self.generate_speech_with_piper(sentence.text, wav_file)
-                                
                                 if success:
                                     alignment_data = self.process_sentence_alignment(wav_file, sentence.words)
-                                    
                                     if alignment_data:
                                         sentence.audio_file = wav_file
                                         sentence.word_start_times = alignment_data['word_start_times']
@@ -1314,20 +1356,16 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                                     print(f"Background TTS generation failed for sentence {sentence_idx + 1}")
                                     if os.path.exists(wav_file):
                                         os.unlink(wav_file)
-                                        
                             except Exception as bg_error:
                                 print(f"Background processing error for sentence {sentence_idx + 1}: {bg_error}")
                                 if os.path.exists(wav_file):
                                     os.unlink(wav_file)
-                    
                     except queue.Empty:
                         break
-                
                 if processed_any:
                     self.processing_event.clear()
                 else:
                     self.processing_event.clear()
-                    
             except Exception as e:
                 print(f"Background processor error: {e}")
                 time.sleep(0.5)
@@ -1336,20 +1374,17 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         """Highlight the current sentence being processed/played"""
         buffer = self.textview.get_buffer()
         start, end = buffer.get_bounds()
-        
         # Clear all highlighting
         buffer.remove_tag(self.sentence_tag, start, end)
         buffer.remove_tag(self.highlight_tag, start, end)
         buffer.remove_tag(self.next_word_tag, start, end)
-        
         if self.current_sentence_idx < len(self.sentences):
             sentence = self.sentences[self.current_sentence_idx]
             s_iter = buffer.get_iter_at_offset(sentence.start_char)
             e_iter = buffer.get_iter_at_offset(sentence.end_char)
             buffer.apply_tag(self.sentence_tag, s_iter, e_iter)
-            
-            # Auto-scroll to current sentence
-            self.textview.scroll_to_iter(s_iter, 0.0, False, 0.0, 0.3)
+            # Auto-scroll to current sentence ending
+            self.textview.scroll_to_iter(e_iter, 0.0, False, 0.0, 0.3)
 
     def get_audio_duration(self, wav_file):
         """Get duration of WAV file"""
@@ -1366,18 +1401,14 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         """More efficient and precise word highlighting"""
         if not self.current_player or not self.is_playing or self.is_paused:
             return False
-            
         # Check if player is still running
         if self.current_player.poll() is not None:
             return False
-        
         current_time = time.time() - self.playback_start_time
         buffer = self.textview.get_buffer()
-        
         # Find current and next word
         current_word_idx = -1
         next_word_idx = -1
-        
         if sentence.word_start_times and sentence.word_end_times:
             for i, word in enumerate(sentence.words):
                 if (i < len(sentence.word_start_times) and i < len(sentence.word_end_times)):
@@ -1385,50 +1416,44 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                         current_word_idx = i
                         next_word_idx = i + 1 if i + 1 < len(sentence.words) else -1
                         break
-        
         # Only update highlighting if word changed
         if current_word_idx != self.current_highlighted_word:
             self.current_highlighted_word = current_word_idx
-            
             # Remove previous highlighting
             start, end = buffer.get_bounds()
-            buffer.remove_tag(self.highlight_tag, start, end)
-            buffer.remove_tag(self.next_word_tag, start, end)
-            
+            if self.highlight_all_words:
+                '''Makes each word highlight in sequence for highlighted sentence'''
+                buffer.remove_tag(self.highlight_tag, start, end)
+            if not self.highlight_all_words:
+                buffer.remove_tag(self.next_word_tag, start, end)
             # Highlight current word
             if current_word_idx >= 0 and current_word_idx < len(sentence.word_starts):
                 word = sentence.words[current_word_idx]
                 word_start = sentence.word_starts[current_word_idx]
                 word_end = word_start + len(word)
-                
                 s_iter = buffer.get_iter_at_offset(word_start)
                 e_iter = buffer.get_iter_at_offset(word_end)
                 buffer.apply_tag(self.highlight_tag, s_iter, e_iter)
-                
                 # Auto-scroll to current word
                 self.textview.scroll_to_iter(s_iter, 0.0, False, 0.0, 0.5)
-            
             # Highlight next word preview
             if next_word_idx >= 0 and next_word_idx < len(sentence.word_starts):
                 next_word = sentence.words[next_word_idx]
                 next_word_start = sentence.word_starts[next_word_idx]
                 next_word_end = next_word_start + len(next_word)
-                
                 ns_iter = buffer.get_iter_at_offset(next_word_start)
                 ne_iter = buffer.get_iter_at_offset(next_word_end)
                 buffer.apply_tag(self.next_word_tag, ns_iter, ne_iter)
-        
+                self.textview.scroll_to_iter(ne_iter, 0.0, False, 0.0, 0.5)
         return True
 
     def move_to_next_sentence(self):
         """Move to the next sentence"""
         # Clean up current playback
         self.stop_audio_immediately()
-        
         if self.word_highlight_timer:
             GLib.source_remove(self.word_highlight_timer)
             self.word_highlight_timer = None
-        
         # Clean up current audio file
         if (self.current_sentence_idx < len(self.sentences) and
             self.sentences[self.current_sentence_idx].audio_file):
@@ -1437,18 +1462,15 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                 self.sentences[self.current_sentence_idx].audio_file = None
             except:
                 pass
-        
         # Move to next sentence
         self.current_sentence_idx += 1
         self.resume_sentence_idx = self.current_sentence_idx
         self.current_highlighted_word = -1
-        
         if self.current_sentence_idx < len(self.sentences) and not self.is_paused:
             self.update_progress(f"Sentence {self.current_sentence_idx + 1} of {len(self.sentences)}")
             self.process_and_play_next()
         else:
             self.on_playback_complete()
-        
         return False # Don't repeat timer
 
     def on_playback_complete(self):
@@ -1457,19 +1479,16 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         self.is_paused = False
         self.processing_active = False
         self.processing_event.set() # Wake up thread to exit
-        
         # Clear highlighting
         buffer = self.textview.get_buffer()
         start, end = buffer.get_bounds()
         buffer.remove_tag(self.highlight_tag, start, end)
         buffer.remove_tag(self.sentence_tag, start, end)
         buffer.remove_tag(self.next_word_tag, start, end)
-        
         self.pause_button.set_label("⏸ Pause")
         self.set_buttons_state(True, False, False)
         self.update_status("Complete!")
         self.update_progress("")
-        
         # Clean up any remaining audio files
         for sentence in self.sentences:
             if sentence.audio_file and os.path.exists(sentence.audio_file):
@@ -1485,21 +1504,17 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         self.is_paused = False
         self.processing_active = False
         self.processing_event.set() # Wake up processing thread
-        
         # Stop current playback immediately
         self.stop_audio_immediately()
-        
         if self.word_highlight_timer:
             GLib.source_remove(self.word_highlight_timer)
             self.word_highlight_timer = None
-        
         # Clear highlighting
         buffer = self.textview.get_buffer()
         start, end = buffer.get_bounds()
         buffer.remove_tag(self.highlight_tag, start, end)
         buffer.remove_tag(self.sentence_tag, start, end)
         buffer.remove_tag(self.next_word_tag, start, end)
-        
         # Clean up audio files
         for sentence in self.sentences:
             if sentence.audio_file and os.path.exists(sentence.audio_file):
@@ -1508,14 +1523,12 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                 except:
                     pass
                 sentence.audio_file = None
-        
         # Clear processing queue
         while not self.processing_queue.empty():
             try:
                 self.processing_queue.get_nowait()
             except queue.Empty:
                 break
-        
         self.pause_button.set_label("⏸ Pause")
         self.set_buttons_state(True, False, False)
         self.update_status("Stopped")
@@ -1528,10 +1541,8 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         """Create simple uniform timing"""
         duration = self.get_audio_duration(wav_file)
         word_duration = duration / len(words) if words else 1.0
-        
         word_start_times = [i * word_duration for i in range(len(words))]
         word_end_times = [(i + 1) * word_duration for i in range(len(words))]
-        
         return {
             'word_start_times': word_start_times,
             'word_end_times': word_end_times
@@ -1543,15 +1554,11 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
             if not self.is_paused:
                 self.on_playback_complete()
             return
-        
         sentence = self.sentences[self.current_sentence_idx]
-        
         # Highlight current sentence
         self.highlight_current_sentence()
-        
         # Queue more sentences for background processing
         self.queue_upcoming_sentences()
-        
         if sentence.processed:
             # Already processed in background
             self.start_sentence_playback(sentence)
@@ -1563,16 +1570,12 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
         """Process current sentence in thread"""
         if self.current_sentence_idx >= len(self.sentences):
             return
-            
         sentence = self.sentences[self.current_sentence_idx]
-        
         try:
             print(f"Processing sentence {self.current_sentence_idx + 1}: {sentence.text[:50]}...")
-            
             # Generate audio with Piper
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                 wav_file = f.name
-            
             try:
                 success = self.generate_speech_with_piper(sentence.text, wav_file)
                 if not success:
@@ -1584,15 +1587,12 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                     os.unlink(wav_file)
                 GLib.idle_add(self.move_to_next_sentence)
                 return
-            
             alignment_data = self.process_sentence_alignment(wav_file, sentence.words)
-            
             if alignment_data:
                 sentence.audio_file = wav_file
                 sentence.word_start_times = alignment_data['word_start_times']
                 sentence.word_end_times = alignment_data['word_end_times']
                 sentence.processed = True
-                
                 # Start playback on main thread
                 GLib.idle_add(self.start_sentence_playback, sentence)
             else:
@@ -1600,7 +1600,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                 if os.path.exists(wav_file):
                     os.unlink(wav_file)
                 GLib.idle_add(self.move_to_next_sentence)
-                
         except Exception as e:
             print(f"Processing error: {e}")
             import traceback
@@ -1613,7 +1612,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
             if PIPER_AVAILABLE:
                 print("Using Piper TTS Python library")
                 self.use_cli = False
-                
                 # Load the voice with better error handling
                 try:
                     self.load_current_voice()
@@ -1621,20 +1619,16 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                         print(f"Loading voice from: {self.current_voice_path}")
                         self.piper_voice = PiperVoice.load(self.current_voice_path)
                         print(f"Voice loaded successfully: {self.piper_voice}")
-                        
                         # Test the voice with a simple phrase
                         test_output = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
                         test_output.close()
-                        
                         print("Testing voice synthesis...")
                         success = self.test_voice_synthesis("Test", test_output.name)
-                        
                         if success:
                             print("Voice synthesis test successful")
                         else:
                             print("Voice synthesis test failed - falling back to CLI")
                             self.use_cli = True
-                        
                         # Cleanup test file
                         try:
                             os.unlink(test_output.name)
@@ -1643,15 +1637,12 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                     else:
                         print("Voice model file not found")
                         self.use_cli = True
-                        
                 except Exception as voice_error:
                     print(f"Voice loading failed: {voice_error}")
                     self.use_cli = True
-                
                 # Discover available voices
                 self.discover_cli_voices()
                 return
-                
             elif 'PIPER_CLI_AVAILABLE' in globals() and PIPER_CLI_AVAILABLE:
                 print("Using Piper CLI interface")
                 self.use_cli = True
@@ -1660,7 +1651,6 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                 return
             else:
                 raise Exception("No Piper TTS method available")
-                
         except Exception as e:
             print(f"Error initializing Piper TTS: {e}")
             raise Exception("Piper TTS not available")
@@ -1672,20 +1662,16 @@ Try placing your cursor anywhere in the text and selecting "From Cursor" mode to
                 wav_file.setnchannels(1)
                 wav_file.setsampwidth(2)
                 wav_file.setframerate(22050)
-                
                 # Try synthesis
                 self.piper_voice.synthesize(text, wav_file)
-            
             # Check if file has content
             if os.path.exists(output_path):
                 size = os.path.getsize(output_path)
                 return size > 44
             return False
-            
         except Exception as e:
             print(f"Voice synthesis test error: {e}")
             return False
-
 
 if __name__ == "__main__":
     app = PiperTTSApp(application_id='io.github.fastrizwaan.tts')
