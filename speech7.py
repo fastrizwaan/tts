@@ -17,6 +17,7 @@ import nltk.tokenize
 import json
 import wave
 import urllib
+import string 
 
 # Piper TTS imports - try different import methods
 PIPER_AVAILABLE = False
@@ -330,6 +331,31 @@ class PiperTTSApp(Adw.Application):
             self.update_status(f"Playback error: {e}")
             self.move_to_next_sentence()
 
+    def clean_text_for_tts(self, text, lang_code):
+        """Clean text for TTS using string.punctuation instead of regex"""
+        if not lang_code.startswith('en'):
+            # For non-English languages, be more conservative with text cleaning
+            # Just normalize whitespace
+            return ' '.join(text.split())
+        else:
+            # For English text, clean more aggressively using string.punctuation
+            # First handle some special characters that should become spaces
+            text = text.replace('•', ' ').replace('—', ' ').replace('–', ' ').replace('…', ' ')
+            
+            # Split into words and clean each word individually
+            words = text.split()
+            cleaned_words = []
+            
+            for word in words:
+                # Strip punctuation from both ends, but preserve apostrophes and hyphens in the middle
+                cleaned_word = word.strip(string.punctuation)
+                # Only keep non-empty words
+                if cleaned_word:
+                    cleaned_words.append(cleaned_word)
+            
+            # Join back and normalize whitespace
+            return ' '.join(cleaned_words)
+
     def generate_speech_with_piper(self, text, output_path):
         """Generate speech using Piper TTS with language-specific preprocessing and speed control"""
         try:
@@ -337,22 +363,20 @@ class PiperTTSApp(Adw.Application):
             
             # Preprocess text based on current voice language
             lang_code = self.current_voice_name.split('-')[0]
-            clean_text = self.preprocess_text_for_language(text.strip(), lang_code)
+            preprocessed_text = self.preprocess_text_for_language(text.strip(), lang_code)
             
-            if not clean_text:
+            if not preprocessed_text:
                 print("Empty text after preprocessing, skipping")
                 return False
             
-            # For non-English languages, be more conservative with text cleaning
-            if not lang_code.startswith('en'):
-                # Minimal cleaning for non-English to preserve special characters
-                clean_text = ' '.join(clean_text.split()) # Just normalize whitespace
-            else:
-                # More aggressive cleaning for English
-                clean_text = re.sub(r'[^\w\s\.,!?\-\'"\•]', ' ', clean_text)
-                clean_text = ' '.join(clean_text.split())
+            # Clean the text using the new method
+            clean_text = self.clean_text_for_tts(preprocessed_text, lang_code)
             
-            print(f"Preprocessed text for {lang_code}: {clean_text}")
+            if not clean_text:
+                print("Empty text after cleaning, skipping")
+                return False
+            
+            print(f"Cleaned text for {lang_code}: {clean_text}")
             
             if self.use_cli:
                 # Use CLI method with speed control
