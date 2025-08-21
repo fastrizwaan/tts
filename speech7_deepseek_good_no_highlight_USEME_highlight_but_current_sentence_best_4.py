@@ -35,11 +35,8 @@ def outdir():
     return d
 
 def tokenize(t):
-    # Split on multiple sentence-ending punctuation marks with more flexible spacing
-    # This handles cases where there might be no space or minimal space after punctuation
-    sentences = re.split(r'(?<=[.!?;:—])\s*', t.strip())
-    # Filter out empty strings and strip whitespace
-    return [p.strip() for p in sentences if p.strip()]
+    # Split on multiple sentence-ending punctuation marks: period, exclamation, question, semicolon, colon, dash, emdash
+    return [p.strip() for p in re.split(r'(?<=[.!?;:—-])\s+', t.strip()) if p.strip()]
 
 def f32_to_s16le(x):
     return (np.clip(x, -1, 1) * 32767.0).astype('<i2').tobytes()

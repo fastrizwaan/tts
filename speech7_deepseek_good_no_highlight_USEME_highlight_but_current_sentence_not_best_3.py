@@ -20,7 +20,6 @@ SPEED = 1.0
 SR = 24000
 CHUNK_FRAMES = 2400
 PREROLL = 3  # ~0.1s chunks
-SYNTH_START_SENTENCES = 2  # Number of sentences to synthesize before starting playback
 # ---------------
 
 try:
@@ -35,11 +34,7 @@ def outdir():
     return d
 
 def tokenize(t):
-    # Split on multiple sentence-ending punctuation marks with more flexible spacing
-    # This handles cases where there might be no space or minimal space after punctuation
-    sentences = re.split(r'(?<=[.!?;:—])\s*', t.strip())
-    # Filter out empty strings and strip whitespace
-    return [p.strip() for p in sentences if p.strip()]
+    return [p.strip() for p in re.split(r'(?<=[.!?])\s+', t.strip()) if p.strip()]
 
 def f32_to_s16le(x):
     return (np.clip(x, -1, 1) * 32767.0).astype('<i2').tobytes()
@@ -163,22 +158,6 @@ class TTSWindow(Adw.ApplicationWindow):
         self.next_btn = Gtk.Button(icon_name="media-skip-forward-symbolic", tooltip_text="Next Sentence")
         self.next_btn.connect("clicked", self.on_next)
         self.toolbar.append(self.next_btn)
-        
-        # Separator
-        separator = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
-        self.toolbar.append(separator)
-        
-        # Synth buffer setting
-        synth_label = Gtk.Label(label="Buffer:")
-        synth_label.set_margin_start(6)
-        self.toolbar.append(synth_label)
-        
-        self.synth_spin = Gtk.SpinButton()
-        self.synth_spin.set_range(1, 10)
-        self.synth_spin.set_increments(1, 1)
-        self.synth_spin.set_value(SYNTH_START_SENTENCES)
-        self.synth_spin.set_tooltip_text("Number of sentences to synthesize before starting playback")
-        self.toolbar.append(self.synth_spin)
         
         # Status label
         self.status_label = Gtk.Label(label="Ready")
@@ -391,22 +370,16 @@ class TTSWindow(Adw.ApplicationWindow):
         # Highlight the first sentence before starting playback
         GLib.idle_add(self.highlight_sentence, current_playing)
         
-        # Collect initial buffer - wait for SYNTH_START_SENTENCES instead of PREROLL
-        synth_start_count = int(self.synth_spin.get_value())  # Get current setting from UI
-        sentences_ready = 0
-        while not ctrl.stop.is_set() and sentences_ready < synth_start_count and not eof:
+        # Collect initial buffer
+        while not ctrl.stop.is_set() and len(buf) < PREROLL and not eof:
             idx, pcm, path = qin.get()
             if idx is None:
                 eof = True
                 break
             buf[idx] = (pcm, path)
-            sentences_ready += 1
             # Track generated files but don't delete them
             if path and path not in self.generated_files:
                 self.generated_files.append(path)
-            print(f"[BUFFER] Sentence {idx} ready ({sentences_ready}/{synth_start_count})")
-        
-        print(f"[BUFFER] Starting playback with {sentences_ready} sentences ready")
         
         def restart_player():
             return subprocess.Popen(cmd, stdin=subprocess.PIPE)

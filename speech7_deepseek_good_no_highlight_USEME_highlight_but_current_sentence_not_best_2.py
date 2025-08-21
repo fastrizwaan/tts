@@ -20,7 +20,6 @@ SPEED = 1.0
 SR = 24000
 CHUNK_FRAMES = 2400
 PREROLL = 3  # ~0.1s chunks
-SYNTH_START_SENTENCES = 2  # Number of sentences to synthesize before starting playback
 # ---------------
 
 try:
@@ -35,11 +34,7 @@ def outdir():
     return d
 
 def tokenize(t):
-    # Split on multiple sentence-ending punctuation marks with more flexible spacing
-    # This handles cases where there might be no space or minimal space after punctuation
-    sentences = re.split(r'(?<=[.!?;:—])\s*', t.strip())
-    # Filter out empty strings and strip whitespace
-    return [p.strip() for p in sentences if p.strip()]
+    return [p.strip() for p in re.split(r'(?<=[.!?])\s+', t.strip()) if p.strip()]
 
 def f32_to_s16le(x):
     return (np.clip(x, -1, 1) * 32767.0).astype('<i2').tobytes()
@@ -106,7 +101,6 @@ class TTSWindow(Adw.ApplicationWindow):
         self.total_sentences = 0
         self.sentence_positions = []  # Store start/end positions of each sentence
         self.current_highlight_tag = None
-        self.generated_files = []  # Track generated files to not delete them
         
         # Create UI
         self.build_ui()
@@ -144,10 +138,15 @@ class TTSWindow(Adw.ApplicationWindow):
         self.toolbar = Gtk.Box(spacing=6, margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
         header_bar.pack_start(self.toolbar)
         
-        # Play/Pause button (combined)
-        self.play_pause_btn = Gtk.Button(icon_name="media-playback-start-symbolic", tooltip_text="Play")
-        self.play_pause_btn.connect("clicked", self.on_play_pause)
-        self.toolbar.append(self.play_pause_btn)
+        # Play button
+        self.play_btn = Gtk.Button(icon_name="media-playback-start-symbolic", tooltip_text="Play")
+        self.play_btn.connect("clicked", self.on_play)
+        self.toolbar.append(self.play_btn)
+        
+        # Pause button
+        self.pause_btn = Gtk.Button(icon_name="media-playback-pause-symbolic", tooltip_text="Pause", sensitive=False)
+        self.pause_btn.connect("clicked", self.on_pause)
+        self.toolbar.append(self.pause_btn)
         
         # Stop button
         self.stop_btn = Gtk.Button(icon_name="media-playback-stop-symbolic", tooltip_text="Stop", sensitive=False)
@@ -163,22 +162,6 @@ class TTSWindow(Adw.ApplicationWindow):
         self.next_btn = Gtk.Button(icon_name="media-skip-forward-symbolic", tooltip_text="Next Sentence")
         self.next_btn.connect("clicked", self.on_next)
         self.toolbar.append(self.next_btn)
-        
-        # Separator
-        separator = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
-        self.toolbar.append(separator)
-        
-        # Synth buffer setting
-        synth_label = Gtk.Label(label="Buffer:")
-        synth_label.set_margin_start(6)
-        self.toolbar.append(synth_label)
-        
-        self.synth_spin = Gtk.SpinButton()
-        self.synth_spin.set_range(1, 10)
-        self.synth_spin.set_increments(1, 1)
-        self.synth_spin.set_value(SYNTH_START_SENTENCES)
-        self.synth_spin.set_tooltip_text("Number of sentences to synthesize before starting playback")
-        self.toolbar.append(self.synth_spin)
         
         # Status label
         self.status_label = Gtk.Label(label="Ready")
@@ -249,16 +232,17 @@ class TTSWindow(Adw.ApplicationWindow):
                 
                 # Scroll to make the highlighted text visible
                 self.text_view.scroll_to_iter(start_iter, 0.1, False, 0, 0)
-    
-    def mark_sentence_spoken(self, sentence_idx):
-        # Mark sentence as spoken (grayed out)
-        if 0 <= sentence_idx - 1 < len(self.sentence_positions):
-            start_pos, end_pos = self.sentence_positions[sentence_idx - 1]
-            if start_pos is not None and end_pos is not None:
-                start_iter = self.text_buffer.get_iter_at_offset(start_pos)
-                end_iter = self.text_buffer.get_iter_at_offset(end_pos)
-                self.text_buffer.apply_tag(self.spoken_tag, start_iter, end_iter)
         
+        # Mark previous sentences as spoken
+        if sentence_idx > 1:
+            for i in range(sentence_idx - 1):
+                if 0 <= i < len(self.sentence_positions):
+                    start_pos, end_pos = self.sentence_positions[i]
+                    if start_pos is not None and end_pos is not None:
+                        start_iter = self.text_buffer.get_iter_at_offset(start_pos)
+                        end_iter = self.text_buffer.get_iter_at_offset(end_pos)
+                        self.text_buffer.apply_tag(self.spoken_tag, start_iter, end_iter)
+    
     def clear_highlights(self):
         # Remove all highlighting
         start_iter = self.text_buffer.get_start_iter()
@@ -267,10 +251,12 @@ class TTSWindow(Adw.ApplicationWindow):
         self.text_buffer.remove_tag(self.spoken_tag, start_iter, end_iter)
         self.current_highlight_tag = None
         
-    def on_play_pause(self, widget):
+    def on_play(self, widget):
         if not self.ctrl.playing:
-            # Start playing
+            # Clear previous highlights
             self.clear_highlights()
+            
+            # Start playing
             self.get_text()  # Get current text from editor
             
             if not self.sentences:
@@ -297,23 +283,26 @@ class TTSWindow(Adw.ApplicationWindow):
             self.status_label.set_label("Playing...")
             
             # Update button states
-            self.play_pause_btn.set_icon_name("media-playback-pause-symbolic")
-            self.play_pause_btn.set_tooltip_text("Pause")
+            self.play_btn.set_sensitive(False)
+            self.pause_btn.set_sensitive(True)
             self.stop_btn.set_sensitive(True)
-            self.prev_btn.set_sensitive(True)
-            self.next_btn.set_sensitive(True)
         else:
-            # Toggle pause/resume
+            # Resume if paused
             if self.ctrl.paused.is_set():
                 self.ctrl.paused.clear()
                 self.status_label.set_label("Playing...")
-                self.play_pause_btn.set_icon_name("media-playback-pause-symbolic")
-                self.play_pause_btn.set_tooltip_text("Pause")
+                self.pause_btn.set_icon_name("media-playback-pause-symbolic")
+    
+    def on_pause(self, widget):
+        if self.ctrl.playing:
+            if self.ctrl.paused.is_set():
+                self.ctrl.paused.clear()
+                self.status_label.set_label("Playing...")
+                self.pause_btn.set_icon_name("media-playback-pause-symbolic")
             else:
                 self.ctrl.paused.set()
                 self.status_label.set_label("Paused")
-                self.play_pause_btn.set_icon_name("media-playback-start-symbolic")
-                self.play_pause_btn.set_tooltip_text("Resume")
+                self.pause_btn.set_icon_name("media-playback-start-symbolic")
     
     def on_stop(self, widget):
         if self.ctrl.playing:
@@ -360,17 +349,15 @@ class TTSWindow(Adw.ApplicationWindow):
     
     def cleanup_playback(self):
         self.ctrl.playing = False
-        self.ctrl.paused.clear()
-        
-        # Don't terminate the producer process - let it finish and keep the files
-        # The files will be preserved until the next playback starts
+        if self.prod_process and self.prod_process.is_alive():
+            self.prod_process.terminate()
+            self.prod_process.join(timeout=2)
         
         # Reset button states
-        self.play_pause_btn.set_icon_name("media-playback-start-symbolic")
-        self.play_pause_btn.set_tooltip_text("Play")
+        self.play_btn.set_sensitive(True)
+        self.pause_btn.set_sensitive(False)
         self.stop_btn.set_sensitive(False)
-        self.prev_btn.set_sensitive(False)
-        self.next_btn.set_sensitive(False)
+        self.pause_btn.set_icon_name("media-playback-pause-symbolic")
     
     def player_thread_ordered(self, qin: MPQ, ctrl: Controls, total: int):
         cmd = choose_play_cmd()
@@ -391,22 +378,13 @@ class TTSWindow(Adw.ApplicationWindow):
         # Highlight the first sentence before starting playback
         GLib.idle_add(self.highlight_sentence, current_playing)
         
-        # Collect initial buffer - wait for SYNTH_START_SENTENCES instead of PREROLL
-        synth_start_count = int(self.synth_spin.get_value())  # Get current setting from UI
-        sentences_ready = 0
-        while not ctrl.stop.is_set() and sentences_ready < synth_start_count and not eof:
-            idx, pcm, path = qin.get()
+        # Collect initial buffer
+        while not ctrl.stop.is_set() and len(buf) < PREROLL and not eof:
+            idx, pcm, _ = qin.get()
             if idx is None:
                 eof = True
                 break
-            buf[idx] = (pcm, path)
-            sentences_ready += 1
-            # Track generated files but don't delete them
-            if path and path not in self.generated_files:
-                self.generated_files.append(path)
-            print(f"[BUFFER] Sentence {idx} ready ({sentences_ready}/{synth_start_count})")
-        
-        print(f"[BUFFER] Starting playback with {sentences_ready} sentences ready")
+            buf[idx] = pcm
         
         def restart_player():
             return subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -415,8 +393,6 @@ class TTSWindow(Adw.ApplicationWindow):
             """Play PCM data in chunks, checking for interruptions"""
             off = 0
             n = len(pcm)
-            start_time = time.time()
-            
             while off < n and not ctrl.stop.is_set():
                 # Check for seek command
                 with ctrl.seek_lock:
@@ -436,23 +412,7 @@ class TTSWindow(Adw.ApplicationWindow):
                     return False
                 
                 off += len(chunk)
-                
-                # More accurate timing - wait for the actual audio duration to pass
-                expected_time = start_time + (off / (SR * frame_bytes))
-                current_time = time.time()
-                sleep_time = expected_time - current_time
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-            
-            # Wait a bit more to ensure the audio buffer is fully played
-            if off >= n:
-                # Calculate total audio duration and wait for it
-                total_duration = n / (SR * frame_bytes)
-                elapsed = time.time() - start_time
-                remaining = total_duration - elapsed
-                if remaining > 0:
-                    time.sleep(remaining)
-            
+                time.sleep(sec_per_chunk * 0.8)  # Slightly faster for smoother playback
             return True
 
         p = restart_player()
@@ -483,46 +443,27 @@ class TTSWindow(Adw.ApplicationWindow):
                 
                 # Wait for required sentence to be available
                 while current_playing not in buf and not eof and not ctrl.stop.is_set():
-                    idx, pcm, path = qin.get()
+                    idx, pcm, _ = qin.get()
                     if idx is None:
                         eof = True
                         break
-                    buf[idx] = (pcm, path)
-                    # Track generated files but don't delete them
-                    if path and path not in self.generated_files:
-                        self.generated_files.append(path)
+                    buf[idx] = pcm
                 
                 # Play current sentence if available
                 if current_playing in buf and not ctrl.stop.is_set():
-                    pcm, path = buf[current_playing]
+                    pcm = buf[current_playing]
                     print(f"[PLAY ] >>#{current_playing}")
                     
                     # Update current sentence tracker
                     with ctrl.sentence_lock:
                         ctrl.current_sentence = current_playing
                     
-                    # Play the sentence completely, then update highlighting
+                    # Update highlighting for the current sentence
+                    GLib.idle_add(self.highlight_sentence, current_playing)
+                    
                     if play_pcm_chunk(p, pcm, current_playing):
                         print(f"[PLAY ] done #{current_playing}")
-                        
-                        # Add a small delay to ensure audio output is complete before updating UI
-                        time.sleep(0.1)
-                        
-                        # Mark the just-finished sentence as spoken
-                        GLib.idle_add(self.mark_sentence_spoken, current_playing)
-                        
                         current_playing += 1
-                        
-                        # Highlight the next sentence after current one finishes
-                        if current_playing <= total:
-                            # Small delay before highlighting next sentence
-                            def delayed_highlight():
-                                time.sleep(0.05)
-                                GLib.idle_add(self.highlight_sentence, current_playing)
-                            threading.Thread(target=delayed_highlight, daemon=True).start()
-                        else:
-                            # Clear highlight if we've finished all sentences
-                            GLib.idle_add(self.clear_highlights)
                         
                         # Check if we've finished all sentences
                         if current_playing > total and eof:
@@ -534,14 +475,11 @@ class TTSWindow(Adw.ApplicationWindow):
                 # Keep collecting new sentences
                 if not eof and len(buf) < total:
                     try:
-                        idx, pcm, path = qin.get_nowait()
+                        idx, pcm, _ = qin.get_nowait()
                         if idx is None:
                             eof = True
                         else:
-                            buf[idx] = (pcm, path)
-                            # Track generated files but don't delete them
-                            if path and path not in self.generated_files:
-                                self.generated_files.append(path)
+                            buf[idx] = pcm
                     except:
                         time.sleep(0.01)  # No new data available
         
@@ -555,8 +493,6 @@ class TTSWindow(Adw.ApplicationWindow):
             
             GLib.idle_add(self.cleanup_playback)
             GLib.idle_add(self.status_label.set_label, "Playback finished")
-            
-            # Don't delete files - they will be preserved until next playback
         
         print("[PLAY ] exit")
 
