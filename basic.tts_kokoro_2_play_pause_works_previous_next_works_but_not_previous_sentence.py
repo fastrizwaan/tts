@@ -53,8 +53,6 @@ class Controls:
         self.stop = threading.Event()
         self.seek_to = None  # sentence index to seek to
         self.seek_lock = threading.Lock()
-        self.current_sentence = 1  # track actual playing sentence
-        self.sentence_lock = threading.Lock()
 
 def open_tty():
     if sys.stdin.isatty(): return sys.stdin
@@ -72,6 +70,8 @@ def keyboard_thread(ctrl: Controls, q: MPQ, total_sents: int):
     termios.tcsetattr(fd, termios.TCSANOW, new)
     print("[KEYS ] 'z'=pause/resume  's'=stop+exit  'a'=prev  'd'=next")
     
+    current_sentence = [1]  # Track current sentence being played
+    
     try:
         while not ctrl.stop.is_set():
             ch = os.read(fd,1).decode(errors="ignore")
@@ -84,27 +84,23 @@ def keyboard_thread(ctrl: Controls, q: MPQ, total_sents: int):
                 except Exception: pass
                 break
             elif ch=='a':  # previous sentence
-                with ctrl.sentence_lock:
-                    current = ctrl.current_sentence
                 with ctrl.seek_lock:
-                    if current == 1:
+                    new_idx = max(1, current_sentence[0] - 1)
+                    if new_idx == current_sentence[0] and new_idx == 1:
                         # restart first sentence
                         ctrl.seek_to = 1
                         print("[KEYS ] restart sentence 1")
                     else:
-                        new_idx = current - 1
                         ctrl.seek_to = new_idx
-                        print(f"[KEYS ] seek to sentence {new_idx} (was at {current})")
+                        print(f"[KEYS ] seek to sentence {new_idx}")
+                    current_sentence[0] = new_idx
             elif ch=='d':  # next sentence
-                with ctrl.sentence_lock:
-                    current = ctrl.current_sentence
                 with ctrl.seek_lock:
-                    new_idx = min(total_sents, current + 1)
+                    new_idx = min(total_sents, current_sentence[0] + 1)
                     if new_idx <= total_sents:
                         ctrl.seek_to = new_idx
-                        print(f"[KEYS ] seek to sentence {new_idx} (was at {current})")
-                    else:
-                        print(f"[KEYS ] already at last sentence ({current})")
+                        print(f"[KEYS ] seek to sentence {new_idx}")
+                        current_sentence[0] = new_idx
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         if f is not sys.stdin: f.close()
@@ -182,10 +178,6 @@ def player_thread_ordered(qin: MPQ, ctrl: Controls, total: int):
                 pcm = buf[current_playing]
                 print(f"[PLAY ] >>#{current_playing}")
                 
-                # Update current sentence tracker
-                with ctrl.sentence_lock:
-                    ctrl.current_sentence = current_playing
-                
                 if play_pcm_chunk(p, pcm, current_playing):
                     print(f"[PLAY ] done #{current_playing}")
                     current_playing += 1
@@ -225,8 +217,20 @@ def main():
     threading.Thread(target=keyboard_thread, args=(ctrl,q,len(sents)), daemon=True).start()
     t_play = threading.Thread(target=player_thread_ordered, args=(q,ctrl,len(sents))); t_play.start()
 
-    # Start single producer process for ALL synthesis
-    prod = Process(target=producer_proc, args=(sents, 1, d, q)); prod.start()
+    # PREROLL synthesis in main — abort immediately on 's'
+    kok = Kokoro(MODEL, VOICES)
+    first = min(PREROLL, len(sents))
+    for i in range(1, first+1):
+        if ctrl.stop.is_set(): break
+        pcm, path = synth_one(kok, i, sents[i-1], d)
+        if ctrl.stop.is_set(): break
+        q.put((i, pcm, path))
+
+    prod = None
+    if not ctrl.stop.is_set() and first < len(sents):
+        prod = Process(target=producer_proc, args=(sents, first+1, d, q)); prod.start()
+    else:
+        q.put((None,None,None))
 
     # Wait; honor stop immediately
     while t_play.is_alive():

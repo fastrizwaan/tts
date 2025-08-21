@@ -19,7 +19,7 @@ class TTSApplication(Adw.Application):
     def __init__(self):
         super().__init__(application_id="io.github.fastrizwaan.tts")
         self.model_path = "/app/share/kokoro-models/kokoro-v1.0.onnx"
-        self.voices_path = " /app/share/kokoro-models/voices-v1.0.bin"
+        self.voices_path = "/app/share/kokoro-models/voices-v1.0.bin"
         self.kokoro = None
         self.setup_model()
         

@@ -11,7 +11,7 @@ finish-args:
   - --socket=wayland
   - --socket=pulseaudio
   - --share=network
-  - --filesystem=home
+  - --filesystem=host
   - --device=dri
   - --env=PYTHONPATH=/app/lib/python3.12/site-packages
 
@@ -98,7 +98,9 @@ modules:
         type: pypi
         name: humanfriendly
         packagetype: bdist_wheel
-        
+
+
+       
   - name: coloredlogs
     buildsystem: simple
     build-commands: 
@@ -302,6 +304,352 @@ modules:
           name: piper_tts
           packagetype: bdist_wheel
 
+
+  - name: babel 
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app babel*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/b7/b8/3fe70c75fe32afc4bb507f75563d39bc5642255d1d94f1f23604725780bf/babel-2.17.0-py3-none-any.whl
+      sha256: 4d0b53093fdfb4b21c92b5213dba5a1b23885afa8383709427046b21c366e5f2
+      x-checker-data:
+        type: pypi
+        name: babel 
+        packagetype: bdist_wheel 
+        
+
+  - name: uritemplate 
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app uritemplate*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/a9/99/3ae339466c9183ea5b8ae87b34c0b897eda475d2aec2307cae60e5cd4f29/uritemplate-4.2.0-py3-none-any.whl
+      sha256: 962201ba1c4edcab02e60f9a0d3821e82dfc5d2d6662a21abd533879bdb8a686
+      x-checker-data:
+        type: pypi
+        name: uritemplate 
+        packagetype: bdist_wheel 
+        
+
+  - name: rfc3986 
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app rfc3986*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/c4/e5/63ca2c4edf4e00657584608bee1001302bbf8c5f569340b78304f2f446cb/rfc3986-1.5.0-py2.py3-none-any.whl
+      sha256: a86d6e1f5b1dc238b218b012df0aa79409667bb209e58da56d0b94704e712a97
+      x-checker-data:
+        type: pypi
+        name: rfc3986 
+        packagetype: bdist_wheel 
+        
+  - name: python-dateutil 
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app python_dateutil*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl
+      sha256: a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
+      x-checker-data:
+        type: pypi
+        name: python-dateutil 
+        packagetype: bdist_wheel 
+        
+        
+  - name: isodate
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app isodate*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/15/aa/0aca39a37d3c7eb941ba736ede56d689e7be91cab5d9ca846bde3999eba6/isodate-0.7.2-py3-none-any.whl
+      sha256: 28009937d8031054830160fce6d409ed342816b543597cece116d966c6d99e15
+      x-checker-data:
+        type: pypi
+        name: isodate
+        packagetype: bdist_wheel 
+
+  - name: idna
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app idna*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/76/c6/c88e154df9c4e1a2a66ccf0005a88dfb2650c1dffb6f5ce603dfbd452ce3/idna-3.10-py3-none-any.whl
+      sha256: 946d195a0d259cbba61165e88e65941f16e9b36ea6ddb97f00452bae8b1287d3
+      x-checker-data:
+        type: pypi
+        name: idna
+        packagetype: bdist_wheel
+
+  - name: certifi
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app certifi*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/e5/48/1549795ba7742c948d2ad169c1c8cdbae65bc450d6cd753d124b17c8cd32/certifi-2025.8.3-py3-none-any.whl
+      sha256: f6c12493cfb1b06ba2ff328595af9350c65d6644968e5d3a2ffd78699af217a5
+      x-checker-data:
+        type: pypi
+        name: certifi
+        packagetype: bdist_wheel
+        
+  - name: charset-normalizer
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app charset_normalizer*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/8a/1f/f041989e93b001bc4e44bb1669ccdcf54d3f00e628229a85b08d330615c5/charset_normalizer-3.4.3-py3-none-any.whl
+      sha256: ce571ab16d890d23b5c278547ba694193a45011ff86a9162a71307ed9f86759a
+      x-checker-data:
+        type: pypi
+        name: charset-normalizer
+        packagetype: bdist_wheel 
+        
+  - name: language-tags 
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app language_tags*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/b0/42/327554649ed2dd5ce59d3f5da176c7be20f9352c7c6c51597293660b7b08/language_tags-1.2.0-py3-none-any.whl
+      sha256: d815604622242fdfbbfd747b40c31213617fd03734a267f2e39ee4bd73c88722
+      x-checker-data:
+        type: pypi
+        name: language-tags 
+        packagetype: bdist_wheel 
+
+  - name: pyparsing
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app pyparsing*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/05/e7/df2285f3d08fee213f2d041540fa4fc9ca6c2d44cf36d3a035bf2a8d2bcc/pyparsing-3.2.3-py3-none-any.whl
+      sha256: a749938e02d6fd0b59b356ca504a24982314bb090c383e3cf201c95ef7e2bfcf
+      x-checker-data:
+        type: pypi
+        name: pyparsing
+        packagetype: bdist_wheel 
+  
+  - name: rdflib
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app rdflib*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/f4/31/e9b6f04288dcd3fa60cb3179260d6dad81b92aef3063d679ac7d80a827ea/rdflib-7.1.4-py3-none-any.whl
+      sha256: 72f4adb1990fa5241abd22ddaf36d7cafa5d91d9ff2ba13f3086d339b213d997
+      x-checker-data:
+        type: pypi
+        name: rdflib
+        packagetype: bdist_wheel 
+  
+        
+  - name: requests
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app requests*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/1e/db/4254e3eabe8020b458f1a747140d32277ec7a271daf1d235b70dc0b4e6e3/requests-2.32.5-py3-none-any.whl
+      sha256: 2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6
+      x-checker-data:
+        type: pypi
+        name: requests
+        packagetype: bdist_wheel 
+
+  - name: colorama
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app colorama*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl
+      sha256: 4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+      x-checker-data:
+        type: pypi
+        name: colorama
+        packagetype: bdist_wheel
+        
+        
+  - name: rpds-py 
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app rpds_py*.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/95/ae/5d15c83e337c082d0367053baeb40bfba683f42459f6ebff63a2fd7e5518/rpds_py-0.27.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 5fa01b3d5e3b7d97efab65bd3d88f164e289ec323a8c033c5c38e53ee25c007e
+        only-arches:
+          - x86_64
+        x-checker-data:
+          type: pypi
+          name: rpds-py 
+          packagetype: bdist_wheel
+      - type: file
+        url: https://files.pythonhosted.org/packages/44/3e/9834b4c8f4f5fe936b479e623832468aa4bd6beb8d014fecaee9eac6cdb1/rpds_py-0.27.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+        sha256: 09965b314091829b378b60607022048953e25f0b396c2b70e7c4c81bcecf932e
+        only-arches:
+          - aarch64
+        x-checker-data:
+          type: pypi
+          name: rpds-py 
+          packagetype: bdist_wheel
+
+        
+  - name: referencing
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app referencing*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/c1/b1/3baf80dc6d2b7bc27a95a67752d0208e410351e3feb4eb78de5f77454d8d/referencing-0.36.2-py3-none-any.whl
+      sha256: e8699adbbf8b5c7de96d8ffa0eb5c158b3beafce084968e2ea8bb08c6794dcd0
+      x-checker-data:
+        type: pypi
+        name: referencing
+        packagetype: bdist_wheel
+        
+  - name: jsonschema-specifications
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app jsonschema_specifications*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/01/0e/b27cdbaccf30b890c40ed1da9fd4a3593a5cf94dae54fb34f8a4b74fcd3f/jsonschema_specifications-2025.4.1-py3-none-any.whl
+      sha256: 4653bffbd6584f7de83a67e0d620ef16900b390ddc7939d56684d6c81e33f1af
+      x-checker-data:
+        type: pypi
+        name: jsonschema-specifications
+        packagetype: bdist_wheel 
+
+  - name: jsonschema
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app jsonschema*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/bf/9c/8c95d856233c1f82500c2450b8c68576b4cf1c871db3afac5c34ff84e6fd/jsonschema-4.25.1-py3-none-any.whl
+      sha256: 3fba0169e345c7175110351d456342c364814cfcf3b964ba4587f22915230a63
+      x-checker-data:
+        type: pypi
+        name: jsonschema
+        packagetype: bdist_wheel 
+        
+        
+  
+  - name: csvw
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app csvw*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/13/84/069db1325f5a6dd034524c0099da3978de8fdb6242ce63223ead188da940/csvw-3.5.1-py2.py3-none-any.whl
+      sha256: 8dd3864aae51bfd943713a62ec2c6688d3f406a9627b5f16de2479b1281febe5
+      x-checker-data:
+        type: pypi
+        name: csvw
+        packagetype: bdist_wheel 
+        
+
+  - name: segments
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app segments*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/11/18/cb614939ccd46d336013cab705f1e11540ec9c68b08ecbb854ab893fc480/segments-2.3.0-py2.py3-none-any.whl
+      sha256: 30a5656787071430cd22422e04713b2a9beabe1a97d2ebf37f716a56f90577a3
+      x-checker-data:
+        type: pypi
+        name: segments
+        packagetype: bdist_wheel 
+        
+        
+  - name: dlinfo
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app dlinfo*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/da/90/022c79d6e5e6f843268c10b84d4a021ee3afba0621d3c176d3ff2024bfc8/dlinfo-2.0.0-py3-none-any.whl
+      sha256: b32cc18e3ea67c0ca9ca409e5b41eed863bd1363dbc9dd3de90fedf11b61e7bc
+      x-checker-data:
+        type: pypi
+        name: dlinfo
+        packagetype: bdist_wheel 
+        
+        
+  - name: phonemizer-fork
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app phonemizer_fork*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/64/f1/0dcce21b0ae16a82df4b6583f8f3ad8e55b35f7e98b6bf536a4dd225fa08/phonemizer_fork-3.3.2-py3-none-any.whl
+      sha256: 97305c76f4183b3825dae8f4c032265fe78c9946ce58c47d4b62161349264b74
+      x-checker-data:
+        type: pypi
+        name: phonemizer-fork
+        packagetype: bdist_wheel 
+        
+  - name: espeakng-loader
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app espeakng_loader*.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/de/1e/25ec5ab07528c0fbb215a61800a38eca05c8a99445515a02d7fa5debcb32/espeakng_loader-0.2.4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 08721baf27d13d461f6be6eed9a65277e70d68234ff484fd8b9897b222cdcb6d
+        only-arches:
+          - x86_64
+        x-checker-data:
+          type: pypi
+          name: espeakng-loader
+          packagetype: bdist_wheel
+      - type: file
+        url: https://files.pythonhosted.org/packages/d9/ad/1b768d8daffc2996e07bbcb6f534d8de3202cd75fce1f1c45eced1ce6465/espeakng_loader-0.2.4-py3-none-manylinux_2_28_aarch64.whl
+        sha256: d1e798141b46a050cdb75fcf3c17db969bb2c40394f3f4a48910655d547508b9
+        only-arches:
+          - aarch64
+        x-checker-data:
+          type: pypi
+          name: espeakng-loader
+          packagetype: bdist_wheel
+          
+  - name: colorlog
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app colorlog*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/e3/51/9b208e85196941db2f0654ad0357ca6388ab3ed67efdbfc799f35d1f83aa/colorlog-6.9.0-py3-none-any.whl
+      sha256: 5906e71acd67cb07a71e779c47c4bcb45fb8c2993eebe9e5adcd6a6f1b283eff
+      x-checker-data:
+        type: pypi
+        name: colorlog
+        packagetype: bdist_wheel 
+
+  - name: kokoro_onnx
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app kokoro_onnx*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/fd/00/48311d88757b160634af7626324fe8a95cae186952bf25baad831381d50f/kokoro_onnx-0.4.9-py3-none-any.whl
+      sha256: e0b51d62525166af795db715c7f0efb80233621b5ddc0766ed68995545589d9e
+      x-checker-data:
+        type: pypi
+        name: kokoro_onnx
+        packagetype: bdist_wheel 
+
   - name: alsa-utils
     buildsystem: simple
     build-commands:
@@ -312,7 +660,71 @@ modules:
       - type: archive
         url: https://www.alsa-project.org/files/pub/utils/alsa-utils-1.2.12.tar.bz2
         sha256: 98bc6677d0c0074006679051822324a0ab0879aea558a8f68b511780d30cd924
-                  
+
+  - name: pycparser
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app pycparser*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/13/a3/a812df4e2dd5696d1f351d58b8fe16a405b234ad2886a0dab9183fb78109/pycparser-2.22-py3-none-any.whl
+      sha256: c3702b6d3dd8c7abc1afa565d7e63d53a1d0bd86cdc24edd75470f4de499cfcc
+      x-checker-data:
+        type: pypi
+        name: pycparser
+        packagetype: bdist_wheel
+        
+  - name: cffi
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app cffi*.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/b2/d5/da47df7004cb17e4955df6a43d14b3b4ae77737dff8bf7f8f333196717bf/cffi-1.17.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: b62ce867176a75d03a665bad002af8e6d54644fad99a3c70905c543130e39d93
+        only-arches:
+          - x86_64
+        x-checker-data:
+          type: pypi
+          name: cffi
+          packagetype: bdist_wheel
+      - type: file
+        url: https://files.pythonhosted.org/packages/1a/df/f8d151540d8c200eb1c6fba8cd0dfd40904f1b0682ea705c36e6c2e97ab3/cffi-1.17.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+        sha256: da95af8214998d77a98cc14e3a3bd00aa191526343078b530ceb0bd710fb48a5
+        only-arches:
+          - aarch64
+        x-checker-data:
+          type: pypi
+          name: cffi
+          packagetype: bdist_wheel
+          
+  - name: soundfile
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app soundfile*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/64/28/e2a36573ccbcf3d57c00626a21fe51989380636e821b341d36ccca0c1c3a/soundfile-0.13.1-py2.py3-none-any.whl
+      sha256: a23c717560da2cf4c7b5ae1142514e0fd82d6bbd9dfc93a50423447142f2c445
+      x-checker-data:
+        type: pypi
+        name: soundfile
+        packagetype: bdist_wheel                   
+
+  - name: kokoro-models
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/share/kokoro-models
+      - install -m 0644 kokoro-v1.0.onnx /app/share/kokoro-models/kokoro-v1.0.onnx
+      - install -m 0644 voices-v1.0.bin  /app/share/kokoro-models/voices-v1.0.bin
+    sources:
+      - type: file
+        url: https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+        sha256: 7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5
+      - type: file
+        url: https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+        sha256: bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d
+
   - name: python3
     buildsystem: simple
     build-commands:
