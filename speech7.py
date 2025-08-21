@@ -562,24 +562,24 @@ function clearWordHighlights(){
 
 @media (prefers-color-scheme: dark){
   :root {
-    --bg:#1b1b1b; --fg:#e0e0e0; --muted:#aaaaaa; 
-    --hover:rgba(255,255,255,0.08); 
-    --highlight:rgba(100,149,237,0.4);   /* cornflower */
-    --word-highlight:rgba(255,160,122,0.4); /* light salmon */
+    --bg:#14161a; --fg:#757e8f; --muted:#757e8f; 
+    --hover:rgba(255,255,255,0.2); 
+    --highlight:#045f1d;   /* cornflower */
+    --word-highlight:#38802c; /* light salmon */
   }
 }
     
 html,body{
   background:var(--bg); color:var(--fg);
-  font-family:-webkit-system-font,system-ui,sans-serif; font-size:16px; line-height:1.6;
+  font-family:"Noto Serif", noto-serif, -webkit-system-font; font-size:32px; line-height:1.6;
   padding:20px; margin:0;
 }
 .sentence{display:inline}
-.sentence.current{background:var(--highlight); font-weight:bold; border-radius:3px; padding:2px 4px}
+.sentence.current{color:var(--word-highlight); font-weight:normal; border-radius:3px; padding:2px 4px}
 .sentence.spoken{color:var(--muted)}
 .sentence:hover{background:var(--hover); cursor:pointer}
-.word{display:inline; transition: background-color 0.3s}
-.word.current{background:var(--word-highlight); font-weight:bold; border-radius:2px; padding:1px 2px}
+.word{display:inline; transition: var(--word-highlight) 0.3s}
+.word.current{color: var(--word-highlight); font-weight:bold; border-radius:2px; padding:1px 2px}
 ::selection{background:#264f78;color:inherit}
 </style>
 <script>
