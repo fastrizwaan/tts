@@ -100,8 +100,6 @@ class TTSWindow(Adw.ApplicationWindow):
         self.total_sentences = 0
         self.generated_files = []
         self.current_text = DEFAULT_TEXT
-        self.highlight_sentence_enabled = True
-        self.highlight_word_enabled = True
         self.build_ui()
         self.load_text_to_webview(DEFAULT_TEXT)
 
@@ -132,17 +130,6 @@ class TTSWindow(Adw.ApplicationWindow):
         self.next_btn.connect("clicked", self.on_next)
         tb.append(self.next_btn)
 
-        tb.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
-        
-        # Highlight checkboxes
-        self.sentence_highlight_check = Gtk.CheckButton(label="Highlight Line", active=True)
-        self.sentence_highlight_check.connect("toggled", self.on_sentence_highlight_toggled)
-        tb.append(self.sentence_highlight_check)
-        
-        self.word_highlight_check = Gtk.CheckButton(label="Highlight Word", active=True)
-        self.word_highlight_check.connect("toggled", self.on_word_highlight_toggled)
-        tb.append(self.word_highlight_check)
-        
         tb.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
         tb.append(Gtk.Label(label="Buffer:", margin_start=6))
         self.synth_spin = Gtk.SpinButton()
@@ -192,7 +179,7 @@ html,body{
   font-family:-webkit-system-font,system-ui,sans-serif; font-size:16px; line-height:1.6;
   padding:20px; margin:0;
 }
-.sentence{display:inline}
+.sentence{display:inline}  /* Changed back to inline */
 .sentence.current{background:var(--highlight); font-weight:bold; border-radius:3px; padding:2px 4px}
 .sentence.spoken{color:var(--muted)}
 .sentence:hover{background:var(--hover); cursor:pointer}
@@ -213,8 +200,8 @@ function setSentences(arr){
   const body=document.body; body.innerHTML=''; body.setAttribute('contenteditable','true'); body.setAttribute('spellcheck','false');
   let html = '';
   for(let i=0;i<arr.length;i++){ 
-    html += '<span class="sentence" id="sentence_'+(i+1)+'">';
     const words=arr[i].split(/\s+/);
+    html += '<span class="sentence" id="sentence_'+(i+1)+'">';
     words.forEach((word, wordIdx)=>{ 
       html += '<span class="word" id="sentence_'+(i+1)+'_word_'+wordIdx+'">'+word+' </span>';
     }); 
@@ -254,35 +241,11 @@ function clearWordHighlights(){
         except Exception as e:
             print(f"[JS] setSentences error: {e}")
 
-    def highlight_sentence(self, idx): 
-        if self.highlight_sentence_enabled:
-            self.js_fire_and_forget(f"highlightSentence({int(idx)});")
-    
-    def mark_sentence_spoken(self, idx): 
-        if self.highlight_sentence_enabled:
-            self.js_fire_and_forget(f"markSentenceSpoken({int(idx)});")
-    
-    def clear_highlights(self): 
-        if self.highlight_sentence_enabled:
-            self.js_fire_and_forget("clearHighlights();")
-    
-    def highlight_word(self, sent_idx, word_idx): 
-        if self.highlight_word_enabled:
-            self.js_fire_and_forget(f"highlightWord({int(sent_idx)}, {int(word_idx)});")
-    
-    def clear_word_highlights(self): 
-        if self.highlight_word_enabled:
-            self.js_fire_and_forget("clearWordHighlights();")
-
-    def on_sentence_highlight_toggled(self, check_button):
-        self.highlight_sentence_enabled = check_button.get_active()
-        if not self.highlight_sentence_enabled:
-            self.clear_highlights()
-
-    def on_word_highlight_toggled(self, check_button):
-        self.highlight_word_enabled = check_button.get_active()
-        if not self.highlight_word_enabled:
-            self.clear_word_highlights()
+    def highlight_sentence(self, idx): self.js_fire_and_forget(f"highlightSentence({int(idx)});")
+    def mark_sentence_spoken(self, idx): self.js_fire_and_forget(f"markSentenceSpoken({int(idx)});")
+    def clear_highlights(self): self.js_fire_and_forget("clearHighlights();")
+    def highlight_word(self, sent_idx, word_idx): self.js_fire_and_forget(f"highlightWord({int(sent_idx)}, {int(word_idx)});")
+    def clear_word_highlights(self): self.js_fire_and_forget("clearWordHighlights();")
 
     def get_text_from_webview(self):
         def on_text_received(web_view, result, user_data):
@@ -574,7 +537,7 @@ html,body{
   font-family:-webkit-system-font,system-ui,sans-serif; font-size:16px; line-height:1.6;
   padding:20px; margin:0;
 }
-.sentence{display:inline}
+.sentence{display:inline}  /* Keep sentences inline */
 .sentence.current{background:var(--highlight); font-weight:bold; border-radius:3px; padding:2px 4px}
 .sentence.spoken{color:var(--muted)}
 .sentence:hover{background:var(--hover); cursor:pointer}

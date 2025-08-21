@@ -100,8 +100,6 @@ class TTSWindow(Adw.ApplicationWindow):
         self.total_sentences = 0
         self.generated_files = []
         self.current_text = DEFAULT_TEXT
-        self.highlight_sentence_enabled = True
-        self.highlight_word_enabled = True
         self.build_ui()
         self.load_text_to_webview(DEFAULT_TEXT)
 
@@ -133,17 +131,6 @@ class TTSWindow(Adw.ApplicationWindow):
         tb.append(self.next_btn)
 
         tb.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
-        
-        # Highlight checkboxes
-        self.sentence_highlight_check = Gtk.CheckButton(label="Highlight Line", active=True)
-        self.sentence_highlight_check.connect("toggled", self.on_sentence_highlight_toggled)
-        tb.append(self.sentence_highlight_check)
-        
-        self.word_highlight_check = Gtk.CheckButton(label="Highlight Word", active=True)
-        self.word_highlight_check.connect("toggled", self.on_word_highlight_toggled)
-        tb.append(self.word_highlight_check)
-        
-        tb.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
         tb.append(Gtk.Label(label="Buffer:", margin_start=6))
         self.synth_spin = Gtk.SpinButton()
         self.synth_spin.set_range(1, 10); self.synth_spin.set_increments(1, 1); self.synth_spin.set_value(SYNTH_START_SENTENCES)
@@ -171,22 +158,14 @@ class TTSWindow(Adw.ApplicationWindow):
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="color-scheme" content="light dark">
 <style>
-:root {
-  --bg:#fafafa; --fg:#2e2e2e; --muted:#777777; 
-  --hover:rgba(0,0,0,0.05); 
-  --highlight:#fdf6a5;   /* light blue */
-  --word-highlight:#86ff58; /* soft pink */
+:root{
+  --bg:#E2F9D9FF; --fg:#6A4884FF; --muted:#888888; --hover:#f0f0f0; --highlight:#FFF699FF; --word-highlight:#FBDB53FF;
 }
-
 @media (prefers-color-scheme: dark){
-  :root {
-    --bg:#1b1b1b; --fg:#e0e0e0; --muted:#aaaaaa; 
-    --hover:rgba(255,255,255,0.08); 
-    --highlight:rgba(100,149,237,0.4);   /* cornflower */
-    --word-highlight:rgba(255,160,122,0.4); /* light salmon */
+  :root{
+    --bg:#FFF699FF; --fg:#c0c0c0; --muted:#9a9a9a; --hover:#2a2a2a; --highlight:#325b70; --word-highlight:#8B4513;
   }
 }
-    
 html,body{
   background:var(--bg); color:var(--fg);
   font-family:-webkit-system-font,system-ui,sans-serif; font-size:16px; line-height:1.6;
@@ -211,16 +190,20 @@ function clearHighlights(){ document.querySelectorAll('.sentence').forEach(s=>s.
 function getAllText(){ return document.body.innerText||document.body.textContent||''; }
 function setSentences(arr){
   const body=document.body; body.innerHTML=''; body.setAttribute('contenteditable','true'); body.setAttribute('spellcheck','false');
-  let html = '';
   for(let i=0;i<arr.length;i++){ 
-    html += '<span class="sentence" id="sentence_'+(i+1)+'">';
+    const sentDiv=document.createElement('div'); 
+    sentDiv.className='sentence'; 
+    sentDiv.id='sentence_'+(i+1); 
     const words=arr[i].split(/\s+/);
     words.forEach((word, wordIdx)=>{ 
-      html += '<span class="word" id="sentence_'+(i+1)+'_word_'+wordIdx+'">'+word+' </span>';
+      const wordSpan=document.createElement('span'); 
+      wordSpan.className='word'; 
+      wordSpan.id='sentence_'+(i+1)+'_word_'+wordIdx; 
+      wordSpan.textContent=word+' '; 
+      sentDiv.appendChild(wordSpan); 
     }); 
-    html += '</span> ';
+    body.appendChild(sentDiv); 
   }
-  body.innerHTML = html;
 }
 function highlightWord(sentIdx, wordIdx){
   document.querySelectorAll('.word.current').forEach(w=>w.classList.remove('current'));
@@ -233,10 +216,10 @@ function clearWordHighlights(){
 </script></head><body contenteditable="true" spellcheck="false">"""
         for i, s in enumerate(sents, 1):
             words = s.split()
-            html_doc += f'<span class="sentence" id="sentence_{i}">'
+            html_doc += f'<div class="sentence" id="sentence_{i}">'
             for j, word in enumerate(words):
                 html_doc += f'<span class="word" id="sentence_{i}_word_{j}">{html.escape(word)} </span>'
-            html_doc += '</span> '
+            html_doc += '</div> '
         html_doc += "</body></html>"
         self.web_view.load_html(html_doc)
 
@@ -254,35 +237,11 @@ function clearWordHighlights(){
         except Exception as e:
             print(f"[JS] setSentences error: {e}")
 
-    def highlight_sentence(self, idx): 
-        if self.highlight_sentence_enabled:
-            self.js_fire_and_forget(f"highlightSentence({int(idx)});")
-    
-    def mark_sentence_spoken(self, idx): 
-        if self.highlight_sentence_enabled:
-            self.js_fire_and_forget(f"markSentenceSpoken({int(idx)});")
-    
-    def clear_highlights(self): 
-        if self.highlight_sentence_enabled:
-            self.js_fire_and_forget("clearHighlights();")
-    
-    def highlight_word(self, sent_idx, word_idx): 
-        if self.highlight_word_enabled:
-            self.js_fire_and_forget(f"highlightWord({int(sent_idx)}, {int(word_idx)});")
-    
-    def clear_word_highlights(self): 
-        if self.highlight_word_enabled:
-            self.js_fire_and_forget("clearWordHighlights();")
-
-    def on_sentence_highlight_toggled(self, check_button):
-        self.highlight_sentence_enabled = check_button.get_active()
-        if not self.highlight_sentence_enabled:
-            self.clear_highlights()
-
-    def on_word_highlight_toggled(self, check_button):
-        self.highlight_word_enabled = check_button.get_active()
-        if not self.highlight_word_enabled:
-            self.clear_word_highlights()
+    def highlight_sentence(self, idx): self.js_fire_and_forget(f"highlightSentence({int(idx)});")
+    def mark_sentence_spoken(self, idx): self.js_fire_and_forget(f"markSentenceSpoken({int(idx)});")
+    def clear_highlights(self): self.js_fire_and_forget("clearHighlights();")
+    def highlight_word(self, sent_idx, word_idx): self.js_fire_and_forget(f"highlightWord({int(sent_idx)}, {int(word_idx)});")
+    def clear_word_highlights(self): self.js_fire_and_forget("clearWordHighlights();")
 
     def get_text_from_webview(self):
         def on_text_received(web_view, result, user_data):
@@ -574,7 +533,7 @@ html,body{
   font-family:-webkit-system-font,system-ui,sans-serif; font-size:16px; line-height:1.6;
   padding:20px; margin:0;
 }
-.sentence{display:inline}
+.sentence{display:block; margin-bottom:8px}
 .sentence.current{background:var(--highlight); font-weight:bold; border-radius:3px; padding:2px 4px}
 .sentence.spoken{color:var(--muted)}
 .sentence:hover{background:var(--hover); cursor:pointer}
@@ -593,16 +552,20 @@ function clearHighlights(){ document.querySelectorAll('.sentence').forEach(s=>s.
 function getAllText(){ return document.body.innerText||document.body.textContent||''; }
 function setSentences(arr){
   const body=document.body; body.innerHTML=''; body.setAttribute('contenteditable','true'); body.setAttribute('spellcheck','false');
-  let html = '';
   for(let i=0;i<arr.length;i++){ 
-    html += '<span class="sentence" id="sentence_'+(i+1)+'">';
+    const sentDiv=document.createElement('div'); 
+    sentDiv.className='sentence'; 
+    sentDiv.id='sentence_'+(i+1); 
     const words=arr[i].split(/\s+/);
     words.forEach((word, wordIdx)=>{ 
-      html += '<span class="word" id="sentence_'+(i+1)+'_word_'+wordIdx+'">'+word+' </span>';
+      const wordSpan=document.createElement('span'); 
+      wordSpan.className='word'; 
+      wordSpan.id='sentence_'+(i+1)+'_word_'+wordIdx; 
+      wordSpan.textContent=word+' '; 
+      sentDiv.appendChild(wordSpan); 
     }); 
-    html += '</span> ';
+    body.appendChild(sentDiv); 
   }
-  body.innerHTML = html;
 }
 function highlightWord(sentIdx, wordIdx){
   document.querySelectorAll('.word.current').forEach(w=>w.classList.remove('current'));
@@ -615,10 +578,10 @@ function clearWordHighlights(){
 </script></head><body contenteditable="true" spellcheck="false">"""
         for i, s in enumerate(sents, 1):
             words = s.split()
-            html_doc += f'<span class="sentence" id="sentence_{i}">'
+            html_doc += f'<div class="sentence" id="sentence_{i}">'
             for j, word in enumerate(words):
                 html_doc += f'<span class="word" id="sentence_{i}_word_{j}">{html.escape(word)} </span>'
-            html_doc += '</span> '
+            html_doc += '</div> '
         html_doc += "</body></html>"
         self.web_view.load_html(html_doc)
 
