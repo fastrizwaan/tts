@@ -431,53 +431,6 @@ function setSentences(arr){
             GLib.idle_add(self.status_label.set_label, "Playback finished")
         print("[PLAY ] exit")
 
-    def load_text_to_webview(self, text):
-        self.current_text = text
-        sents = tokenize(text)
-        html_doc = """
-    <!DOCTYPE html><html><head><meta charset="utf-8">
-    <meta name="color-scheme" content="light dark">
-    <style>
-    :root{
-      --bg:#ffffff; --fg:#333333; --muted:#888888; --hover:#f0f0f0; --highlight:#87CEEB;
-    }
-    @media (prefers-color-scheme: dark){
-      :root{
-        --bg:#1e1e1e; --fg:#c0c0c0; --muted:#9a9a9a; --hover:#2a2a2a; --highlight:#325b70;
-      }
-    }
-    html,body{
-      background:var(--bg); color:var(--fg);
-      font-family:-webkit-system-font,system-ui,sans-serif; font-size:16px; line-height:1.6;
-      padding:20px; margin:0;
-    }
-    .sentence{display:inline}
-    .sentence.current{background:var(--highlight); font-weight:bold; border-radius:3px; padding:2px 4px}
-    .sentence.spoken{color:var(--muted)}
-    .sentence:hover{background:var(--hover); cursor:pointer}
-    ::selection{background:#264f78;color:inherit}
-    </style>
-    <script>
-    function highlightSentence(i){
-      const c=document.querySelector('.sentence.current'); if(c) c.classList.remove('current');
-      const s=document.getElementById('sentence_'+i);
-      if(s){ s.classList.add('current'); s.scrollIntoView({behavior:'smooth',block:'center'}); }
-    }
-    function markSentenceSpoken(i){ const s=document.getElementById('sentence_'+i); if(s){ s.classList.add('spoken'); s.classList.remove('current'); } }
-    function clearHighlights(){ document.querySelectorAll('.sentence').forEach(s=>s.classList.remove('current','spoken')); }
-    function getAllText(){ return document.body.innerText||document.body.textContent||''; }
-    function setSentences(arr){
-      const body=document.body; body.innerHTML=''; body.setAttribute('contenteditable','true'); body.setAttribute('spellcheck','false');
-      for(let i=0;i<arr.length;i++){ const span=document.createElement('span'); span.className='sentence'; span.id='sentence_'+(i+1); span.textContent=arr[i]; body.appendChild(span); body.appendChild(document.createTextNode(' ')); }
-    }
-    </script></head><body contenteditable="true" spellcheck="false">"""
-        for i, s in enumerate(sents, 1):
-            html_doc += f'<span class="sentence" id="sentence_{i}">{html.escape(s)}</span> '
-        html_doc += "</body></html>"
-        self.web_view.load_html(html_doc)
-
-
-
 class TTSApp(Adw.Application):
     def __init__(self, **kwargs):
         super().__init__(**kwargs, application_id="io.github.fastrizwaan.tts")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, re, pathlib, threading, subprocess, sys, time, html, json
+import os, re, pathlib, threading, subprocess, sys, time, html
 import numpy as np, soundfile as sf
 from multiprocessing import Process, Queue as MPQ
 import gi
@@ -164,35 +164,11 @@ body{font-family:-webkit-system-font,system-ui,sans-serif;font-size:16px;line-he
 .sentence:hover{background:#f0f0f0;cursor:pointer}
 </style>
 <script>
-function highlightSentence(i){
-  const c=document.querySelector('.sentence.current'); if(c) c.classList.remove('current');
-  const s=document.getElementById('sentence_'+i);
-  if(s){ s.classList.add('current'); s.scrollIntoView({behavior:'smooth',block:'center'}); }
-}
-function markSentenceSpoken(i){
-  const s=document.getElementById('sentence_'+i);
-  if(s){ s.classList.add('spoken'); s.classList.remove('current'); }
-}
-function clearHighlights(){
-  document.querySelectorAll('.sentence').forEach(s=>s.classList.remove('current','spoken'));
-}
-function getAllText(){ return document.body.innerText||document.body.textContent||''; }
-
-/* Rebuild DOM spans from an array of sentence strings (keeps contenteditable) */
-function setSentences(arr){
-  const body=document.body;
-  body.innerHTML='';
-  body.setAttribute('contenteditable','true');
-  body.setAttribute('spellcheck','false');
-  for(let i=0;i<arr.length;i++){
-    const span=document.createElement('span');
-    span.className='sentence';
-    span.id='sentence_'+(i+1);
-    span.textContent=arr[i];        // safe text insertion
-    body.appendChild(span);
-    body.appendChild(document.createTextNode(' '));
-  }
-}
+function highlightSentence(i){const c=document.querySelector('.sentence.current');if(c)c.classList.remove('current');
+  const s=document.getElementById('sentence_'+i);if(s){s.classList.add('current');s.scrollIntoView({behavior:'smooth',block:'center'});}}
+function markSentenceSpoken(i){const s=document.getElementById('sentence_'+i);if(s){s.classList.add('spoken');s.classList.remove('current');}}
+function clearHighlights(){document.querySelectorAll('.sentence').forEach(s=>s.classList.remove('current','spoken'));}
+function getAllText(){return document.body.innerText||document.body.textContent||'';}
 </script></head><body contenteditable="true" spellcheck="false">"""
         for i, s in enumerate(sents, 1):
             html_doc += f'<span class="sentence" id="sentence_{i}">{html.escape(s)}</span> '
@@ -206,13 +182,6 @@ function setSentences(arr){
         except Exception as e:
             print(f"[JS] call error: {e}")
 
-    def set_sentences_in_webview(self, sentences):
-        try:
-            payload = json.dumps(sentences)
-            self.web_view.evaluate_javascript(f"setSentences({payload});", -1, None, None, None, None, None)
-        except Exception as e:
-            print(f"[JS] setSentences error: {e}")
-
     def highlight_sentence(self, idx): self.js_fire_and_forget(f"highlightSentence({int(idx)});")
     def mark_sentence_spoken(self, idx): self.js_fire_and_forget(f"markSentenceSpoken({int(idx)});")
     def clear_highlights(self): self.js_fire_and_forget("clearHighlights();")
@@ -221,27 +190,42 @@ function setSentences(arr){
         def on_text_received(web_view, result, user_data):
             try:
                 jsres = web_view.evaluate_javascript_finish(result)
+                # Robust across API shapes:
                 val = jsres
-                if hasattr(jsres, "get_js_value"):
+                if hasattr(jsres, "get_js_value"):  # some builds return WebKit.JavascriptResult
                     val = jsres.get_js_value()
                 text = ""
                 if isinstance(val, JavaScriptCore.Value):
                     try:
-                        if hasattr(val, "is_string") and val.is_string(): text = val.to_string()
+                        # Prefer exact string if it is one
+                        if hasattr(val, "is_string") and val.is_string():
+                            text = val.to_string()
                         else:
-                            try: text = val.to_json(0) or ""
-                            except Exception: text = str(val)
+                            # Fallback to JSON stringification if not a string
+                            try:
+                                text = val.to_json(0) or ""
+                            except Exception:
+                                text = str(val)
                     except Exception:
                         text = str(val)
                 else:
                     text = str(val)
+
                 cleaned = ' '.join((text or "").strip().split())
                 if cleaned:
-                    self.current_text = cleaned
-                # (re)tokenize regardless so DOM and indices match
-                self.sentences = tokenize(self.current_text)
-                self.total_sentences = len(self.sentences)
-                print(f"[TEXT] Using {self.total_sentences} sentences")
+                    if cleaned != self.current_text:
+                        self.current_text = cleaned
+                        self.sentences = tokenize(self.current_text)
+                        self.total_sentences = len(self.sentences)
+                        print(f"[TEXT] Updated: {self.total_sentences} sentences")
+                    else:
+                        self.sentences = tokenize(self.current_text)
+                        self.total_sentences = len(self.sentences)
+                        print("[TEXT] Unchanged")
+                else:
+                    print("[TEXT] Empty; using stored text")
+                    self.sentences = tokenize(self.current_text)
+                    self.total_sentences = len(self.sentences)
             except Exception as e:
                 print(f"[TEXT] JS finish error: {e}")
                 self.sentences = tokenize(self.current_text)
@@ -275,16 +259,12 @@ function setSentences(arr){
             def start_playback():
                 if not self.sentences:
                     self.status_label.set_label("No text to play"); return
-                # rebuild spans from *current* pasted text to keep IDs in sync
-                self.set_sentences_in_webview(self.sentences)
-                GLib.idle_add(self.highlight_sentence, 1)
-
                 if hasattr(self, 'prod_process') and self.prod_process and self.prod_process.is_alive():
                     try: self.prod_process.terminate(); self.prod_process.join(timeout=1)
                     except: pass
                 self.ctrl = Controls()
                 self.q = MPQ(maxsize=16)
-
+                GLib.idle_add(self.highlight_sentence, 1)
                 d = outdir()
                 self.prod_process = Process(target=producer_proc, args=(self.sentences, 1, d, self.q))
                 self.prod_process.start()
@@ -430,53 +410,6 @@ function setSentences(arr){
             GLib.idle_add(self.cleanup_playback)
             GLib.idle_add(self.status_label.set_label, "Playback finished")
         print("[PLAY ] exit")
-
-    def load_text_to_webview(self, text):
-        self.current_text = text
-        sents = tokenize(text)
-        html_doc = """
-    <!DOCTYPE html><html><head><meta charset="utf-8">
-    <meta name="color-scheme" content="light dark">
-    <style>
-    :root{
-      --bg:#ffffff; --fg:#333333; --muted:#888888; --hover:#f0f0f0; --highlight:#87CEEB;
-    }
-    @media (prefers-color-scheme: dark){
-      :root{
-        --bg:#1e1e1e; --fg:#c0c0c0; --muted:#9a9a9a; --hover:#2a2a2a; --highlight:#325b70;
-      }
-    }
-    html,body{
-      background:var(--bg); color:var(--fg);
-      font-family:-webkit-system-font,system-ui,sans-serif; font-size:16px; line-height:1.6;
-      padding:20px; margin:0;
-    }
-    .sentence{display:inline}
-    .sentence.current{background:var(--highlight); font-weight:bold; border-radius:3px; padding:2px 4px}
-    .sentence.spoken{color:var(--muted)}
-    .sentence:hover{background:var(--hover); cursor:pointer}
-    ::selection{background:#264f78;color:inherit}
-    </style>
-    <script>
-    function highlightSentence(i){
-      const c=document.querySelector('.sentence.current'); if(c) c.classList.remove('current');
-      const s=document.getElementById('sentence_'+i);
-      if(s){ s.classList.add('current'); s.scrollIntoView({behavior:'smooth',block:'center'}); }
-    }
-    function markSentenceSpoken(i){ const s=document.getElementById('sentence_'+i); if(s){ s.classList.add('spoken'); s.classList.remove('current'); } }
-    function clearHighlights(){ document.querySelectorAll('.sentence').forEach(s=>s.classList.remove('current','spoken')); }
-    function getAllText(){ return document.body.innerText||document.body.textContent||''; }
-    function setSentences(arr){
-      const body=document.body; body.innerHTML=''; body.setAttribute('contenteditable','true'); body.setAttribute('spellcheck','false');
-      for(let i=0;i<arr.length;i++){ const span=document.createElement('span'); span.className='sentence'; span.id='sentence_'+(i+1); span.textContent=arr[i]; body.appendChild(span); body.appendChild(document.createTextNode(' ')); }
-    }
-    </script></head><body contenteditable="true" spellcheck="false">"""
-        for i, s in enumerate(sents, 1):
-            html_doc += f'<span class="sentence" id="sentence_{i}">{html.escape(s)}</span> '
-        html_doc += "</body></html>"
-        self.web_view.load_html(html_doc)
-
-
 
 class TTSApp(Adw.Application):
     def __init__(self, **kwargs):
