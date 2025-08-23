@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # HTML TTS editor (Adw/GTK4/WebKitGTK 6) with sentence+word highlight
-# Keeps original HTML formatting; better sync across <i>/<u>/<b>/<strike>.
+# Keeps original HTML formatting; better sync.
 # App ID: io.github.fastrizwaan.tts   Keys: z=pause/resume, s=stop, a=prev, d=next.
 
 import os, re, sys, html as htmllib, threading, subprocess, time, pathlib, json
@@ -132,15 +132,23 @@ def html_for_tts_only(html: str) -> str:
     return s.strip()
 
 def tokenize_html_for_tts(html: str):
+    """Extract sentences from HTML and return both plain text sentences and word lists"""
     text = html_for_tts_only(html)
     parts = SENT_SPLIT.split(text)
-    sentences, word_lists = [], []
+    sentences = []
+    word_lists = []
+    
     for p in parts:
         t = p.strip()
         if not t: continue
         if not re.search(r'[.!?]$', t): t += '.'
+        
+        # Extract words using the same regex as JavaScript
         words = [w for w in WORD_RX.findall(t) if w.strip()]
-        if words: sentences.append(t); word_lists.append(words)
+        if words:  # Only add if we have actual words
+            sentences.append(t)
+            word_lists.append(words)
+    
     return sentences, word_lists
 
 def downloads_dir():
@@ -197,6 +205,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         if self.current_file and (initial_html is None): self.load_file(self.current_file)
 
+    # ---- Editor HTML (no f-string; avoids brace parsing) ----
     def _load_editor_html(self, body_html=None):
         html = """<!doctype html>
 <html style="height:100%">
@@ -215,87 +224,72 @@ html,body { height:100%; margin:0; }
   .sent.playing { background: rgba(255,183,61,0.25); outline-color: rgba(229,151,40,0.5); }
   .w.playing { background: rgba(135,206,250,0.35); }
 }
-@media (prefers-color-scheme: light) { html,body { background:#ffffff; color:#000; } }
-.sent.playing, .w.playing { text-decoration-skip-ink:auto; }
+@media (prefers-color-scheme: light) {
+  html,body { background:#ffffff; color:#000; }
+}
 </style>
 <script>
 let CUR_S=-1, CUR_W=-1;
-let SENTENCE_DATA = [];
+let SENTENCE_DATA = []; // Will hold {text: "...", words: ["word1", "word2", ...]}
 
 function init(){
   const ed=document.getElementById('editor'); ed.setAttribute('contenteditable','true');
   ed.addEventListener('paste', (e)=>{
     const html = e.clipboardData.getData('text/html');
-    if (html) { e.preventDefault(); document.execCommand('insertHTML', false, extractBody(html)); }
+    if (html) {
+      e.preventDefault();
+      const inner = extractBody(html);
+      document.execCommand('insertHTML', false, inner);
+    }
   });
 }
-function extractBody(html){ const m=/<body[^>]*>([\\s\\S]*?)<\\/body>/i.exec(html); return m?m[1]:html; }
+
+function extractBody(html){
+  const m = /<body[^>]*>([\\s\\S]*?)<\\/body>/i.exec(html);
+  return m?m[1]:html;
+}
+
 function getHTML(){ return document.getElementById('editor').innerHTML; }
-function setSentenceData(data){ SENTENCE_DATA=data; }
 
-/* Robust highlighter that works across inline tags (<i>/<u>/<b>/<strike>) */
+function setSentenceData(data) {
+  SENTENCE_DATA = data;
+}
+
+/* Build play view using the sentence data from Python to ensure exact matching */
 function buildPlayViewFromSentenceData(){
-  const ed=document.getElementById('editor'), pv=document.getElementById('playview');
-  pv.innerHTML = ed.innerHTML;
-  if (!SENTENCE_DATA.length) return;
-
-  const full = pv.textContent || '';
-  const WORD_RX = /[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?|[.,!?;:—-]/g;
-
-  // All words with global offsets in the flattened text
-  const allWords=[]; for (const m of full.matchAll(WORD_RX)) allWords.push({t:m[0], start:m.index, end:m.index+m[0].length});
-
-  // Map sentence words -> flattened words (skips over mismatches)
-  const map=[]; let k=0;
-  for (let si=0; si<SENTENCE_DATA.length && k<allWords.length; si++){
-    const ws=SENTENCE_DATA[si].words;
-    for (let wj=0; wj<ws.length; wj++){
-      while (k<allWords.length && allWords[k].t!==ws[wj]) k++;
-      if (k>=allWords.length) break;
-      map.push({si:si+1, wj:wj+1, start:allWords[k].start, end:allWords[k].end});
-      k++;
+  const ed = document.getElementById('editor');
+  const pv = document.getElementById('playview');
+  
+  if (SENTENCE_DATA.length === 0) {
+    pv.innerHTML = ed.innerHTML;
+    return;
+  }
+  
+  // Create a simplified version that matches our sentence/word structure
+  let html = '';
+  SENTENCE_DATA.forEach((sentData, idx) => {
+    const sIdx = idx + 1;
+    html += `<span class="sent" data-i="${sIdx}">`;
+    
+    sentData.words.forEach((word, wIdx) => {
+      const wjIdx = wIdx + 1;
+      html += `<span class="w" data-j="${wjIdx}">${word}</span>`;
+      if (wIdx < sentData.words.length - 1) {
+        html += ' ';
+      }
+    });
+    
+    html += '</span>';
+    if (idx < SENTENCE_DATA.length - 1) {
+      html += ' ';
     }
-  }
-
-  // Sentence ranges (min start .. max end of its words)
-  const sentRanges=new Map();
-  for (const m of map){
-    const s = sentRanges.get(m.si) || {si:m.si, start:m.start, end:m.end};
-    s.start=Math.min(s.start, m.start); s.end=Math.max(s.end, m.end);
-    sentRanges.set(m.si, s);
-  }
-
-  function textNodesWithOffsets(root){
-    const nodes=[]; const walker=document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
-    let off=0, n;
-    while(n=walker.nextNode()){ const len=n.nodeValue.length; nodes.push({node:n,start:off,end:off+len}); off+=len; }
-    return nodes;
-  }
-  function makeRange(start,end){
-    const nodes=textNodesWithOffsets(pv);
-    function loc(pos){ for (const it of nodes){ if (pos>=it.start && pos<=it.end) return {node:it.node,off:pos-it.start}; } return null; }
-    const a=loc(start), b=loc(end);
-    if(!a||!b) return null;
-    const r=document.createRange(); r.setStart(a.node,a.off); r.setEnd(b.node,b.off); return r;
-  }
-  function wrapRange(range, cls, dataset){
-    if(!range) return null;
-    const span=document.createElement('span'); span.className=cls;
-    if (dataset) for (const [k,v] of Object.entries(dataset)) span.dataset[k]=String(v);
-    const frag=range.extractContents(); span.appendChild(frag); range.insertNode(span); return span;
-  }
-
-  // Wrap words first (descending offsets to keep indices valid)
-  const wordsDesc = map.slice().sort((a,b)=>b.start-a.start);
-  for (const m of wordsDesc){ const r=makeRange(m.start,m.end); wrapRange(r,'w',{i:m.si,j:m.wj}); }
-
-  // Wrap sentences (descending)
-  const sDesc = Array.from(sentRanges.values()).sort((a,b)=>b.start-a.start);
-  for (const s of sDesc){ const r=makeRange(s.start,s.end); wrapRange(r,'sent',{i:s.si}); }
+  });
+  
+  pv.innerHTML = html;
 }
 
 function showPlayView(show){
-  const ed=document.getElementById('editor'), pv=document.getElementById('playview');
+  const ed=document.getElementById('editor'); const pv=document.getElementById('playview');
   pv.style.display = show ? 'block' : 'none';
   ed.style.display = show ? 'none' : 'block';
 }
@@ -303,9 +297,11 @@ function showPlayView(show){
 function highlightSentence(idx){
   const pv=document.getElementById('playview');
   pv.querySelectorAll('.sent.playing').forEach(n=>n.classList.remove('playing'));
-  const nodes=pv.querySelectorAll('.sent[data-i="'+idx+'"]');
-  if(nodes.length) nodes[0].scrollIntoView({block:'nearest',inline:'nearest'});
-  nodes.forEach(n=>n.classList.add('playing'));
+  const s = pv.querySelector('.sent[data-i="'+idx+'"]');
+  if (s) { 
+    s.classList.add('playing'); 
+    s.scrollIntoView({block:'nearest', inline:'nearest'}); 
+  }
   CUR_S=idx; CUR_W=-1;
   pv.querySelectorAll('.w.playing').forEach(n=>n.classList.remove('playing'));
 }
@@ -314,10 +310,13 @@ function highlightWord(idx, wj){
   if (idx!==CUR_S) return;
   const pv=document.getElementById('playview');
   pv.querySelectorAll('.w.playing').forEach(n=>n.classList.remove('playing'));
-  const nodes=pv.querySelectorAll('.sent[data-i="'+idx+'"] .w[data-j="'+wj+'"]');
-  if(nodes.length) nodes[0].scrollIntoView({block:'nearest',inline:'nearest'});
-  nodes.forEach(n=>n.classList.add('playing'));
-  CUR_W=wj;
+  const s = pv.querySelector('.sent[data-i="'+idx+'"]'); if (!s) return;
+  const w = s.querySelector('.w[data-j="'+wj+'"]');
+  if (w) { 
+    w.classList.add('playing'); 
+    w.scrollIntoView({block:'nearest', inline:'nearest'}); 
+    CUR_W=wj; 
+  }
 }
 
 window.addEventListener('DOMContentLoaded', init);
@@ -365,13 +364,23 @@ window.addEventListener('DOMContentLoaded', init);
         self.js_get_html(self._start_tts_from_html)
 
     def _start_tts_from_html(self, html_str):
+        # Use the improved tokenization that returns both sentences and word lists
         sents, words = tokenize_html_for_tts(html_str)
         if not sents: self.set_status("No sentences."); return
-        self.sents = sents; self.words = words
-        sentence_data = [{"text": s, "words": w} for s, w in zip(sents, words)]
+        
+        self.sents = sents
+        self.words = words
+        
+        # Pass sentence data to JavaScript for exact matching
+        sentence_data = []
+        for i, (sent, word_list) in enumerate(zip(sents, words)):
+            sentence_data.append({"text": sent, "words": word_list})
+        
+        # Send the sentence data to JavaScript
         sentence_data_json = json.dumps(sentence_data).replace('"', '\\"')
         self.js(f'setSentenceData(JSON.parse("{sentence_data_json}"));')
         self.js("buildPlayViewFromSentenceData(); showPlayView(true);")
+        
         self.set_status(f"Sentences: {len(sents)}")
         self.q = MPQ(maxsize=16); self.ctrl = Controls()
         outdir = downloads_dir()
@@ -383,9 +392,7 @@ window.addEventListener('DOMContentLoaded', init);
 
     def _clear_word_timer(self):
         if self.word_timer_id:
-            try: GLib.source_remove(self.word_timer_id)
-            except: pass
-            self.word_timer_id = None
+            GLib.source_remove(self.word_timer_id); self.word_timer_id=None
 
     def _build_word_schedule(self, words, dur_s):
         if not words: return []
@@ -395,7 +402,7 @@ window.addEventListener('DOMContentLoaded', init);
             elif w in (',',';','—','-'): weights.append(1.5)
             else: weights.append(max(1.0, len(w)*0.6))
         total = sum(weights); t=0.0; sched=[]
-        for i,_w in enumerate(words, start=1):
+        for i,w in enumerate(words, start=1):
             frac = weights[i-1]/total; t += dur_s*frac; sched.append((i, t))
         return sched
 
@@ -480,4 +487,3 @@ class App(Adw.Application):
 def main():
     Adw.init(); return App().run(sys.argv)
 if __name__ == "__main__": main()
-
