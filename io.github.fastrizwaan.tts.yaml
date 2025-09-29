@@ -725,6 +725,46 @@ modules:
         url: https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
         sha256: bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d
 
+
+  - name: ebooklib
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app ebooklib*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/66/59/e63fd0b3410d2ab7a8971b070f40390f1fbeb3c7a85849718c8480313cbf/ebooklib-0.19-py3-none-any.whl
+      sha256: a790e280e1d5ef105e350e34cc88b83c9c987fa6bab8a63a7543410c313cfa31
+      x-checker-data:
+        type: pypi
+        name: ebooklib
+        packagetype: bdist_wheel
+
+  - name: lxml
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --target=/app/lib/python3.12/site-packages lxml*.whl
+
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/c6/d1/232b3309a02d60f11e71857778bfcd4acbdb86c07db8260caf7d008b08f8/lxml-6.0.2-cp312-cp312-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl
+        sha256: 90a345bbeaf9d0587a3aaffb7006aa39ccb6ff0e96a57286c0cb2fd1520ea192
+        only-arches:
+          - x86_64
+        x-checker-data:
+          type: pypi
+          name: lxml
+          packagetype: bdist_wheel
+      - type: file
+        url: https://files.pythonhosted.org/packages/c8/20/a7760713e65888db79bbae4f6146a6ae5c04e4a204a3c48896c408cd6ed2/lxml-6.0.2-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl
+        sha256: c371aa98126a0d4c739ca93ceffa0fd7a5d732e3ac66a46e74339acd4d334564
+        only-arches:
+          - aarch64
+        x-checker-data:
+          type: pypi
+          name: lxml
+          packagetype: bdist_wheel
+
+        
   - name: python3
     buildsystem: simple
     build-commands:

@@ -565,8 +565,10 @@ class PDFEditor(Adw.Application):
         if self.selected_overlay and isinstance(self.selected_overlay, OverlayImage):
             new_width = spin.get_value()
             if self.aspect_locked:
+                # Maintain aspect ratio - adjust height based on width
                 self.selected_overlay.height = new_width / self.selected_overlay.aspect_ratio
                 self.image_height_spin.set_value(self.selected_overlay.height)
+            # Always update width regardless of aspect lock
             self.selected_overlay.width = new_width
             self.drawing_area.queue_draw()
 
@@ -574,8 +576,10 @@ class PDFEditor(Adw.Application):
         if self.selected_overlay and isinstance(self.selected_overlay, OverlayImage):
             new_height = spin.get_value()
             if self.aspect_locked:
+                # Maintain aspect ratio - adjust width based on height
                 self.selected_overlay.width = new_height * self.selected_overlay.aspect_ratio
                 self.image_width_spin.set_value(self.selected_overlay.width)
+            # Always update height regardless of aspect lock
             self.selected_overlay.height = new_height
             self.drawing_area.queue_draw()
 
