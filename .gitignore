@@ -1,1 +1,6 @@
 .flatpak-builder
+en_US-ryan-medium.onnx
+en_US-ryan-medium.onnx.json
+*.wav
+*.onnx
+*.onnx.json
