@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # Complete EPUB viewer with robust TTS integrated + sidebar TOC
 import os, json, tempfile, shutil, re, urllib.parse, signal, sys, math, threading, queue, subprocess, uuid, time, pathlib, hashlib, multiprocessing
+import html as _html
+
 os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
 import gi
 gi.require_version('Gtk', '4.0')
@@ -20,87 +22,15 @@ except Exception:
 Adw.init()
 
 # --- Utilities ---
-# --- Utilities ---
-# Robust stable id and improved sentence splitter used across the app.
+_s_re_split = re.compile(r'(?<=[.!?])\s+|\n+')
+def split_sentences(text):
+    return [p.strip() for p in _s_re_split.split(text) if p and p.strip()]
 
-_s_re_split = re.compile(
-    # fixed-width lookbehinds only (no variable-width lookbehind)
-    # 1) punctuation (.!? ) followed by whitespace
-    # 2) punctuation immediately followed by a closing quote char, then whitespace
-    r'(?<=[.!?])\s+|(?<=[.!?][\u0022\u201d\u2019\u00BB\u00B4])\s+|\n+'
-)
+def stable_id_for_text(text):
+    """Short stable id for a sentence (sha1 hex truncated)."""
+    h = hashlib.sha1(text.encode('utf-8')).hexdigest()
+    return h[:12]
 
-# Opening and closing quote characters we consider
-_OPENING_QUOTES = '\u0022\u201c\u2018\u00AB'    # "  “  ‘  «
-_CLOSING_QUOTES = '\u0022\u201d\u2019\u00BB\u00B4'  # "  ”  ’  »  ´
-
-def stable_id_for_text(text: str) -> str:
-    """
-    Deterministic short id for a sentence (sha1 hex truncated).
-    Defensive: never raises and never returns None. If text is empty, returns a stable uuid-based fallback.
-    """
-    try:
-        if not text:
-            # stable fallback for empty strings (short but unique-ish)
-            return ("_empty_" + uuid.uuid5(uuid.NAMESPACE_URL, "empty").hex)[:20]
-        h = hashlib.sha1(text.encode('utf-8')).hexdigest()
-        return h[:12]
-    except Exception:
-        # final defensive fallback
-        return ("_err_" + uuid.uuid4().hex)[:20]
-
-def split_sentences(text: str) -> list:
-    """
-    Improved sentence splitting:
-      - Recognizes sentence-ending punctuation optionally followed by closing quotes.
-      - Normalizes whitespace/newlines.
-      - Merges tiny stray fragments (like "2." or '“E') into the following sentence.
-    Returns list[str] (clean sentences).
-    """
-    if not text:
-        return []
-
-    # Normalize newlines/whitespace
-    txt = text.replace('\r', '\n')
-    txt = re.sub(r'\n{2,}', '\n\n', txt)  # keep paragraph breaks, squash excess
-    txt = re.sub(r'[ \t]+', ' ', txt)     # collapse repeated spaces/tabs
-
-    # naive split using safe fixed-width lookbehinds
-    raw = [p.strip() for p in _s_re_split.split(txt) if p and p.strip()]
-
-    # Post-process: merge short/odd fragments into the next sentence
-    out = []
-    i = 0
-    while i < len(raw):
-        s = raw[i]
-        visible_len = len(re.sub(r'\s+', '', s))
-        is_digits_or_punct = re.fullmatch(r'^[\d\W_]+$', s) is not None
-
-        # detect opening-quote fragment e.g. '“E' or standalone opening quote
-        looks_like_open_quote_frag = False
-        if s:
-            first_char = s[0]
-            if first_char in _OPENING_QUOTES and visible_len <= 2:
-                looks_like_open_quote_frag = True
-
-        merge_condition = (is_digits_or_punct or visible_len < 3 or looks_like_open_quote_frag)
-
-        if merge_condition and (i + 1) < len(raw):
-            # merge into the next fragment (preserve spacing)
-            merged = (s + ' ' + raw[i + 1]).strip()
-            raw[i + 1] = merged
-            # skip appending s; merged item will be processed when i increments
-            i += 1
-            continue
-        else:
-            s_clean = s.strip()
-            if s_clean:
-                out.append(s_clean)
-            i += 1
-
-    # Final cleanup
-    out = [s for s in out if s and s.strip()]
-    return out
 
 # This helper runs inside a subprocess to synthesize a single sentence via Kokoro.
 # It is top-level so it can be pickled by multiprocessing.
@@ -779,9 +709,12 @@ class EpubViewer(Adw.ApplicationWindow):
 
     def _populate_toc_list(self):
         """Fill the sidebar ListBox with chapter rows."""
-        # clear
-        for row in self.toc_list.get_children():
-            self.toc_list.remove(row)
+        # clear - GTK4 way
+        child = self.toc_list.get_first_child()
+        while child:
+            next_child = child.get_next_sibling()
+            self.toc_list.remove(child)
+            child = next_child
 
         for idx, ch in enumerate(self.chapters):
             title = ch.get('title') or f"Chapter {idx+1}"
@@ -789,11 +722,10 @@ class EpubViewer(Adw.ApplicationWindow):
             label.set_xalign(0)
             row = Gtk.ListBoxRow()
             row.set_activatable(True)
-            row.add(label)
+            row.set_child(label)  # GTK4 uses set_child() instead of add()
             # store index on row for activation
             row._chapter_index = idx
             self.toc_list.append(row)
-        self.toc_list.show()
 
     def _on_toc_row_activated(self, listbox, row):
         # called when a row is double-clicked or activated (Enter)
@@ -1433,9 +1365,13 @@ class EpubViewer(Adw.ApplicationWindow):
                 })
 
     def process_chapter_content(self, content, item):
-        # (same body as original - injected spans and CSS)
+        from bs4 import BeautifulSoup, NavigableString, Comment
+        from html import unescape
+        import urllib.parse
+
         self.calculate_column_dimensions()
         apply_columns = not self.is_single_column_mode()
+
         if apply_columns:
             if self.column_mode == 'fixed':
                 column_css = f"column-count: {self.fixed_column_count}; column-gap: {self.column_gap}px;"
@@ -1551,39 +1487,19 @@ class EpubViewer(Adw.ApplicationWindow):
         </script>
         """
 
-        body_match = re.search(r'<body[^>]*>(.*?)</body>', content, re.DOTALL | re.IGNORECASE)
-        body_content = body_match.group(1) if body_match else content
-
-        body_content = re.sub(r'</?(?:html|head|meta|title)[^>]*>', '', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'<style[^>]*>.*?</style>', '', body_content, flags=re.DOTALL | re.IGNORECASE)
-
+        # parse with BeautifulSoup
         try:
-            body_content = re.sub(
-                r'(?<=^|>)(\s*[^<\s][^<]*?)(?=<|$)',
-                lambda m: '<p>' + m.group(1).strip() + '</p>',
-                body_content,
-                flags=re.DOTALL
-            )
+            soup = BeautifulSoup(content, "html.parser")
         except Exception:
-            pass
+            # fallback: wrap into minimal body
+            soup = BeautifulSoup(f"<body>{content}</body>", "html.parser")
 
-        resources_dir_fs = os.path.join(self.temp_dir, 'resources')
-        available = set(os.listdir(resources_dir_fs)) if os.path.isdir(resources_dir_fs) else set()
-        def repl_src(m):
-            orig = m.group(1)
-            name = os.path.basename(orig)
-            if name in available:
-                return f'src="resources/{name}"'
-            return f'src="{orig}"'
-        body_content = re.sub(r'src=["\']([^"\']+)["\']', repl_src, body_content, flags=re.IGNORECASE)
-        def repl_href(m):
-            orig = m.group(1)
-            name = os.path.basename(orig)
-            if name in available:
-                return f'href="resources/{name}"'
-            return f'href="{orig}"'
-        body_content = re.sub(r'href=["\']([^"\']+)["\']', repl_href, body_content, flags=re.IGNORECASE)
+        # remove head/meta/style/title so our CSS applies cleanly
+        for t in soup.find_all(["head", "meta", "title", "style", "link"]):
+            t.decompose()
 
+        # Map resources to local files only AFTER we produce final body HTML (we'll do this later).
+        # Wrap sentences: walk target tags and replace text nodes with spans per sentence.
         TARGET_TAGS = [
             'p','div','span','section','article','li','label',
             'blockquote','figcaption','caption','dt','dd',
@@ -1591,86 +1507,81 @@ class EpubViewer(Adw.ApplicationWindow):
             'h1','h2','h3','h4','h5','h6'
         ]
 
-        def make_replacer(tag):
-            pattern = re.compile(rf'<{tag}([^>]*)>(.*?)</{tag}>', flags=re.DOTALL | re.IGNORECASE)
-
-            def find_html_span_for_plain_range(html, plain_start, plain_len):
-                p = 0
-                html_start = None
-                html_end = None
-                i = 0
-                L = len(html)
-                while i < L and p <= plain_start + plain_len:
-                    if html[i] == '<':
-                        j = html.find('>', i)
-                        if j == -1:
-                            break
-                        i = j + 1
+        for tagname in TARGET_TAGS:
+            for elem in list(soup.find_all(tagname)):
+                # collect text descendants (NavigableString) to operate on
+                text_nodes = []
+                for desc in elem.descendants:
+                    if isinstance(desc, Comment):
                         continue
-                    if p == plain_start and html_start is None:
-                        html_start = i
-                    p += 1
-                    i += 1
-                    if p == plain_start + plain_len:
-                        html_end = i
-                        break
-                return (html_start, html_end)
-
-            def repl(m):
-                attrs = m.group(1) or ''
-                inner = m.group(2) or ''
-
-                plain = re.sub(r'<[^>]+>', '', inner)
-                plain = plain.replace('\r', ' ').replace('\n', ' ')
-                sents = split_sentences(plain)
-                if not sents:
-                    return m.group(0)
-
-                out_html = inner
-                offset = 0
-                cur_plain_pos = 0
-
-                for s in sents:
-                    s_clean = s.strip()
-                    if not s_clean:
-                        continue
-                    plen = len(s_clean)
-                    next_pos = plain.find(s_clean, cur_plain_pos)
-                    if next_pos == -1:
-                        next_pos = plain.find(s_clean)
-                        if next_pos == -1:
-                            cur_plain_pos += plen
+                    if isinstance(desc, NavigableString):
+                        parent = desc.parent
+                        if parent and getattr(parent, "name", "").lower() in ("script", "style", "head", "meta", "link", "iframe", "svg", "noscript"):
                             continue
-
-                    span = find_html_span_for_plain_range(inner, next_pos, plen)
-                    if not span or span[0] is None or span[1] is None:
-                        sid = stable_id_for_text(s_clean)
-                        esc = (s_clean.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
-                        span_html = f'<span data-tts-id="{sid}">{esc}</span>'
-                        out_html = out_html.replace(s_clean, span_html, 1)
-                        cur_plain_pos = next_pos + plen
-                        offset += len(span_html) - plen
+                        txt = str(desc)
+                        if txt and not txt.isspace():
+                            text_nodes.append(desc)
+                # replace each text node preserving sibling inline tags
+                for node in text_nodes:
+                    orig_text = str(node)
+                    norm = orig_text.replace('\r', ' ').replace('\n', ' ')
+                    # split_sentences uses (?<=[.!?])\s+|\n+ ; keep that to split on . ! ?
+                    sents = split_sentences(unescape(norm))
+                    if not sents:
                         continue
+                    last = node
+                    # insert spans for each sentence
+                    for i, s in enumerate(sents):
+                        s_clean = s.strip()
+                        if not s_clean:
+                            continue
+                        sid = stable_id_for_text(s_clean)
+                        span_tag = soup.new_tag("span")
+                        span_tag.attrs["data-tts-id"] = sid
+                        span_tag.append(NavigableString(s_clean))
+                        last.insert_after(span_tag)
+                        last = span_tag
+                        # preserve a single space between sentences if original had it
+                        if i != len(sents) - 1:
+                            spacer = NavigableString(" ")
+                            last.insert_after(spacer)
+                            last = spacer
+                    node.extract()
 
-                    hstart, hend = span
-                    sid = stable_id_for_text(s_clean)
-                    exact_fragment = inner[hstart:hend]
-                    span_html = f'<span data-tts-id="{sid}">{exact_fragment}</span>'
+        # Build body_content HTML
+        body = soup.body
+        if body:
+            body_content = "".join(str(ch) for ch in body.contents)
+        else:
+            body_content = str(soup)
 
-                    out_pos = hstart + offset
-                    out_html = out_html[:out_pos] + span_html + out_html[out_pos + (hend - hstart):]
-                    offset += len(span_html) - (hend - hstart)
-                    cur_plain_pos = next_pos + plen
+        # Now map resources to bundled resources/ directory (do this after wrapping)
+        resources_dir_fs = os.path.join(self.temp_dir or "", 'resources')
+        available = set(os.listdir(resources_dir_fs)) if os.path.isdir(resources_dir_fs) else set()
 
-                return f'<{tag}{attrs}>' + out_html + f'</{tag}>'
+        def repl_src_after(m):
+            orig = m.group(1)
+            if orig.startswith("data:") or orig.startswith("resources/") or orig.startswith("/"):
+                return f'src="{orig}"'
+            name = os.path.basename(urllib.parse.urlparse(orig).path)
+            if name in available:
+                return f'src="resources/{name}"'
+            return f'src="{orig}"'
 
-            return pattern, repl
+        def repl_href_after(m):
+            orig = m.group(1)
+            if orig.startswith("#") or orig.startswith("resources/") or orig.startswith("/"):
+                return f'href="{orig}"'
+            name = os.path.basename(urllib.parse.urlparse(orig).path)
+            if name in available:
+                return f'href="resources/{name}"'
+            return f'href="{orig}"'
 
-        for tag in TARGET_TAGS:
-            pat, repl = make_replacer(tag)
-            body_content = pat.sub(repl, body_content)
+        body_content = re.sub(r'src=["\']([^"\']+)["\']', repl_src_after, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'href=["\']([^"\']+)["\']', repl_href_after, body_content, flags=re.IGNORECASE)
 
         return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{css_styles}</head><body>{body_content}{script}</body></html>"""
+
 
     def extract_resources(self):
         if not self.current_book or not self.temp_dir:

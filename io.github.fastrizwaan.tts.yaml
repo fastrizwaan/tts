@@ -1014,6 +1014,32 @@ modules:
           name: lxml
           packagetype: bdist_wheel
 
+  - name: soupsieve
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app soupsieve*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/14/a0/bb38d3b76b8cae341dad93a2dd83ab7462e6dbcdd84d43f54ee60a8dc167/soupsieve-2.8-py3-none-any.whl
+      sha256: 0cc76456a30e20f5d7f2e14a98a4ae2ee4e5abdc7c5ea0aafe795f344bc7984c
+      x-checker-data:
+        type: pypi
+        name: soupsieve
+        packagetype: bdist_wheel    
+        
+  - name: beautifulsoup4
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app beautifulsoup4*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/94/fe/3aed5d0be4d404d12d36ab97e2f1791424d9ca39c2f754a6285d59a3b01d/beautifulsoup4-4.14.2-py3-none-any.whl
+      sha256: 5ef6fa3a8cbece8488d66985560f97ed091e22bbc4e9c2338508a9d5de6d4515
+      x-checker-data:
+        type: pypi
+        name: beautifulsoup4
+        packagetype: bdist_wheel                   
+
         
   - name: python3
     buildsystem: simple
