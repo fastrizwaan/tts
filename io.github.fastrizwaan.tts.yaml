@@ -1045,9 +1045,17 @@ modules:
     buildsystem: simple
     build-commands:
       - install -Dm755 tts.sh /app/bin/tts
-      - install -Dm755 speech7.py /app/bin/speech7.py
+      - install -Dm755 epub.min.js /app/bin/epub.min.js
+      - install -Dm755 speech7.py /app/bin/speech7.py        
+      - install -Dm755 jszip.min.js /app/bin/jszip.min.js
       - install -Dm755 io.github.fastrizwaan.tts.desktop /app/share/applications/io.github.fastrizwaan.tts.desktop
     sources:
+      - type: file
+        url:  https://unpkg.com/epubjs/dist/epub.min.js
+        sha256: 06eae15745107b4aa508c95538275251f69bfb9f1175621fc458d9f42ed082d4
+      - type: file
+        url:  https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
+        sha256: acc7e41455a80765b5fd9c7ee1b8078a6d160bbbca455aeae854de65c947d59e
       - type: file
         path: tts.sh
       - type: file
