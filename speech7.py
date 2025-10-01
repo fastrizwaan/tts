@@ -133,6 +133,7 @@ class TTSEngine:
             return None
 
     def _cancel_delayed_timer(self):
+        """Cancel any pending delayed synthesis timer"""
         with self._delayed_timer_lock:
             if self._delayed_timer:
                 try:
@@ -471,26 +472,34 @@ class TTSEngine:
         self._cancel_delayed_timer()
 
     def stop(self):
+        """Stop TTS playback and cleanup resources"""
         self.should_stop = True
         self.paused = False
-        # wake any waiting playback thread so it can exit
+        self.playback_finished = True
+        
+        # Wake any waiting playback thread so it can exit
         try:
             self._resume_event.set()
         except Exception:
             pass
+        
+        # Cancel delayed timer BEFORE stopping player to avoid races
+        self._cancel_delayed_timer()
+        
+        # Stop the player
         if self.player:
             try:
                 self.player.set_state(Gst.State.NULL)
             except Exception:
                 pass
-        self.playback_finished = True
+        
         self.is_playing = False
+        
         # Attempt to join thread briefly
         if self.current_thread:
             self.current_thread.join(timeout=1.0)
-        # cancel any delayed timer
-        self._cancel_delayed_timer()
-        # cleanup queued audio files (best-effort)
+        
+        # Cleanup queued audio files (best-effort)
         try:
             with self._audio_lock:
                 for idx, path in list(self._audio_files.items()):
@@ -509,7 +518,9 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         self.set_title("EPUB/HTML Reader with TTS")
         self.temp_dir = None
         self.tts_engine = TTSEngine() if TTS_AVAILABLE else None
-
+        
+        self._toc_handler_id = None
+        
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_content(main_box)
 
@@ -643,12 +654,12 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         except Exception:
             pass
         for name in ("set_allow_file_access_from_file_urls",
-                     "set_allow_universal_access_from_file_urls",
-                     "set_enable_write_console_messages_to_stdout"):
+                     "set_allow_universal_access_from_file_urls"):  # REMOVE console logging
             try:
                 getattr(settings, name)(True)
             except Exception:
                 pass
+        
 
         # --- DARK/LIGHT THEME SUPPORT (minimal changes) ---
         # Inject CSS variables + prefers-color-scheme handling into every page/frame
@@ -1234,40 +1245,42 @@ class EpubViewerWindow(Adw.ApplicationWindow):
     def clear_toc(self):
         """Clear the Table of Contents sidebar (remove rows, disconnect handler, hide sidebar)."""
         try:
-            # Remove all children from the listbox (works for both ListBox and Box containers)
+            # Remove all children from the listbox
             child = self.toc_listbox.get_first_child()
             while child:
                 next_child = child.get_next_sibling()
                 try:
                     self.toc_listbox.remove(child)
                 except Exception:
-                    # fallback for different GTK versions / child removal methods
                     try:
                         child.unparent()
                     except Exception:
                         pass
                 child = next_child
         except Exception:
-            # best-effort; ignore errors to avoid breaking flow
             pass
 
-        # Try disconnecting the row-activated handler if it was connected
+        # Only disconnect if handler exists
         try:
-            self.toc_listbox.disconnect_by_func(self.on_toc_row_activated)
+            if hasattr(self, '_toc_handler_id') and self._toc_handler_id:
+                self.toc_listbox.disconnect(self._toc_handler_id)
+                self._toc_handler_id = None
         except Exception:
             pass
 
-        # Hide the sidebar (no TOC to show)
+        # Hide the sidebar
         try:
             self.toc_sidebar.set_visible(False)
         except Exception:
             pass
+
 
     def populate_toc(self, toc_data, parent_box=None, level=0):
         """Recursively populate TOC with nested items"""
         if parent_box is None:
             print(f"[DEBUG] populate_toc called with {len(toc_data)} items")
 
+            # Clear existing TOC items
             child = self.toc_listbox.get_first_child()
             while child:
                 next_child = child.get_next_sibling()
@@ -1331,12 +1344,18 @@ class EpubViewerWindow(Adw.ApplicationWindow):
 
                 parent_box.append(row)
 
+        # Only set up the row-activated handler at the top level
         if parent_box == self.toc_listbox:
+            # Disconnect old handler if it exists
             try:
-                self.toc_listbox.disconnect_by_func(self.on_toc_row_activated)
+                if hasattr(self, '_toc_handler_id') and self._toc_handler_id:
+                    self.toc_listbox.disconnect(self._toc_handler_id)
+                    self._toc_handler_id = None
             except:
                 pass
-            self.toc_listbox.connect('row-activated', self.on_toc_row_activated)
+            
+            # Connect new handler and store its ID
+            self._toc_handler_id = self.toc_listbox.connect('row-activated', self.on_toc_row_activated)
 
             self.toc_sidebar.set_visible(True)
             print(f"[DEBUG] TOC sidebar visible, {len(toc_data)} items added")
