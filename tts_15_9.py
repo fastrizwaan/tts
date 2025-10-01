@@ -22,9 +22,43 @@ except Exception:
 Adw.init()
 
 # --- Utilities ---
-_s_re_split = re.compile(r'(?<=[.!?])\s+|\n+')
+_s_re_split = re.compile(r'(?<=[.!?])["”’\)\]]?\s+|\n+')
+
 def split_sentences(text):
-    return [p.strip() for p in _s_re_split.split(text) if p and p.strip()]
+    import re, html
+    if not text:
+        return []
+    t = html.unescape(text).replace('\r', ' ').replace('\u00A0', ' ').strip()
+    if not t:
+        return []
+
+    parts = [p.strip() for p in _s_re_split.split(t) if p and p.strip()]
+    merged = []
+    i = 0
+    while i < len(parts):
+        cur = parts[i]
+
+        # opening-quote + single letter like '“E' -> merge with next
+        if re.match(r'^[\u201C\u2018"\'`«‹]+[A-Za-z]?$' , cur) and i + 1 < len(parts):
+            cur = cur + " " + parts[i + 1]
+            i += 1
+
+        # lone punctuation or single letter -> attach to previous if exists, else to next
+        elif (len(cur) == 1 or re.fullmatch(r'^[\.\,\:\;\?\!\-\—…]+$', cur)):
+            if merged:
+                merged[-1] = merged[-1] + cur  # attach with no extra space
+                i += 1
+                continue
+            elif i + 1 < len(parts):
+                parts[i + 1] = cur + " " + parts[i + 1]
+                i += 1
+                continue
+
+        merged.append(cur)
+        i += 1
+
+    return [m.strip() for m in merged if m and m.strip()]
+
 
 def stable_id_for_text(text):
     """Short stable id for a sentence (sha1 hex truncated)."""
@@ -1367,7 +1401,7 @@ class EpubViewer(Adw.ApplicationWindow):
     def process_chapter_content(self, content, item):
         from bs4 import BeautifulSoup, NavigableString, Comment
         from html import unescape
-        import urllib.parse
+        import urllib.parse, os, re
 
         self.calculate_column_dimensions()
         apply_columns = not self.is_single_column_mode()
@@ -1375,24 +1409,9 @@ class EpubViewer(Adw.ApplicationWindow):
         if apply_columns:
             if self.column_mode == 'fixed':
                 column_css = f"column-count: {self.fixed_column_count}; column-gap: {self.column_gap}px;"
-                body_style = f"""
-                margin: 0;
-                padding: {self.column_padding}px;
-                font-family: 'Cantarell', sans-serif;
-                font-size: 16px;
-                line-height: 1.6;
-                background-color: #fafafa;
-                color: #2e3436;
-                {column_css}
-                column-fill: balance;
-                height: calc(100vh - {self.column_padding * 2}px);
-                overflow-x: auto;
-                overflow-y: hidden;
-                box-sizing: border-box;
-                """
             else:
                 column_css = f"column-width: {self.actual_column_width}px; column-gap: {self.column_gap}px;"
-                body_style = f"""
+            body_style = f"""
                 margin: 0;
                 padding: {self.column_padding}px;
                 font-family: 'Cantarell', sans-serif;
@@ -1406,23 +1425,23 @@ class EpubViewer(Adw.ApplicationWindow):
                 overflow-x: auto;
                 overflow-y: hidden;
                 box-sizing: border-box;
-                """
+            """
         else:
             body_style = f"""
-            margin: 0;
-            padding: {self.column_padding}px;
-            font-family: 'Cantarell', sans-serif;
-            font-size: 16px;
-            line-height: 1.6;
-            background-color: #fafafa;
-            color: #2e3436;
-            column-count: 1;
-            column-width: auto;
-            column-gap: 0;
-            height: auto;
-            overflow-x: hidden;
-            overflow-y: auto;
-            box-sizing: border-box;
+                margin: 0;
+                padding: {self.column_padding}px;
+                font-family: 'Cantarell', sans-serif;
+                font-size: 16px;
+                line-height: 1.6;
+                background-color: #fafafa;
+                color: #2e3436;
+                column-count: 1;
+                column-width: auto;
+                column-gap: 0;
+                height: auto;
+                overflow-x: hidden;
+                overflow-y: auto;
+                box-sizing: border-box;
             """
 
         css_styles = f"""
@@ -1487,19 +1506,14 @@ class EpubViewer(Adw.ApplicationWindow):
         </script>
         """
 
-        # parse with BeautifulSoup
         try:
             soup = BeautifulSoup(content, "html.parser")
         except Exception:
-            # fallback: wrap into minimal body
             soup = BeautifulSoup(f"<body>{content}</body>", "html.parser")
 
-        # remove head/meta/style/title so our CSS applies cleanly
         for t in soup.find_all(["head", "meta", "title", "style", "link"]):
             t.decompose()
 
-        # Map resources to local files only AFTER we produce final body HTML (we'll do this later).
-        # Wrap sentences: walk target tags and replace text nodes with spans per sentence.
         TARGET_TAGS = [
             'p','div','span','section','article','li','label',
             'blockquote','figcaption','caption','dt','dd',
@@ -1509,53 +1523,99 @@ class EpubViewer(Adw.ApplicationWindow):
 
         for tagname in TARGET_TAGS:
             for elem in list(soup.find_all(tagname)):
-                # collect text descendants (NavigableString) to operate on
-                text_nodes = []
-                for desc in elem.descendants:
-                    if isinstance(desc, Comment):
+                # Get the full text content first, ignoring inline formatting
+                full_text = elem.get_text(separator=' ', strip=True)
+                
+                # Skip if empty
+                if not full_text or full_text.isspace():
+                    continue
+                
+                # Split into sentences
+                sents = split_sentences(unescape(full_text))
+                if not sents:
+                    continue
+                
+                # Now clear the element and rebuild with sentence spans
+                elem.clear()
+                
+                for i, s in enumerate(sents):
+                    s_clean = s.strip()
+                    if not s_clean:
                         continue
-                    if isinstance(desc, NavigableString):
-                        parent = desc.parent
-                        if parent and getattr(parent, "name", "").lower() in ("script", "style", "head", "meta", "link", "iframe", "svg", "noscript"):
-                            continue
-                        txt = str(desc)
-                        if txt and not txt.isspace():
-                            text_nodes.append(desc)
-                # replace each text node preserving sibling inline tags
-                for node in text_nodes:
-                    orig_text = str(node)
-                    norm = orig_text.replace('\r', ' ').replace('\n', ' ')
-                    # split_sentences uses (?<=[.!?])\s+|\n+ ; keep that to split on . ! ?
-                    sents = split_sentences(unescape(norm))
-                    if not sents:
-                        continue
-                    last = node
-                    # insert spans for each sentence
-                    for i, s in enumerate(sents):
-                        s_clean = s.strip()
-                        if not s_clean:
-                            continue
-                        sid = stable_id_for_text(s_clean)
-                        span_tag = soup.new_tag("span")
-                        span_tag.attrs["data-tts-id"] = sid
-                        span_tag.append(NavigableString(s_clean))
-                        last.insert_after(span_tag)
-                        last = span_tag
-                        # preserve a single space between sentences if original had it
-                        if i != len(sents) - 1:
-                            spacer = NavigableString(" ")
-                            last.insert_after(spacer)
-                            last = spacer
-                    node.extract()
+                    
+                    sid = stable_id_for_text(s_clean)
+                    span_tag = soup.new_tag("span")
+                    span_tag.attrs["data-tts-id"] = sid
+                    span_tag.append(NavigableString(s_clean))
+                    elem.append(span_tag)
+                    
+                    # Add space between sentences
+                    if i < len(sents) - 1:
+                        elem.append(NavigableString(" "))
 
-        # Build body_content HTML
+        # --- Improved merging: reconstruct complete sentences ---
+        spans = [s for s in soup.find_all("span") if s.has_attr("data-tts-id")]
+        i = 0
+        while i < len(spans):
+            a = spans[i]
+            a_text = (a.get_text() or "").strip()
+            
+            # Remove empty spans
+            if not a_text:
+                try:
+                    a.decompose()
+                except Exception:
+                    pass
+                spans.pop(i)
+                continue
+            
+            # Don't merge if current span ends with sentence-ending punctuation
+            if re.search(r'[.!?][""\'\)\]]*$', a_text):
+                i += 1
+                continue
+            
+            # Don't merge if current span is long enough and next starts with capital
+            if i + 1 < len(spans):
+                b = spans[i + 1]
+                b_text = (b.get_text() or "").strip()
+                
+                # If current is substantial and next starts with capital, don't merge
+                if len(a_text) > 15 and b_text and b_text[0].isupper():
+                    i += 1
+                    continue
+                
+                # Merge fragments that belong together
+                if b_text:
+                    new = a_text
+                    if not new.endswith(' ') and not b_text.startswith('.'):
+                        new += ' '
+                    new += b_text
+                    
+                    try:
+                        if b.string is not None:
+                            b.string.replace_with(new)
+                        else:
+                            b.clear()
+                            b.append(new)
+                    except Exception:
+                        b.clear()
+                        b.append(new)
+                    
+                    try:
+                        a.decompose()
+                    except Exception:
+                        pass
+                    spans.pop(i)
+                    continue
+            
+            i += 1
+
         body = soup.body
         if body:
             body_content = "".join(str(ch) for ch in body.contents)
         else:
             body_content = str(soup)
 
-        # Now map resources to bundled resources/ directory (do this after wrapping)
         resources_dir_fs = os.path.join(self.temp_dir or "", 'resources')
         available = set(os.listdir(resources_dir_fs)) if os.path.isdir(resources_dir_fs) else set()
 
@@ -1581,6 +1641,7 @@ class EpubViewer(Adw.ApplicationWindow):
         body_content = re.sub(r'href=["\']([^"\']+)["\']', repl_href_after, body_content, flags=re.IGNORECASE)
 
         return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{css_styles}</head><body>{body_content}{script}</body></html>"""
+
 
 
     def extract_resources(self):
@@ -2054,15 +2115,75 @@ class EpubViewer(Adw.ApplicationWindow):
                 html = f.read()
         except Exception:
             return []
+        
+        from bs4 import BeautifulSoup
+        
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+        except Exception:
+            return []
+        
         pairs = []
-        for m in re.finditer(r'<span\s+[^>]*data-tts-id=["\']([^"\']+)["\'][^>]*>(.*?)</span>', html, flags=re.DOTALL|re.IGNORECASE):
-            sid = m.group(1)
-            inner = m.group(2)
-            text = re.sub(r'<[^>]+>', '', inner).strip()
-            if text:
-                pairs.append((sid, text))
+        processed_ids = set()
+        
+        # Process each paragraph/block element to maintain reading order
+        for block in soup.find_all(['p', 'div', 'blockquote', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+            # Get all spans with tts-id in document order
+            spans_in_block = []
+            for span in block.find_all('span', attrs={'data-tts-id': True}):
+                sid = span.get('data-tts-id')
+                if sid in processed_ids:
+                    continue
+                # Skip if nested inside another tts span
+                parent = span.parent
+                has_tts_parent = False
+                while parent and parent != block:
+                    if parent.name == 'span' and parent.get('data-tts-id') and parent.get('data-tts-id') != sid:
+                        has_tts_parent = True
+                        break
+                    parent = parent.parent
+                
+                if not has_tts_parent:
+                    spans_in_block.append(span)
+                    processed_ids.add(sid)
+            
+            # Merge fragments into complete sentences
+            i = 0
+            while i < len(spans_in_block):
+                current_span = spans_in_block[i]
+                sid = current_span.get('data-tts-id')
+                text = current_span.get_text(strip=True)
+                
+                # Merge with following spans until we hit sentence-ending punctuation
+                j = i + 1
+                while j < len(spans_in_block):
+                    # Check if current accumulated text ends with sentence punctuation
+                    if re.search(r'[.!?][""\'\)\]]*$', text):
+                        break
+                    
+                    next_span = spans_in_block[j]
+                    next_text = next_span.get_text(strip=True)
+                    
+                    if not next_text:
+                        j += 1
+                        continue
+                    
+                    # Merge the text
+                    if text and not text.endswith(' '):
+                        text = text + ' ' + next_text
+                    else:
+                        text = text + next_text
+                    
+                    j += 1
+                
+                # Add the complete sentence
+                if text and len(text.strip()) > 0:
+                    pairs.append((sid, text.strip()))
+                
+                # Move to next unprocessed span
+                i = j if j > i else i + 1
+        
         return pairs
-
     def on_tts_play(self, button):
         if not self.current_book or not self.chapters:
             return
