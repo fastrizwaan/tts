@@ -43,35 +43,30 @@ class TTSEngine:
         self.is_playing = False
         self.should_stop = False
         self.current_thread = None
-
-        # Playback / navigation state
+        self.highlight_callback = None
+        
+        # For navigation control
         self._tts_sentences = []
         self._tts_voice = None
         self._tts_speed = 1.0
         self._tts_lang = "en-us"
         self._tts_finished_callback = None
         self._tts_highlight_callback = None
-
-        # index and audio cache
         self._current_play_index = 0
-        self._audio_files = {}           # idx -> path
+        self._audio_files = {}  # idx -> path
         self._audio_lock = threading.Lock()
         self._synthesis_done = threading.Event()
-
-        # delayed on-demand synth timer (when user navigates)
-        self._delayed_timer = None
-        self._delayed_timer_lock = threading.Lock()
-
+        
         if TTS_AVAILABLE:
             try:
                 model_path = "/app/share/kokoro-models/kokoro-v1.0.onnx"
                 voices_path = "/app/share/kokoro-models/voices-v1.0.bin"
-
+                
                 # Fallback paths
                 if not os.path.exists(model_path):
                     model_path = os.path.expanduser("~/.local/share/kokoro-models/kokoro-v1.0.onnx")
                     voices_path = os.path.expanduser("~/.local/share/kokoro-models/voices-v1.0.bin")
-
+                
                 if os.path.exists(model_path) and os.path.exists(voices_path):
                     self.kokoro = Kokoro(model_path, voices_path)
                     print("[info] Kokoro TTS initialized")
@@ -79,7 +74,7 @@ class TTSEngine:
                     print(f"[warn] Kokoro models not found at {model_path}")
             except Exception as e:
                 print(f"[error] Failed to initialize Kokoro: {e}")
-
+        
         # Initialize GStreamer for audio playback
         Gst.init(None)
         self.player = Gst.ElementFactory.make("playbin", "player")
@@ -87,7 +82,7 @@ class TTSEngine:
         bus.add_signal_watch()
         bus.connect("message", self.on_gst_message)
         self.playback_finished = False
-
+    
     def on_gst_message(self, bus, message):
         t = message.type
         if t == Gst.MessageType.EOS:
@@ -98,7 +93,7 @@ class TTSEngine:
             err, debug = message.parse_error()
             print(f"[error] GStreamer error: {err}, {debug}")
             self.playback_finished = True
-
+    
     def split_sentences(self, text):
         """Split text into sentences"""
         import re
@@ -114,7 +109,7 @@ class TTSEngine:
         if len(sentences) % 2 == 1 and sentences[-1].strip():
             result.append(sentences[-1].strip())
         return result
-
+    
     def synthesize_sentence(self, sentence, voice, speed, lang):
         """Synthesize a single sentence and return the audio file path"""
         try:
@@ -125,70 +120,20 @@ class TTSEngine:
         except Exception as e:
             print(f"[error] Synthesis error for sentence: {e}")
             return None
-
-    def _cancel_delayed_timer(self):
-        with self._delayed_timer_lock:
-            if self._delayed_timer:
-                try:
-                    self._delayed_timer.cancel()
-                except Exception:
-                    pass
-                self._delayed_timer = None
-
-    def _schedule_delayed_synthesis(self, idx, delay=0.5):
-        """
-        Schedule on-demand synthesis for a single index after 'delay' seconds.
-        If another navigation occurs, the previous timer is canceled and a new one set.
-        On firing, the function synthesizes the sentence if audio not already present and
-        if the current index hasn't changed away.
-        """
-        # cancel previous
-        self._cancel_delayed_timer()
-
-        def timer_cb():
-            # performed in background thread (threading.Timer)
-            try:
-                if self.should_stop:
-                    return
-                with self._audio_lock:
-                    # already synthesized by pre-synthesis?
-                    if self._audio_files.get(idx):
-                        return
-                # only synthesize if current play index is still the same (user didn't navigate further)
-                if idx != self._current_play_index:
-                    return
-                print(f"[TTS] Delayed synthesis firing for sentence {idx+1}")
-                audio_file = self.synthesize_sentence(self._tts_sentences[idx], self._tts_voice, self._tts_speed, self._tts_lang)
-                if audio_file:
-                    with self._audio_lock:
-                        self._audio_files[idx] = audio_file
-            except Exception as e:
-                print(f"[error] delayed synthesis error: {e}")
-            finally:
-                with self._delayed_timer_lock:
-                    self._delayed_timer = None
-
-        timer = threading.Timer(delay, timer_cb)
-        with self._delayed_timer_lock:
-            self._delayed_timer = timer
-        timer.daemon = True
-        timer.start()
-
-    def speak_sentences_list(self, sentences, voice="af_sarah", speed=1.0, lang="en-us",
+    
+    def speak_sentences_list(self, sentences, voice="af_sarah", speed=1.0, lang="en-us", 
                             highlight_callback=None, finished_callback=None):
-        """Speak a list of pre-split sentences with pre-synthesis for smooth playback.
-           Now supports delayed on-demand synthesis when user navigates quickly.
-        """
+        """Speak a list of pre-split sentences with pre-synthesis for smooth playback"""
         if not self.kokoro:
             print("[warn] TTS not available")
             if finished_callback:
                 GLib.idle_add(finished_callback)
             return
-
+        
         # Stop previous playback if any
         self.stop()
         self.should_stop = False
-
+        self.highlight_callback = highlight_callback
         self._tts_sentences = list(sentences)
         self._tts_voice = voice
         self._tts_speed = speed
@@ -198,238 +143,172 @@ class TTSEngine:
         self._audio_files = {}
         self._current_play_index = 0
         self._synthesis_done.clear()
-        self._cancel_delayed_timer()
-
+        
         def tts_thread():
             try:
                 total = len(self._tts_sentences)
                 print(f"[TTS] Speaking {total} sentences (with navigation support)")
-
-                # Synthesis worker: synthesize ahead up to a small buffer relative to current index.
+                
+                # Synthesis worker - synthesizes ahead up to a buffer cap
                 def synthesis_worker():
                     try:
-                        idx = 0
-                        while idx < total and not self.should_stop:
-                            # Skip already-past sentences (we don't synthesize old sentences unless user requests prev)
-                            with self._audio_lock:
-                                cur = self._current_play_index
-                            if idx < cur:
-                                idx += 1
-                                continue
-
-                            # Only synthesize within a small lookahead window to avoid synthesizing skipped items
-                            with self._audio_lock:
-                                cur = self._current_play_index
-                            lookahead_limit = cur + 3  # synth up to 3 ahead
-                            if idx > lookahead_limit:
-                                # wait briefly and re-check until user stops skipping
-                                time.sleep(0.05)
-                                continue
-
+                        for idx, sentence in enumerate(self._tts_sentences):
                             if self.should_stop:
                                 break
-
-                            # If we already have audio, advance
-                            with self._audio_lock:
-                                if self._audio_files.get(idx):
-                                    idx += 1
-                                    continue
-
-                            # Synthesize this index
-                            print(f"[TTS] Pre-synthesizing sentence {idx+1}/{total}")
-                            audio_file = self.synthesize_sentence(self._tts_sentences[idx], self._tts_voice, self._tts_speed, self._tts_lang)
+                            # small buffer, produce all but it's fine since they are written to download dir
+                            print(f"[TTS] Synthesizing sentence {idx+1}/{total}")
+                            audio_file = self.synthesize_sentence(sentence, self._tts_voice, self._tts_speed, self._tts_lang)
                             if audio_file:
                                 with self._audio_lock:
-                                    # store only if not overwritten
-                                    if idx not in self._audio_files:
-                                        self._audio_files[idx] = audio_file
-                            idx += 1
-
+                                    # Only store if not overwritten
+                                    self._audio_files[idx] = audio_file
+                            if self.should_stop:
+                                break
                         self._synthesis_done.set()
                     except Exception as e:
                         print(f"[error] Synthesis worker error: {e}")
                         import traceback
                         traceback.print_exc()
                         self._synthesis_done.set()
-
+                
                 synth_thread = threading.Thread(target=synthesis_worker, daemon=True)
                 synth_thread.start()
-
+                
                 self.is_playing = True
                 played_count = 0
-
-                while self._current_play_index < total and not self.should_stop:
+                while self._current_play_index < len(self._tts_sentences) and not self.should_stop:
                     idx = self._current_play_index
-
-                    # Immediately highlight current sentence so navigation feels responsive
-                    if self._tts_highlight_callback:
-                        GLib.idle_add(self._tts_highlight_callback, idx, self._tts_sentences[idx])
-
-                    # Check if audio already available (pre-synthesized)
+                    # Wait until audio for idx is available or synthesis finished
+                    waited = 0.0
                     audio_file = None
-                    with self._audio_lock:
-                        audio_file = self._audio_files.get(idx)
-
-                    # If not available, we will wait for either pre-synthesis, or the delayed timer
-                    if not audio_file:
-                        # schedule delayed on-demand synthesis; user may navigate further and cancel/reschedule
-                        self._schedule_delayed_synthesis(idx, delay=0.5)
-
-                        # Wait until audio becomes available or user navigates away or stopped
-                        waited = 0.0
-                        while not self.should_stop:
-                            with self._audio_lock:
-                                audio_file = self._audio_files.get(idx)
-                            if audio_file:
-                                break
-                            # If user changed index, stop waiting and continue loop (playback will follow new index)
-                            if self._current_play_index != idx:
-                                break
-                            time.sleep(0.02)
-                            waited += 0.02
-                            # avoid infinite waits: if synthesis worker finished and still no audio, fall through to on-demand synth attempt
-                            if self._synthesis_done.is_set() and waited > 0.5:
-                                break
-
+                    while not self.should_stop:
+                        with self._audio_lock:
+                            audio_file = self._audio_files.get(idx)
+                        if audio_file:
+                            break
+                        if self._synthesis_done.is_set():
+                            # no audio produced and synthesis done -> try to synthesize on demand
+                            break
+                        time.sleep(0.05)
+                        waited += 0.05
+                        # Safety timeout, but keep waiting a decent amount
+                        if waited > 30 and not audio_file:
+                            print(f"[warn] Timeout waiting for audio for sentence {idx}")
+                            break
+                    
                     if self.should_stop:
                         break
-
-                    # Re-check audio
-                    with self._audio_lock:
-                        audio_file = self._audio_files.get(idx)
-
-                    # If still no audio, attempt on-demand immediate synth (this covers rare races)
+                    
+                    # If audio missing, attempt on-demand synth
                     if not audio_file:
-                        try:
-                            print(f"[TTS] On-demand synth (fallback) for sentence {idx+1}")
-                            audio_file = self.synthesize_sentence(self._tts_sentences[idx], self._tts_voice, self._tts_speed, self._tts_lang)
-                            if audio_file:
-                                with self._audio_lock:
-                                    self._audio_files[idx] = audio_file
-                        except Exception as e:
-                            print(f"[error] on-demand synth failed: {e}")
-                            audio_file = None
-
+                        print(f"[TTS] On-demand synthesizing sentence {idx+1}")
+                        audio_file = self.synthesize_sentence(self._tts_sentences[idx], self._tts_voice, self._tts_speed, self._tts_lang)
+                        if audio_file:
+                            with self._audio_lock:
+                                self._audio_files[idx] = audio_file
+                    
                     if not audio_file:
-                        # nothing to play (shouldn't happen often). Advance index to avoid deadlock.
-                        print(f"[warn] No audio for index {idx}, skipping forward")
-                        self._current_play_index = idx + 1
-                        continue
-
-                    # Start playback
+                        print(f"[error] No audio for index {idx}, stopping")
+                        break
+                    
+                    # Highlight current sentence (GUI callback)
+                    if self._tts_highlight_callback:
+                        GLib.idle_add(self._tts_highlight_callback, idx, self._tts_sentences[idx])
+                    
                     print(f"[TTS] Playing sentence {idx+1}/{total}: {self._tts_sentences[idx][:50]}...")
                     self.player.set_property("uri", f"file://{audio_file}")
                     self.player.set_state(Gst.State.PLAYING)
                     self.playback_finished = False
-
-                    # Wait until playback completes, or user navigates (changing current_play_index), or stop
+                    
+                    # Wait until playback finished or skip requested
                     while not self.playback_finished and not self.should_stop:
-                        # if user changed index, break to move to new index
-                        if self._current_play_index != idx:
-                            break
                         time.sleep(0.02)
-
-                    # Stop playback if necessary
-                    try:
-                        self.player.set_state(Gst.State.NULL)
-                    except Exception:
-                        pass
-
-                    # If we completed playback for this index (no manual jump), cleanup the audio file to save space
+                        # If user requested a jump (current_play_index changed to something else), break
+                        if self._current_play_index != idx:
+                            # stop current playback to jump
+                            break
+                    
+                    # Stop playback state
+                    self.player.set_state(Gst.State.NULL)
+                    
+                    # If user jumped away, do not remove audio file (we may need it)
                     if self._current_play_index == idx:
+                        # normal completion -> remove audio file to save space
                         try:
                             with self._audio_lock:
+                                # remove only if file still mapped to this idx
                                 af = self._audio_files.get(idx)
                                 if af:
                                     try:
                                         os.remove(af)
                                     except:
                                         pass
-                                    try:
-                                        del self._audio_files[idx]
-                                    except KeyError:
-                                        pass
+                                    # remove mapping
+                                    del self._audio_files[idx]
                         except Exception:
                             pass
                         played_count += 1
+                        # advance to next unless user changed it manually
                         self._current_play_index = idx + 1
                     else:
-                        # user jumped; continue loop with new index
+                        # we jumped: continue loop with new index
                         pass
-
-                # End playback loop
+                
+                # Playback loop end
                 self.is_playing = False
-                self._cancel_delayed_timer()
-                # Clear highlight when done (if not stopped by user)
+                # Clear highlight when done and not stopped via user skip
                 if self._tts_highlight_callback and not self.should_stop:
                     GLib.idle_add(self._tts_highlight_callback, -1, "")
-
+                
                 if self._tts_finished_callback:
                     GLib.idle_add(self._tts_finished_callback)
-
+                
             except Exception as e:
-                print(f"[error] TTS thread error: {e}")
+                print(f"[error] TTS error: {e}")
                 import traceback
                 traceback.print_exc()
                 if self._tts_finished_callback:
                     GLib.idle_add(self._tts_finished_callback)
-
+        
         self.current_thread = threading.Thread(target=tts_thread, daemon=True)
         self.current_thread.start()
-
+    
     def next_sentence(self):
-        """Skip to next sentence during playback: immediate highlight, schedule delayed synth for the new index."""
+        """Skip to next sentence during playback"""
         if not self._tts_sentences:
             return
+        # increment index
         with self._audio_lock:
-            # move forward
-            self._current_play_index = min(len(self._tts_sentences)-1, self._current_play_index + 1)
-            idx = self._current_play_index
-        # immediate highlight
-        if self._tts_highlight_callback:
-            GLib.idle_add(self._tts_highlight_callback, idx, self._tts_sentences[idx])
-        # cancel active playback so playback loop notices index change
+            if self._current_play_index < len(self._tts_sentences):
+                self._current_play_index = min(len(self._tts_sentences)-1, self._current_play_index + 1)
+        # stop current playback to cause loop to re-evaluate
         try:
             self.player.set_state(Gst.State.NULL)
         except Exception:
             pass
-        # schedule delayed on-demand synth for this index
-        self._schedule_delayed_synthesis(idx, delay=0.5)
-
+    
     def prev_sentence(self):
-        """Go to previous sentence during playback: immediate highlight, schedule delayed synth for that index.
-           (We synthesize previous sentences only when user explicitly requests them.)
-        """
+        """Go to previous sentence during playback (resynthesize if needed)"""
         if not self._tts_sentences:
             return
         with self._audio_lock:
-            self._current_play_index = max(0, self._current_play_index - 1)
-            idx = self._current_play_index
-        # immediate highlight
-        if self._tts_highlight_callback:
-            GLib.idle_add(self._tts_highlight_callback, idx, self._tts_sentences[idx])
-        # cancel active playback so playback loop notices index change
+            if self._current_play_index > 0:
+                self._current_play_index = max(0, self._current_play_index - 1)
+        # if we don't have audio for that index, synthesis worker may produce it soon; if not, we'll synth on-demand in playback loop.
         try:
             self.player.set_state(Gst.State.NULL)
         except Exception:
             pass
-        # schedule delayed on-demand synth for this index
-        self._schedule_delayed_synthesis(idx, delay=0.5)
-
+    
     def stop(self):
         self.should_stop = True
         if self.player:
-            try:
-                self.player.set_state(Gst.State.NULL)
-            except Exception:
-                pass
+            self.player.set_state(Gst.State.NULL)
         self.playback_finished = True
         self.is_playing = False
         # Attempt to join thread briefly
         if self.current_thread:
             self.current_thread.join(timeout=1.0)
-        # cancel any delayed timer
-        self._cancel_delayed_timer()
         # cleanup queued audio files (best-effort)
         try:
             with self._audio_lock:
@@ -449,7 +328,7 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         self.set_title("EPUB/HTML Reader with TTS")
         self.temp_dir = None
         self.tts_engine = TTSEngine() if TTS_AVAILABLE else None
-
+        
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_content(main_box)
 
@@ -474,19 +353,19 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         if TTS_AVAILABLE and self.tts_engine and self.tts_engine.kokoro:
             tts_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             header_bar.pack_start(tts_box)
-
+            
             self.tts_play_button = Gtk.Button(icon_name="media-playback-start-symbolic")
             self.tts_play_button.set_tooltip_text("Read current page")
             self.tts_play_button.connect("clicked", self.on_tts_play)
             tts_box.append(self.tts_play_button)
-
+            
             self.tts_stop_button = Gtk.Button(icon_name="media-playback-stop-symbolic")
             self.tts_stop_button.set_tooltip_text("Stop reading")
             self.tts_stop_button.connect("clicked", self.on_tts_stop)
             self.tts_stop_button.set_sensitive(False)
             tts_box.append(self.tts_stop_button)
 
-            # Previous/Next sentence buttons
+            # New: previous/next-sentence buttons (sensitive only while playing)
             self.tts_prev_button = Gtk.Button(icon_name="media-skip-backward-symbolic")
             self.tts_prev_button.set_tooltip_text("Play previous sentence")
             self.tts_prev_button.connect("clicked", self.on_tts_prev)
@@ -672,7 +551,7 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                     return message.to_json(0)
                 except Exception:
                     pass
-
+            
             if hasattr(message, "get_js_value"):
                 jsval = message.get_js_value()
                 try:
@@ -683,13 +562,13 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                     return jsval.to_json(0)
                 except Exception:
                     pass
-
+            
             if isinstance(message, GLib.Variant):
                 v = message.unpack()
                 if isinstance(v, (str, bytes)):
                     return v.decode() if isinstance(v, bytes) else v
                 return json.dumps(v)
-
+            
             if hasattr(message, "get_string"):
                 try:
                     s = message.get_string()
@@ -697,7 +576,7 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                         return s
                 except Exception:
                     pass
-
+            
             return str(message)
         except Exception as e:
             print("extract_message_string error:", e)
@@ -711,13 +590,13 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             if not raw:
                 print("on_toc_loaded: empty payload")
                 return
-
+            
             try:
                 if raw.startswith('"') and raw.endswith('"'):
                     raw = json.loads(raw)
             except Exception:
                 pass
-
+            
             toc = None
             try:
                 toc = json.loads(raw)
@@ -726,16 +605,16 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                     toc = json.loads(raw.replace("'", '"'))
                 except Exception:
                     toc = None
-
+            
             if toc is None:
                 print("on_toc_loaded: failed to decode toc payload")
                 return
-
+            
             if isinstance(toc, dict) and "toc" in toc:
                 toc = toc["toc"]
             if not isinstance(toc, list):
                 toc = [toc]
-
+            
             self.populate_toc(toc)
         except Exception as e:
             print(f"Error processing TOC: {e}")
@@ -761,20 +640,20 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                     nav = None
         except Exception as e:
             print(f"Error processing nav: {e}")
-
+    
     def on_page_text(self, manager, message):
         """Receive text content from current page for TTS"""
         try:
             raw = self._extract_message_string(message)
             if not raw:
                 return
-
+            
             try:
                 if raw.startswith('"') and raw.endswith('"'):
                     raw = json.loads(raw)
             except Exception:
                 pass
-
+            
             # Parse the JSON array of sentences
             try:
                 sentences = json.loads(raw)
@@ -782,28 +661,28 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                     sentences = [raw.strip()]
             except:
                 sentences = [raw.strip()]
-
+            
             # Filter out empty sentences
             sentences = [s for s in sentences if s.strip()]
-
+            
             if sentences and self.tts_engine:
                 print(f"[TTS] Received {len(sentences)} sentences")
                 for i, s in enumerate(sentences[:5]):  # Show first 5
                     print(f"  {i+1}: {s[:60]}...")
-
+                
                 # Enable controls
                 try:
                     self.tts_stop_button.set_sensitive(True)
                     self.tts_play_button.set_sensitive(False)
+                    # enable nav buttons while TTS will be running
                     if hasattr(self, 'tts_prev_button'):
                         self.tts_prev_button.set_sensitive(True)
                     if hasattr(self, 'tts_next_button'):
                         self.tts_next_button.set_sensitive(True)
                 except Exception:
                     pass
-
+                
                 # Start sentence-by-sentence TTS with highlighting
-                # Pass the highlight callback so TTSEngine can call it immediately on navigation
                 self.tts_engine.speak_sentences_list(
                     sentences,
                     highlight_callback=self.highlight_sentence,
@@ -813,7 +692,7 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             print(f"Error processing page text: {e}")
             import traceback
             traceback.print_exc()
-
+    
     def highlight_sentence(self, sentence_idx, sentence_text):
         """Highlight the current sentence being read"""
         if sentence_idx < 0:
@@ -840,14 +719,14 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         else:
             # Escape special characters for JavaScript
             escaped_text = sentence_text.replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n').replace('\r', '\\r').replace('"', '\\"')
-
+            
             js_code = f"""
             (function() {{
                 try {{
                     var iframe = document.querySelector('#viewer iframe');
                     if (iframe && iframe.contentDocument) {{
                         var doc = iframe.contentDocument;
-
+                        
                         // Clear previous highlights
                         var oldHighlights = doc.querySelectorAll('.tts-highlight');
                         oldHighlights.forEach(function(el) {{
@@ -856,26 +735,26 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                             el.parentNode.replaceChild(textNode, el);
                         }});
                         doc.normalize();
-
+                        
                         var sentenceToFind = '{escaped_text}';
-
+                        
                         // Normalize function - removes extra whitespace
                         function normalize(text) {{
                             return text.replace(/\\s+/g, ' ').trim();
                         }}
-
+                        
                         var normalizedSearch = normalize(sentenceToFind);
                         var searchWords = normalizedSearch.split(' ');
                         var firstWord = searchWords[0];
                         var lastWord = searchWords[searchWords.length - 1];
-
+                        
                         console.log('Searching for:', normalizedSearch.substring(0, 50));
-
+                        
                         // Function to highlight within an element
                         function highlightInElement(element) {{
                             var fullText = element.textContent || '';
                             var normalizedFull = normalize(fullText);
-
+                            
                             // Find the sentence using normalized text
                             var index = normalizedFull.indexOf(normalizedSearch);
                             if (index < 0) {{
@@ -896,19 +775,19 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                                     return false;
                                 }}
                             }}
-
+                            
                             console.log('Found at index:', index, 'in element:', element.tagName);
-
+                            
                             // Map normalized position back to actual text position
                             var actualStartPos = -1;
                             var actualEndPos = -1;
                             var normPos = 0;
                             var inWhitespace = false;
-
+                            
                             for (var i = 0; i < fullText.length; i++) {{
                                 var char = fullText[i];
                                 var isWhitespace = /\\s/.test(char);
-
+                                
                                 if (!isWhitespace) {{
                                     if (normPos === index && actualStartPos === -1) {{
                                         actualStartPos = i;
@@ -924,46 +803,46 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                                     inWhitespace = true;
                                 }}
                             }}
-
+                            
                             if (actualStartPos === -1 || actualEndPos === -1) {{
                                 console.error('Could not map positions');
                                 return false;
                             }}
-
+                            
                             console.log('Actual positions:', actualStartPos, '-', actualEndPos);
-
+                            
                             // Get all text nodes in the element
                             var walker = doc.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
                             var textNodes = [];
                             while (walker.nextNode()) {{
                                 textNodes.push(walker.currentNode);
                             }}
-
+                            
                             // Highlight across text nodes
                             var currentPos = 0;
                             var highlighted = false;
-
+                            
                             for (var i = 0; i < textNodes.length; i++) {{
                                 var node = textNodes[i];
                                 var nodeLength = node.textContent.length;
                                 var nodeEnd = currentPos + nodeLength;
-
+                                
                                 // Check if this node overlaps with target range
                                 if (currentPos < actualEndPos && nodeEnd > actualStartPos) {{
                                     var highlightStart = Math.max(0, actualStartPos - currentPos);
                                     var highlightEnd = Math.min(nodeLength, actualEndPos - currentPos);
-
+                                    
                                     var beforeText = node.textContent.substring(0, highlightStart);
                                     var matchText = node.textContent.substring(highlightStart, highlightEnd);
                                     var afterText = node.textContent.substring(highlightEnd);
-
+                                    
                                     var parent = node.parentNode;
-
+                                    
                                     if (beforeText) {{
                                         var before = doc.createTextNode(beforeText);
                                         parent.insertBefore(before, node);
                                     }}
-
+                                    
                                     var highlight = doc.createElement('span');
                                     highlight.className = 'tts-highlight';
                                     // Use inline style but derive colors from host variables if possible
@@ -974,14 +853,14 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                                     highlight.style.padding = '2px 0';
                                     highlight.textContent = matchText;
                                     parent.insertBefore(highlight, node);
-
+                                    
                                     if (afterText) {{
                                         var after = doc.createTextNode(afterText);
                                         parent.insertBefore(after, node);
                                     }}
-
+                                    
                                     parent.removeChild(node);
-
+                                    
                                     // Scroll to first highlight
                                     if (!highlighted) {{
                                         highlight.scrollIntoView({{
@@ -991,13 +870,13 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                                         highlighted = true;
                                     }}
                                 }}
-
+                                
                                 currentPos = nodeEnd;
                             }}
-
+                            
                             return highlighted;
                         }}
-
+                        
                         // Search in block elements
                         var blockElements = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6, div, li, td, th, blockquote');
                         for (var i = 0; i < blockElements.length; i++) {{
@@ -1012,12 +891,12 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                 }}
             }})();
             """
-
+        
         try:
             self.webview.evaluate_javascript(js_code, None, None, None, None, None, None, None)
         except TypeError:
             self.webview.evaluate_javascript(js_code, len(js_code), None, None, None, None, None, None)
-
+    
     def on_tts_play(self, button):
         """Request current page text for TTS"""
         js_code = """
@@ -1026,11 +905,11 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                 var iframe = document.querySelector('#viewer iframe');
                 if (iframe && iframe.contentDocument) {
                     var body = iframe.contentDocument.body;
-
+                    
                     // Extract text with structure preservation
                     function extractStructuredText(element) {
                         var sentences = [];
-
+                        
                         function getTextContent(node) {
                             // Get all text content, ignoring structure within
                             if (node.nodeType === Node.TEXT_NODE) {
@@ -1044,11 +923,11 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                             }
                             return '';
                         }
-
+                        
                         function traverse(node) {
                             if (node.nodeType === Node.ELEMENT_NODE) {
                                 var tagName = node.tagName.toLowerCase();
-
+                                
                                 // For block elements, get their complete text content
                                 if (['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'blockquote', 'pre'].indexOf(tagName) !== -1) {
                                     var text = getTextContent(node).trim();
@@ -1057,20 +936,20 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                                     }
                                     return; // Don't traverse children
                                 }
-
+                                
                                 // For other elements, traverse children
                                 for (var i = 0; i < node.childNodes.length; i++) {
                                     traverse(node.childNodes[i]);
                                 }
                             }
                         }
-
+                        
                         traverse(element);
                         return sentences;
                     }
-
+                    
                     var blockTexts = extractStructuredText(body);
-
+                    
                     // Now split each block into sentences
                     var allSentences = [];
                     blockTexts.forEach(function(blockText) {
@@ -1088,9 +967,9 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                             allSentences.push(parts[parts.length - 1].trim());
                         }
                     });
-
+                    
                     var text = JSON.stringify(allSentences);
-
+                    
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pageText) {
                         window.webkit.messageHandlers.pageText.postMessage(text);
                     } else {
@@ -1108,17 +987,17 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             self.webview.evaluate_javascript(js_code, None, None, None, None, None, None, None)
         except TypeError:
             self.webview.evaluate_javascript(js_code, len(js_code), None, None, None, None, None, None)
-
+    
     def on_tts_prev(self, button):
         """Go to previous sentence while TTS is playing"""
         if self.tts_engine:
             self.tts_engine.prev_sentence()
-
+    
     def on_tts_next(self, button):
         """Go to next sentence while TTS is playing"""
         if self.tts_engine:
             self.tts_engine.next_sentence()
-
+    
     def on_tts_stop(self, button):
         """Stop TTS playback"""
         if self.tts_engine:
@@ -1126,7 +1005,7 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         # Clear highlights
         self.highlight_sentence(-1, "")
         self.on_tts_finished()
-
+    
     def on_tts_finished(self):
         """Called when TTS finishes"""
         try:
@@ -1143,52 +1022,52 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         """Recursively populate TOC with nested items"""
         if parent_box is None:
             print(f"[DEBUG] populate_toc called with {len(toc_data)} items")
-
+            
             child = self.toc_listbox.get_first_child()
             while child:
                 next_child = child.get_next_sibling()
                 self.toc_listbox.remove(child)
                 child = next_child
-
+            
             parent_box = self.toc_listbox
-
+        
         for item in toc_data:
             label_text = item.get('label', '').strip() if isinstance(item, dict) else str(item).strip()
             href = item.get('href', '') if isinstance(item, dict) else ''
             subitems = item.get('subitems', []) if isinstance(item, dict) else []
-
+            
             if not label_text:
                 label_text = 'Unknown'
-
+            
             if subitems and len(subitems) > 0:
                 row = Gtk.ListBoxRow()
                 row.set_activatable(bool(href))
-
+                
                 expander = Gtk.Expander()
                 expander.set_label(label_text)
                 expander.set_margin_start(12 + (level * 16))
                 expander.set_margin_end(12)
                 expander.set_margin_top(4)
                 expander.set_margin_bottom(4)
-
+                
                 subitems_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
                 expander.set_child(subitems_box)
-
+                
                 row.set_child(expander)
-
+                
                 if href:
                     row.href = href
                     expander.connect('activate', lambda e, h=href: self.go_to_chapter(h))
-
+                
                 parent_box.append(row)
-
+                
                 for subitem in subitems:
                     self.add_toc_subitem(subitems_box, subitem, level + 1)
-
+                    
             else:
                 row = Gtk.ListBoxRow()
                 row.set_activatable(True)
-
+                
                 label = Gtk.Label(
                     label=label_text,
                     halign=Gtk.Align.START,
@@ -1199,33 +1078,33 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                     wrap=True,
                     xalign=0
                 )
-
+                
                 row.set_child(label)
-
+                
                 if href:
                     row.href = href
-
+                
                 parent_box.append(row)
-
+        
         if parent_box == self.toc_listbox:
             try:
                 self.toc_listbox.disconnect_by_func(self.on_toc_row_activated)
             except:
                 pass
             self.toc_listbox.connect('row-activated', self.on_toc_row_activated)
-
+            
             self.toc_sidebar.set_visible(True)
             print(f"[DEBUG] TOC sidebar visible, {len(toc_data)} items added")
-
+    
     def add_toc_subitem(self, parent_box, item, level):
         """Add a single TOC subitem"""
         label_text = item.get('label', '').strip() if isinstance(item, dict) else str(item).strip()
         href = item.get('href', '') if isinstance(item, dict) else ''
         subitems = item.get('subitems', []) if isinstance(item, dict) else []
-
+        
         if not label_text:
             label_text = 'Unknown'
-
+        
         if subitems and len(subitems) > 0:
             expander = Gtk.Expander()
             expander.set_label(label_text)
@@ -1233,15 +1112,15 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             expander.set_margin_end(12)
             expander.set_margin_top(2)
             expander.set_margin_bottom(2)
-
+            
             subitems_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
             expander.set_child(subitems_box)
-
+            
             if href:
                 expander.connect('activate', lambda e, h=href: self.go_to_chapter(h))
-
+            
             parent_box.append(expander)
-
+            
             for subitem in subitems:
                 self.add_toc_subitem(subitems_box, subitem, level + 1)
         else:
@@ -1252,17 +1131,17 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             button.set_margin_end(12)
             button.set_margin_top(2)
             button.set_margin_bottom(2)
-
+            
             child = button.get_child()
             if child and isinstance(child, Gtk.Label):
                 child.set_wrap(True)
                 child.set_xalign(0)
-
+            
             if href:
                 button.connect('clicked', lambda b, h=href: self.go_to_chapter(h))
-
+            
             parent_box.append(button)
-
+    
     def on_toc_row_activated(self, listbox, row):
         """Handle TOC item click"""
         if hasattr(row, 'href') and row.href:
@@ -1326,13 +1205,13 @@ class EpubViewerWindow(Adw.ApplicationWindow):
     def load_epub(self, epub_path):
         import zipfile
         import shutil
-
+        
         if self.temp_dir and os.path.exists(self.temp_dir):
             try:
                 shutil.rmtree(self.temp_dir)
             except Exception as e:
                 print(f"[warn] Failed to clean up temp dir: {e}")
-
+        
         self.temp_dir = tempfile.mkdtemp(prefix="epub_reader_")
         try:
             with zipfile.ZipFile(epub_path, 'r') as zip_ref:
@@ -1341,9 +1220,9 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         except Exception as e:
             print(f"[error] Failed to extract EPUB: {e}")
             return
-
+        
         extracted_uri = pathlib.Path(self.temp_dir).as_uri()
-
+        
         if LOCAL_JSZIP.exists():
             jszip_snippet = f"<script>{LOCAL_JSZIP.read_text(encoding='utf-8')}</script>"
             jszip_note = "[local]"
@@ -1422,12 +1301,12 @@ class EpubViewerWindow(Adw.ApplicationWindow):
 
       try {{
         const book = ePub(epubUrl);
-
+        
         window.rendition = book.renderTo("viewer", {{ 
           width: "100%", 
           height: "100%"
         }});
-
+        
         window.rendition.display();
 
         book.loaded.navigation.then(function(nav){{
@@ -1460,7 +1339,7 @@ class EpubViewerWindow(Adw.ApplicationWindow):
 </html>"""
 
         self.webview.load_html(html_content, "file:///")
-
+    
     def __del__(self):
         """Cleanup temp directory on destruction"""
         if self.temp_dir and os.path.exists(self.temp_dir):
