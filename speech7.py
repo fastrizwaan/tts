@@ -354,6 +354,7 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         )
         self.user_manager.add_script(forwarder)
 
+        # If an initial file was provided, load it
         if file_path:
             self.load_file(file_path)
 
@@ -370,6 +371,78 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                 getattr(settings, name)(True)
             except Exception:
                 pass
+
+        # --- DARK/LIGHT THEME SUPPORT (minimal changes) ---
+        # Inject CSS variables + prefers-color-scheme handling into every page/frame
+        # so pages (and EPUB viewer iframe content) can adapt to the system theme automatically.
+        theme_inject_js = r"""
+        (function() {
+            try {
+                // Create a <style> with CSS variables that adapt to system theme.
+                var css = `
+                    :root {
+                        --app-bg: #ffffff;
+                        --app-text: #000000;
+                        --app-link: #1a73e8;
+                        --tts-highlight-bg: rgba(255,235,59,0.95); /* light: yellow */
+                        --tts-highlight-text: #000000;
+                    }
+                    @media (prefers-color-scheme: dark) {
+                        :root {
+                            --app-bg: #0f1113;
+                            --app-text: #e6e6e6;
+                            --app-link: #8ab4f8;
+                            --tts-highlight-bg: rgba(255,235,59,0.95); /* keep highlight visible on dark */
+                            --tts-highlight-text: #000000;
+                        }
+                    }
+                    html, body {
+                        background: var(--app-bg) !important;
+                        color: var(--app-text) !important;
+                        transition: background 150ms ease, color 150ms ease;
+                    }
+                    a { color: var(--app-link) !important; }
+                    /* Make sure EPUB viewer container uses the variables as well */
+                    #viewer, #viewer * {
+                        background: transparent !important;
+                        color: inherit !important;
+                    }
+                `;
+                var style = document.createElement('style');
+                style.setAttribute('data-app-theme','injected');
+                style.textContent = css;
+                (document.head || document.documentElement).appendChild(style);
+
+                // Also set the inline computed background/text on root to help pages that have inline styles
+                document.documentElement.style.background = "var(--app-bg)";
+                document.body && (document.body.style.background = "var(--app-bg)");
+                document.documentElement.style.color = "var(--app-text)";
+                
+                // Observe changes to prefers-color-scheme and re-apply inline styles to keep webview updated
+                try {
+                    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+                    mq.addEventListener && mq.addEventListener('change', function() {
+                        document.documentElement.style.background = "var(--app-bg)";
+                        document.body && (document.body.style.background = "var(--app-bg)");
+                        document.documentElement.style.color = "var(--app-text)";
+                    });
+                } catch(e){}
+            } catch(e){
+                console.error('Theme injection failed', e);
+            }
+        })();
+        """
+        try:
+            user_script = WebKit.UserScript(
+                theme_inject_js,
+                WebKit.UserContentInjectedFrames.ALL_FRAMES,
+                WebKit.UserScriptInjectionTime.START,
+                None,
+                None
+            )
+            self.webview.get_user_content_manager().add_script(user_script)
+        except Exception as e:
+            print("[warn] Failed to add theme injection script:", e)
 
     def _extract_message_string(self, message):
         try:
@@ -667,8 +740,11 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                                     
                                     var highlight = doc.createElement('span');
                                     highlight.className = 'tts-highlight';
-                                    highlight.style.backgroundColor = '#ffeb3b';
-                                    highlight.style.color = '#000';
+                                    // Use inline style but derive colors from host variables if possible
+                                    var bg = getComputedStyle(document.documentElement).getPropertyValue('--tts-highlight-bg') || 'rgba(255,235,59,0.95)';
+                                    var fg = getComputedStyle(document.documentElement).getPropertyValue('--tts-highlight-text') || '#000000';
+                                    highlight.style.backgroundColor = bg.trim();
+                                    highlight.style.color = fg.trim();
                                     highlight.style.padding = '2px 0';
                                     highlight.textContent = matchText;
                                     parent.insertBefore(highlight, node);
@@ -1046,10 +1122,24 @@ class EpubViewerWindow(Adw.ApplicationWindow):
 <head>
   <meta charset="utf-8">
   <title>EPUB Reader</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    html, body {{ height: 100%; margin: 0; padding: 0; background: #fff; }}
-    #viewer {{ width: 100vw; height: 100vh; }}
+    /* Use CSS variables so the viewer can follow system dark/light automatically */
+    :root {{
+      --viewer-bg: #ffffff;
+      --viewer-text: #000000;
+    }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        --viewer-bg: #0f1113;
+        --viewer-text: #e6e6e6;
+      }}
+    }}
+    html, body {{ height: 100%; margin: 0; padding: 0; background: var(--viewer-bg); color: var(--viewer-text); }}
+    #viewer {{ width: 100vw; height: 100vh; background: transparent; color: inherit; }}
     .epubjs-navigation {{ display: none; }}
+    /* Ensure any injected highlight picks up variables */
+    .tts-highlight {{ background: var(--tts-highlight-bg, rgba(255,235,59,0.95)); color: var(--tts-highlight-text, #000); }}
   </style>
 </head>
 <body>
@@ -1142,6 +1232,7 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             with open(html_path, 'r', encoding='utf-8') as f:
                 html_content = f.read()
             base_uri = f"file://{pathlib.Path(html_path).parent.absolute()}/"
+            # Because we inject theme CSS via user script, arbitrary HTML files will pick up system theme.
             self.webview.load_html(html_content, base_uri)
         except Exception as e:
             print(f"Error loading HTML file: {e}")
@@ -1170,4 +1261,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-    main()
+
+
