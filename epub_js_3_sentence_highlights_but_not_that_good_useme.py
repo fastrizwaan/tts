@@ -43,7 +43,6 @@ class TTSEngine:
         self.is_playing = False
         self.should_stop = False
         self.current_thread = None
-        self.highlight_callback = None
         
         if TTS_AVAILABLE:
             try:
@@ -69,173 +68,78 @@ class TTSEngine:
         bus = self.player.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self.on_gst_message)
-        self.playback_finished = False
     
     def on_gst_message(self, bus, message):
         t = message.type
         if t == Gst.MessageType.EOS:
             self.player.set_state(Gst.State.NULL)
-            self.playback_finished = True
+            self.is_playing = False
         elif t == Gst.MessageType.ERROR:
             self.player.set_state(Gst.State.NULL)
             err, debug = message.parse_error()
             print(f"[error] GStreamer error: {err}, {debug}")
-            self.playback_finished = True
+            self.is_playing = False
     
-    def split_sentences(self, text):
-        """Split text into sentences"""
-        import re
-        # Simple sentence splitter - splits on . ! ? followed by space or end
-        sentences = re.split(r'([.!?]+(?:\s+|$))', text)
-        result = []
-        for i in range(0, len(sentences)-1, 2):
-            sentence = sentences[i] + (sentences[i+1] if i+1 < len(sentences) else '')
-            sentence = sentence.strip()
-            if sentence:
-                result.append(sentence)
-        # Handle last sentence if it doesn't end with punctuation
-        if len(sentences) % 2 == 1 and sentences[-1].strip():
-            result.append(sentences[-1].strip())
-        return result
-    
-    def synthesize_sentence(self, sentence, voice, speed, lang):
-        """Synthesize a single sentence and return the audio file path"""
-        try:
-            samples, sample_rate = self.kokoro.create(sentence, voice=voice, speed=speed, lang=lang)
-            temp_file = writable_path(f"tts_{int(time.time() * 1000)}_{os.getpid()}.wav")
-            sf.write(temp_file, samples, sample_rate)
-            return temp_file
-        except Exception as e:
-            print(f"[error] Synthesis error for sentence: {e}")
-            return None
-    
-    def speak_sentences_list(self, sentences, voice="af_sarah", speed=1.0, lang="en-us", 
-                            highlight_callback=None, finished_callback=None):
-        """Speak a list of pre-split sentences with pre-synthesis for smooth playback"""
+    def speak(self, text, voice="af_sarah", speed=1.0, lang="en-us", callback=None):
         if not self.kokoro:
             print("[warn] TTS not available")
             return
         
         self.stop()
         self.should_stop = False
-        self.highlight_callback = highlight_callback
         
         def tts_thread():
             try:
-                print(f"[TTS] Speaking {len(sentences)} sentences")
+                print(f"[TTS] Speaking: {text[:50]}...")
+                samples, sample_rate = self.kokoro.create(text, voice=voice, speed=speed, lang=lang)
                 
-                # Queue to hold pre-synthesized audio files
-                from queue import Queue
-                audio_queue = Queue(maxsize=3)  # Buffer up to 3 sentences ahead
-                synthesis_complete = threading.Event()
+                if self.should_stop:
+                    return
                 
-                def synthesis_worker():
-                    """Worker thread to synthesize sentences ahead of playback"""
+                # Save to temporary file
+                temp_file = writable_path(f"tts_{int(time.time())}.wav")
+                sf.write(temp_file, samples, sample_rate)
+                
+                if self.should_stop:
                     try:
-                        for idx, sentence in enumerate(sentences):
-                            if self.should_stop:
-                                break
-                            
-                            print(f"[TTS] Synthesizing sentence {idx+1}/{len(sentences)}")
-                            audio_file = self.synthesize_sentence(sentence, voice, speed, lang)
-                            
-                            if audio_file and not self.should_stop:
-                                audio_queue.put((idx, sentence, audio_file))
-                            elif self.should_stop:
-                                break
-                        
-                        synthesis_complete.set()
-                    except Exception as e:
-                        print(f"[error] Synthesis worker error: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        synthesis_complete.set()
-                
-                # Start synthesis worker thread
-                synth_thread = threading.Thread(target=synthesis_worker, daemon=True)
-                synth_thread.start()
-                
-                # Playback loop
-                played_count = 0
-                while played_count < len(sentences) and not self.should_stop:
-                    try:
-                        # Wait for next audio file (with timeout)
-                        idx, sentence, audio_file = audio_queue.get(timeout=30)
-                        
-                        if self.should_stop:
-                            try:
-                                os.remove(audio_file)
-                            except:
-                                pass
-                            break
-                        
-                        print(f"[TTS] Playing sentence {idx+1}/{len(sentences)}: {sentence[:50]}...")
-                        
-                        # Highlight current sentence
-                        if highlight_callback:
-                            GLib.idle_add(highlight_callback, idx, sentence)
-                        
-                        # Play the audio file
-                        self.player.set_property("uri", f"file://{audio_file}")
-                        self.player.set_state(Gst.State.PLAYING)
-                        self.playback_finished = False
-                        
-                        # Wait for playback to finish
-                        while not self.playback_finished and not self.should_stop:
-                            time.sleep(0.02)
-                        
-                        # Cleanup audio file
-                        try:
-                            os.remove(audio_file)
-                        except:
-                            pass
-                        
-                        played_count += 1
-                        
-                    except Exception as e:
-                        if not synthesis_complete.is_set():
-                            print(f"[error] Playback error: {e}")
-                        break
-                
-                # Wait for synthesis to complete and clean up any remaining files
-                synth_thread.join(timeout=2.0)
-                while not audio_queue.empty():
-                    try:
-                        _, _, audio_file = audio_queue.get_nowait()
-                        os.remove(audio_file)
+                        os.remove(temp_file)
                     except:
                         pass
+                    return
                 
-                # Clear highlight when done
-                if highlight_callback and not self.should_stop:
-                    GLib.idle_add(highlight_callback, -1, "")
+                # Play using GStreamer
+                self.player.set_property("uri", f"file://{temp_file}")
+                self.player.set_state(Gst.State.PLAYING)
+                self.is_playing = True
                 
-                if finished_callback:
-                    GLib.idle_add(finished_callback)
+                # Wait for playback to finish
+                while self.is_playing and not self.should_stop:
+                    time.sleep(0.1)
+                
+                # Cleanup
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
+                
+                if callback:
+                    GLib.idle_add(callback)
                     
             except Exception as e:
                 print(f"[error] TTS error: {e}")
                 import traceback
                 traceback.print_exc()
-                if finished_callback:
-                    GLib.idle_add(finished_callback)
         
         self.current_thread = threading.Thread(target=tts_thread, daemon=True)
         self.current_thread.start()
-    
-    def speak_sentences(self, text, voice="af_sarah", speed=1.0, lang="en-us", 
-                       highlight_callback=None, finished_callback=None):
-        """Speak text sentence by sentence (splits text first)"""
-        sentences = self.split_sentences(text)
-        self.speak_sentences_list(sentences, voice, speed, lang, highlight_callback, finished_callback)
     
     def stop(self):
         self.should_stop = True
         if self.player:
             self.player.set_state(Gst.State.NULL)
-        self.playback_finished = True
+        self.is_playing = False
         if self.current_thread:
-            self.current_thread.join(timeout=1.0)
+            self.current_thread.join(timeout=0.5)
 
 class EpubViewerWindow(Adw.ApplicationWindow):
     def __init__(self, application, file_path=None):
@@ -485,236 +389,16 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             except Exception:
                 pass
             
-            # Parse the JSON array of sentences
-            try:
-                sentences = json.loads(raw)
-                if not isinstance(sentences, list):
-                    sentences = [raw.strip()]
-            except:
-                sentences = [raw.strip()]
-            
-            # Filter out empty sentences
-            sentences = [s for s in sentences if s.strip()]
-            
-            if sentences and self.tts_engine:
-                print(f"[TTS] Received {len(sentences)} sentences")
-                for i, s in enumerate(sentences[:5]):  # Show first 5
-                    print(f"  {i+1}: {s[:60]}...")
-                
+            text = raw.strip()
+            if text and self.tts_engine:
+                print(f"[TTS] Received text: {len(text)} chars")
                 self.tts_stop_button.set_sensitive(True)
                 self.tts_play_button.set_sensitive(False)
-                
-                # Start sentence-by-sentence TTS with highlighting
-                self.tts_engine.speak_sentences_list(
-                    sentences,
-                    highlight_callback=self.highlight_sentence,
-                    finished_callback=self.on_tts_finished
-                )
+                self.tts_engine.speak(text, callback=self.on_tts_finished)
         except Exception as e:
             print(f"Error processing page text: {e}")
             import traceback
             traceback.print_exc()
-    
-    def highlight_sentence(self, sentence_idx, sentence_text):
-        """Highlight the current sentence being read"""
-        if sentence_idx < 0:
-            # Clear all highlights
-            js_code = """
-            (function() {
-                try {
-                    var iframe = document.querySelector('#viewer iframe');
-                    if (iframe && iframe.contentDocument) {
-                        var doc = iframe.contentDocument;
-                        var highlights = doc.querySelectorAll('.tts-highlight');
-                        highlights.forEach(function(el) {
-                            var text = el.textContent;
-                            var textNode = doc.createTextNode(text);
-                            el.parentNode.replaceChild(textNode, el);
-                        });
-                        doc.normalize();
-                    }
-                } catch(e) {
-                    console.error('Error clearing highlights:', e);
-                }
-            })();
-            """
-        else:
-            # Escape special characters for JavaScript
-            escaped_text = sentence_text.replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n').replace('\r', '\\r').replace('"', '\\"')
-            
-            js_code = f"""
-            (function() {{
-                try {{
-                    var iframe = document.querySelector('#viewer iframe');
-                    if (iframe && iframe.contentDocument) {{
-                        var doc = iframe.contentDocument;
-                        
-                        // Clear previous highlights
-                        var oldHighlights = doc.querySelectorAll('.tts-highlight');
-                        oldHighlights.forEach(function(el) {{
-                            var text = el.textContent;
-                            var textNode = doc.createTextNode(text);
-                            el.parentNode.replaceChild(textNode, el);
-                        }});
-                        doc.normalize();
-                        
-                        var sentenceToFind = '{escaped_text}';
-                        
-                        // Normalize function - removes extra whitespace
-                        function normalize(text) {{
-                            return text.replace(/\\s+/g, ' ').trim();
-                        }}
-                        
-                        var normalizedSearch = normalize(sentenceToFind);
-                        var searchWords = normalizedSearch.split(' ');
-                        var firstWord = searchWords[0];
-                        var lastWord = searchWords[searchWords.length - 1];
-                        
-                        console.log('Searching for:', normalizedSearch.substring(0, 50));
-                        
-                        // Function to highlight within an element
-                        function highlightInElement(element) {{
-                            var fullText = element.textContent || '';
-                            var normalizedFull = normalize(fullText);
-                            
-                            // Find the sentence using normalized text
-                            var index = normalizedFull.indexOf(normalizedSearch);
-                            if (index < 0) {{
-                                // Try fuzzy match - look for first few words
-                                if (searchWords.length >= 2) {{
-                                    var partialSearch = searchWords.slice(0, Math.min(3, searchWords.length)).join(' ');
-                                    index = normalizedFull.indexOf(partialSearch);
-                                    if (index < 0) return false;
-                                    // Adjust to find full sentence
-                                    var endIndex = index + partialSearch.length;
-                                    for (var i = endIndex; i < normalizedFull.length && i < endIndex + 200; i++) {{
-                                        if (/[.!?]/.test(normalizedFull[i])) {{
-                                            normalizedSearch = normalizedFull.substring(index, i + 1).trim();
-                                            break;
-                                        }}
-                                    }}
-                                }} else {{
-                                    return false;
-                                }}
-                            }}
-                            
-                            console.log('Found at index:', index, 'in element:', element.tagName);
-                            
-                            // Map normalized position back to actual text position
-                            var actualStartPos = -1;
-                            var actualEndPos = -1;
-                            var normPos = 0;
-                            var inWhitespace = false;
-                            
-                            for (var i = 0; i < fullText.length; i++) {{
-                                var char = fullText[i];
-                                var isWhitespace = /\\s/.test(char);
-                                
-                                if (!isWhitespace) {{
-                                    if (normPos === index && actualStartPos === -1) {{
-                                        actualStartPos = i;
-                                    }}
-                                    normPos++;
-                                    if (normPos === index + normalizedSearch.length) {{
-                                        actualEndPos = i + 1;
-                                        break;
-                                    }}
-                                    inWhitespace = false;
-                                }} else if (!inWhitespace && normPos > 0 && normPos < index + normalizedSearch.length) {{
-                                    normPos++;
-                                    inWhitespace = true;
-                                }}
-                            }}
-                            
-                            if (actualStartPos === -1 || actualEndPos === -1) {{
-                                console.error('Could not map positions');
-                                return false;
-                            }}
-                            
-                            console.log('Actual positions:', actualStartPos, '-', actualEndPos);
-                            
-                            // Get all text nodes in the element
-                            var walker = doc.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
-                            var textNodes = [];
-                            while (walker.nextNode()) {{
-                                textNodes.push(walker.currentNode);
-                            }}
-                            
-                            // Highlight across text nodes
-                            var currentPos = 0;
-                            var highlighted = false;
-                            
-                            for (var i = 0; i < textNodes.length; i++) {{
-                                var node = textNodes[i];
-                                var nodeLength = node.textContent.length;
-                                var nodeEnd = currentPos + nodeLength;
-                                
-                                // Check if this node overlaps with target range
-                                if (currentPos < actualEndPos && nodeEnd > actualStartPos) {{
-                                    var highlightStart = Math.max(0, actualStartPos - currentPos);
-                                    var highlightEnd = Math.min(nodeLength, actualEndPos - currentPos);
-                                    
-                                    var beforeText = node.textContent.substring(0, highlightStart);
-                                    var matchText = node.textContent.substring(highlightStart, highlightEnd);
-                                    var afterText = node.textContent.substring(highlightEnd);
-                                    
-                                    var parent = node.parentNode;
-                                    
-                                    if (beforeText) {{
-                                        var before = doc.createTextNode(beforeText);
-                                        parent.insertBefore(before, node);
-                                    }}
-                                    
-                                    var highlight = doc.createElement('span');
-                                    highlight.className = 'tts-highlight';
-                                    highlight.style.backgroundColor = '#ffeb3b';
-                                    highlight.style.color = '#000';
-                                    highlight.style.padding = '2px 0';
-                                    highlight.textContent = matchText;
-                                    parent.insertBefore(highlight, node);
-                                    
-                                    if (afterText) {{
-                                        var after = doc.createTextNode(afterText);
-                                        parent.insertBefore(after, node);
-                                    }}
-                                    
-                                    parent.removeChild(node);
-                                    
-                                    // Scroll to first highlight
-                                    if (!highlighted) {{
-                                        highlight.scrollIntoView({{
-                                            behavior: 'smooth',
-                                            block: 'center'
-                                        }});
-                                        highlighted = true;
-                                    }}
-                                }}
-                                
-                                currentPos = nodeEnd;
-                            }}
-                            
-                            return highlighted;
-                        }}
-                        
-                        // Search in block elements
-                        var blockElements = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6, div, li, td, th, blockquote');
-                        for (var i = 0; i < blockElements.length; i++) {{
-                            if (highlightInElement(blockElements[i])) {{
-                                console.log('Successfully highlighted in:', blockElements[i].tagName);
-                                break;
-                            }}
-                        }}
-                    }}
-                }} catch(e) {{
-                    console.error('Error highlighting sentence:', e, e.stack);
-                }}
-            }})();
-            """
-        
-        try:
-            self.webview.evaluate_javascript(js_code, None, None, None, None, None, None, None)
-        except TypeError:
-            self.webview.evaluate_javascript(js_code, len(js_code), None, None, None, None, None, None)
     
     def on_tts_play(self, button):
         """Request current page text for TTS"""
@@ -724,71 +408,8 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                 var iframe = document.querySelector('#viewer iframe');
                 if (iframe && iframe.contentDocument) {
                     var body = iframe.contentDocument.body;
-                    
-                    // Extract text with structure preservation
-                    function extractStructuredText(element) {
-                        var sentences = [];
-                        
-                        function getTextContent(node) {
-                            // Get all text content, ignoring structure within
-                            if (node.nodeType === Node.TEXT_NODE) {
-                                return node.textContent;
-                            } else if (node.nodeType === Node.ELEMENT_NODE) {
-                                var text = '';
-                                for (var i = 0; i < node.childNodes.length; i++) {
-                                    text += getTextContent(node.childNodes[i]);
-                                }
-                                return text;
-                            }
-                            return '';
-                        }
-                        
-                        function traverse(node) {
-                            if (node.nodeType === Node.ELEMENT_NODE) {
-                                var tagName = node.tagName.toLowerCase();
-                                
-                                // For block elements, get their complete text content
-                                if (['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'blockquote', 'pre'].indexOf(tagName) !== -1) {
-                                    var text = getTextContent(node).trim();
-                                    if (text) {
-                                        sentences.push(text);
-                                    }
-                                    return; // Don't traverse children
-                                }
-                                
-                                // For other elements, traverse children
-                                for (var i = 0; i < node.childNodes.length; i++) {
-                                    traverse(node.childNodes[i]);
-                                }
-                            }
-                        }
-                        
-                        traverse(element);
-                        return sentences;
-                    }
-                    
-                    var blockTexts = extractStructuredText(body);
-                    
-                    // Now split each block into sentences
-                    var allSentences = [];
-                    blockTexts.forEach(function(blockText) {
-                        // Split on sentence boundaries
-                        var parts = blockText.split(/([.!?]+(?:\\s+|$))/);
-                        for (var i = 0; i < parts.length - 1; i += 2) {
-                            var sentence = parts[i] + (parts[i+1] || '');
-                            sentence = sentence.trim();
-                            if (sentence) {
-                                allSentences.push(sentence);
-                            }
-                        }
-                        // Handle last part if no punctuation
-                        if (parts.length % 2 === 1 && parts[parts.length - 1].trim()) {
-                            allSentences.push(parts[parts.length - 1].trim());
-                        }
-                    });
-                    
-                    var text = JSON.stringify(allSentences);
-                    
+                    var text = body.innerText || body.textContent || '';
+                    text = text.trim();
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pageText) {
                         window.webkit.messageHandlers.pageText.postMessage(text);
                     } else {
@@ -811,8 +432,6 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         """Stop TTS playback"""
         if self.tts_engine:
             self.tts_engine.stop()
-        # Clear highlights
-        self.highlight_sentence(-1, "")
         self.on_tts_finished()
     
     def on_tts_finished(self):
@@ -1151,7 +770,6 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         with open(file_path, 'rb') as f:
             return base64.b64encode(f.read()).decode('utf-8')
 
-
 class EpubReader(Adw.Application):
     def __init__(self):
         super().__init__(application_id="io.github.fastrizwaan.tts")
@@ -1169,5 +787,4 @@ def main():
     return app.run(sys.argv)
 
 if __name__ == "__main__":
-    main()
     main()

@@ -109,9 +109,9 @@ class TTSEngine:
             print(f"[error] Synthesis error for sentence: {e}")
             return None
     
-    def speak_sentences_list(self, sentences, voice="af_sarah", speed=1.0, lang="en-us", 
-                            highlight_callback=None, finished_callback=None):
-        """Speak a list of pre-split sentences with pre-synthesis for smooth playback"""
+    def speak_sentences(self, text, voice="af_sarah", speed=1.0, lang="en-us", 
+                       highlight_callback=None, finished_callback=None):
+        """Speak text sentence by sentence with pre-synthesis for smooth playback"""
         if not self.kokoro:
             print("[warn] TTS not available")
             return
@@ -122,6 +122,7 @@ class TTSEngine:
         
         def tts_thread():
             try:
+                sentences = self.split_sentences(text)
                 print(f"[TTS] Speaking {len(sentences)} sentences")
                 
                 # Queue to hold pre-synthesized audio files
@@ -222,12 +223,6 @@ class TTSEngine:
         
         self.current_thread = threading.Thread(target=tts_thread, daemon=True)
         self.current_thread.start()
-    
-    def speak_sentences(self, text, voice="af_sarah", speed=1.0, lang="en-us", 
-                       highlight_callback=None, finished_callback=None):
-        """Speak text sentence by sentence (splits text first)"""
-        sentences = self.split_sentences(text)
-        self.speak_sentences_list(sentences, voice, speed, lang, highlight_callback, finished_callback)
     
     def stop(self):
         self.should_stop = True
@@ -485,28 +480,15 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             except Exception:
                 pass
             
-            # Parse the JSON array of sentences
-            try:
-                sentences = json.loads(raw)
-                if not isinstance(sentences, list):
-                    sentences = [raw.strip()]
-            except:
-                sentences = [raw.strip()]
-            
-            # Filter out empty sentences
-            sentences = [s for s in sentences if s.strip()]
-            
-            if sentences and self.tts_engine:
-                print(f"[TTS] Received {len(sentences)} sentences")
-                for i, s in enumerate(sentences[:5]):  # Show first 5
-                    print(f"  {i+1}: {s[:60]}...")
-                
+            text = raw.strip()
+            if text and self.tts_engine:
+                print(f"[TTS] Received text: {len(text)} chars")
                 self.tts_stop_button.set_sensitive(True)
                 self.tts_play_button.set_sensitive(False)
                 
                 # Start sentence-by-sentence TTS with highlighting
-                self.tts_engine.speak_sentences_list(
-                    sentences,
+                self.tts_engine.speak_sentences(
+                    text, 
                     highlight_callback=self.highlight_sentence,
                     finished_callback=self.on_tts_finished
                 )
@@ -540,7 +522,7 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             """
         else:
             # Escape special characters for JavaScript
-            escaped_text = sentence_text.replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n').replace('\r', '\\r').replace('"', '\\"')
+            escaped_text = sentence_text.replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n').replace('\r', '\\r')
             
             js_code = f"""
             (function() {{
@@ -558,155 +540,59 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                         }});
                         doc.normalize();
                         
+                        // Find and highlight current sentence
                         var sentenceToFind = '{escaped_text}';
                         
-                        // Normalize function - removes extra whitespace
-                        function normalize(text) {{
-                            return text.replace(/\\s+/g, ' ').trim();
-                        }}
-                        
-                        var normalizedSearch = normalize(sentenceToFind);
-                        var searchWords = normalizedSearch.split(' ');
-                        var firstWord = searchWords[0];
-                        var lastWord = searchWords[searchWords.length - 1];
-                        
-                        console.log('Searching for:', normalizedSearch.substring(0, 50));
-                        
-                        // Function to highlight within an element
-                        function highlightInElement(element) {{
-                            var fullText = element.textContent || '';
-                            var normalizedFull = normalize(fullText);
-                            
-                            // Find the sentence using normalized text
-                            var index = normalizedFull.indexOf(normalizedSearch);
-                            if (index < 0) {{
-                                // Try fuzzy match - look for first few words
-                                if (searchWords.length >= 2) {{
-                                    var partialSearch = searchWords.slice(0, Math.min(3, searchWords.length)).join(' ');
-                                    index = normalizedFull.indexOf(partialSearch);
-                                    if (index < 0) return false;
-                                    // Adjust to find full sentence
-                                    var endIndex = index + partialSearch.length;
-                                    for (var i = endIndex; i < normalizedFull.length && i < endIndex + 200; i++) {{
-                                        if (/[.!?]/.test(normalizedFull[i])) {{
-                                            normalizedSearch = normalizedFull.substring(index, i + 1).trim();
-                                            break;
-                                        }}
-                                    }}
-                                }} else {{
-                                    return false;
-                                }}
-                            }}
-                            
-                            console.log('Found at index:', index, 'in element:', element.tagName);
-                            
-                            // Map normalized position back to actual text position
-                            var actualStartPos = -1;
-                            var actualEndPos = -1;
-                            var normPos = 0;
-                            var inWhitespace = false;
-                            
-                            for (var i = 0; i < fullText.length; i++) {{
-                                var char = fullText[i];
-                                var isWhitespace = /\\s/.test(char);
+                        // Function to search and highlight in text nodes
+                        function highlightInNode(node) {{
+                            if (node.nodeType === Node.TEXT_NODE) {{
+                                var text = node.textContent;
+                                var index = text.indexOf(sentenceToFind);
                                 
-                                if (!isWhitespace) {{
-                                    if (normPos === index && actualStartPos === -1) {{
-                                        actualStartPos = i;
-                                    }}
-                                    normPos++;
-                                    if (normPos === index + normalizedSearch.length) {{
-                                        actualEndPos = i + 1;
-                                        break;
-                                    }}
-                                    inWhitespace = false;
-                                }} else if (!inWhitespace && normPos > 0 && normPos < index + normalizedSearch.length) {{
-                                    normPos++;
-                                    inWhitespace = true;
-                                }}
-                            }}
-                            
-                            if (actualStartPos === -1 || actualEndPos === -1) {{
-                                console.error('Could not map positions');
-                                return false;
-                            }}
-                            
-                            console.log('Actual positions:', actualStartPos, '-', actualEndPos);
-                            
-                            // Get all text nodes in the element
-                            var walker = doc.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
-                            var textNodes = [];
-                            while (walker.nextNode()) {{
-                                textNodes.push(walker.currentNode);
-                            }}
-                            
-                            // Highlight across text nodes
-                            var currentPos = 0;
-                            var highlighted = false;
-                            
-                            for (var i = 0; i < textNodes.length; i++) {{
-                                var node = textNodes[i];
-                                var nodeLength = node.textContent.length;
-                                var nodeEnd = currentPos + nodeLength;
-                                
-                                // Check if this node overlaps with target range
-                                if (currentPos < actualEndPos && nodeEnd > actualStartPos) {{
-                                    var highlightStart = Math.max(0, actualStartPos - currentPos);
-                                    var highlightEnd = Math.min(nodeLength, actualEndPos - currentPos);
-                                    
-                                    var beforeText = node.textContent.substring(0, highlightStart);
-                                    var matchText = node.textContent.substring(highlightStart, highlightEnd);
-                                    var afterText = node.textContent.substring(highlightEnd);
+                                if (index >= 0) {{
+                                    var beforeText = text.substring(0, index);
+                                    var matchText = text.substring(index, index + sentenceToFind.length);
+                                    var afterText = text.substring(index + sentenceToFind.length);
                                     
                                     var parent = node.parentNode;
-                                    
-                                    if (beforeText) {{
-                                        var before = doc.createTextNode(beforeText);
-                                        parent.insertBefore(before, node);
-                                    }}
-                                    
+                                    var before = doc.createTextNode(beforeText);
                                     var highlight = doc.createElement('span');
                                     highlight.className = 'tts-highlight';
                                     highlight.style.backgroundColor = '#ffeb3b';
                                     highlight.style.color = '#000';
                                     highlight.style.padding = '2px 0';
                                     highlight.textContent = matchText;
+                                    var after = doc.createTextNode(afterText);
+                                    
+                                    parent.insertBefore(before, node);
                                     parent.insertBefore(highlight, node);
-                                    
-                                    if (afterText) {{
-                                        var after = doc.createTextNode(afterText);
-                                        parent.insertBefore(after, node);
-                                    }}
-                                    
+                                    parent.insertBefore(after, node);
                                     parent.removeChild(node);
                                     
-                                    // Scroll to first highlight
-                                    if (!highlighted) {{
-                                        highlight.scrollIntoView({{
-                                            behavior: 'smooth',
-                                            block: 'center'
-                                        }});
-                                        highlighted = true;
+                                    // Scroll to highlight
+                                    highlight.scrollIntoView({{
+                                        behavior: 'smooth',
+                                        block: 'center'
+                                    }});
+                                    
+                                    return true;
+                                }}
+                            }} else if (node.nodeType === Node.ELEMENT_NODE) {{
+                                // Recursively search in all child nodes, including headers
+                                for (var i = 0; i < node.childNodes.length; i++) {{
+                                    if (highlightInNode(node.childNodes[i])) {{
+                                        return true;
                                     }}
                                 }}
-                                
-                                currentPos = nodeEnd;
                             }}
-                            
-                            return highlighted;
+                            return false;
                         }}
                         
-                        // Search in block elements
-                        var blockElements = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6, div, li, td, th, blockquote');
-                        for (var i = 0; i < blockElements.length; i++) {{
-                            if (highlightInElement(blockElements[i])) {{
-                                console.log('Successfully highlighted in:', blockElements[i].tagName);
-                                break;
-                            }}
-                        }}
+                        // Start search from body
+                        highlightInNode(doc.body);
                     }}
                 }} catch(e) {{
-                    console.error('Error highlighting sentence:', e, e.stack);
+                    console.error('Error highlighting sentence:', e);
                 }}
             }})();
             """
@@ -724,71 +610,8 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                 var iframe = document.querySelector('#viewer iframe');
                 if (iframe && iframe.contentDocument) {
                     var body = iframe.contentDocument.body;
-                    
-                    // Extract text with structure preservation
-                    function extractStructuredText(element) {
-                        var sentences = [];
-                        
-                        function getTextContent(node) {
-                            // Get all text content, ignoring structure within
-                            if (node.nodeType === Node.TEXT_NODE) {
-                                return node.textContent;
-                            } else if (node.nodeType === Node.ELEMENT_NODE) {
-                                var text = '';
-                                for (var i = 0; i < node.childNodes.length; i++) {
-                                    text += getTextContent(node.childNodes[i]);
-                                }
-                                return text;
-                            }
-                            return '';
-                        }
-                        
-                        function traverse(node) {
-                            if (node.nodeType === Node.ELEMENT_NODE) {
-                                var tagName = node.tagName.toLowerCase();
-                                
-                                // For block elements, get their complete text content
-                                if (['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'blockquote', 'pre'].indexOf(tagName) !== -1) {
-                                    var text = getTextContent(node).trim();
-                                    if (text) {
-                                        sentences.push(text);
-                                    }
-                                    return; // Don't traverse children
-                                }
-                                
-                                // For other elements, traverse children
-                                for (var i = 0; i < node.childNodes.length; i++) {
-                                    traverse(node.childNodes[i]);
-                                }
-                            }
-                        }
-                        
-                        traverse(element);
-                        return sentences;
-                    }
-                    
-                    var blockTexts = extractStructuredText(body);
-                    
-                    // Now split each block into sentences
-                    var allSentences = [];
-                    blockTexts.forEach(function(blockText) {
-                        // Split on sentence boundaries
-                        var parts = blockText.split(/([.!?]+(?:\\s+|$))/);
-                        for (var i = 0; i < parts.length - 1; i += 2) {
-                            var sentence = parts[i] + (parts[i+1] || '');
-                            sentence = sentence.trim();
-                            if (sentence) {
-                                allSentences.push(sentence);
-                            }
-                        }
-                        // Handle last part if no punctuation
-                        if (parts.length % 2 === 1 && parts[parts.length - 1].trim()) {
-                            allSentences.push(parts[parts.length - 1].trim());
-                        }
-                    });
-                    
-                    var text = JSON.stringify(allSentences);
-                    
+                    var text = body.innerText || body.textContent || '';
+                    text = text.trim();
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pageText) {
                         window.webkit.messageHandlers.pageText.postMessage(text);
                     } else {
@@ -1169,5 +992,4 @@ def main():
     return app.run(sys.argv)
 
 if __name__ == "__main__":
-    main()
     main()
