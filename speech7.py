@@ -62,6 +62,12 @@ class TTSEngine:
         self._delayed_timer = None
         self._delayed_timer_lock = threading.Lock()
 
+        # paused state (play/pause toggle)
+        self.paused = False
+        # resume event used for playback thread to wait while paused
+        self._resume_event = threading.Event()
+        self._resume_event.set()  # initially not paused
+
         if TTS_AVAILABLE:
             try:
                 model_path = "/app/share/kokoro-models/kokoro-v1.0.onnx"
@@ -177,7 +183,7 @@ class TTSEngine:
     def speak_sentences_list(self, sentences, voice="af_sarah", speed=1.0, lang="en-us",
                             highlight_callback=None, finished_callback=None):
         """Speak a list of pre-split sentences with pre-synthesis for smooth playback.
-           Now supports delayed on-demand synthesis when user navigates quickly.
+           Supports play/pause: when paused, pre-synthesis is limited to next 2 sentences.
         """
         if not self.kokoro:
             print("[warn] TTS not available")
@@ -199,51 +205,56 @@ class TTSEngine:
         self._current_play_index = 0
         self._synthesis_done.clear()
         self._cancel_delayed_timer()
+        self.paused = False
+        self._resume_event.set()
 
         def tts_thread():
             try:
                 total = len(self._tts_sentences)
                 print(f"[TTS] Speaking {total} sentences (with navigation support)")
 
-                # Synthesis worker: synthesize ahead up to a small buffer relative to current index.
+                # Synthesis worker: synthesize ahead but respect paused state.
                 def synthesis_worker():
                     try:
-                        idx = 0
-                        while idx < total and not self.should_stop:
-                            # Skip already-past sentences (we don't synthesize old sentences unless user requests prev)
+                        synth_idx = 0
+                        while not self.should_stop and synth_idx < total:
                             with self._audio_lock:
                                 cur = self._current_play_index
-                            if idx < cur:
-                                idx += 1
-                                continue
 
-                            # Only synthesize within a small lookahead window to avoid synthesizing skipped items
-                            with self._audio_lock:
-                                cur = self._current_play_index
-                            lookahead_limit = cur + 3  # synth up to 3 ahead
-                            if idx > lookahead_limit:
-                                # wait briefly and re-check until user stops skipping
+                            # never synthesize indices that are less than current
+                            if synth_idx < cur:
+                                synth_idx = cur
+
+                            # choose lookahead depending on pause state (paused -> cur+1, else -> cur+3)
+                            if self.paused:
+                                lookahead_limit = cur + 1
+                            else:
+                                lookahead_limit = cur + 3
+
+                            if synth_idx > lookahead_limit:
+                                # wait briefly and re-evaluate; gives responsiveness for user navigation
                                 time.sleep(0.05)
                                 continue
 
-                            if self.should_stop:
-                                break
-
-                            # If we already have audio, advance
+                            # If already synthesized, advance
                             with self._audio_lock:
-                                if self._audio_files.get(idx):
-                                    idx += 1
+                                if self._audio_files.get(synth_idx):
+                                    synth_idx += 1
                                     continue
 
-                            # Synthesize this index
-                            print(f"[TTS] Pre-synthesizing sentence {idx+1}/{total}")
-                            audio_file = self.synthesize_sentence(self._tts_sentences[idx], self._tts_voice, self._tts_speed, self._tts_lang)
-                            if audio_file:
-                                with self._audio_lock:
-                                    # store only if not overwritten
-                                    if idx not in self._audio_files:
-                                        self._audio_files[idx] = audio_file
-                            idx += 1
+                            # Synthesize this index if it's within allowed lookahead
+                            if synth_idx <= lookahead_limit:
+                                if self.should_stop:
+                                    break
+                                print(f"[TTS] Pre-synthesizing sentence {synth_idx+1}/{total} (paused={self.paused})")
+                                audio_file = self.synthesize_sentence(self._tts_sentences[synth_idx], self._tts_voice, self._tts_speed, self._tts_lang)
+                                if audio_file:
+                                    with self._audio_lock:
+                                        if synth_idx not in self._audio_files:
+                                            self._audio_files[synth_idx] = audio_file
+                                synth_idx += 1
+                            else:
+                                time.sleep(0.05)
 
                         self._synthesis_done.set()
                     except Exception as e:
@@ -264,6 +275,17 @@ class TTSEngine:
                     # Immediately highlight current sentence so navigation feels responsive
                     if self._tts_highlight_callback:
                         GLib.idle_add(self._tts_highlight_callback, idx, self._tts_sentences[idx])
+
+                    # If paused, wait here until resumed (or stopped). This prevents continuing playback when paused.
+                    while self.paused and not self.should_stop:
+                        # ensure we don't pre-synthesize beyond the allowed window while paused
+                        self._cancel_delayed_timer()
+                        # wakeable wait so stop() or resume() can take effect
+                        self._resume_event.wait(0.1)
+                        # loop again and check flags
+
+                    if self.should_stop:
+                        break
 
                     # Check if audio already available (pre-synthesized)
                     audio_file = None
@@ -316,6 +338,11 @@ class TTSEngine:
                         self._current_play_index = idx + 1
                         continue
 
+                    # Before actually playing, double-check paused (user might have paused while waiting)
+                    if self.paused:
+                        # do not start playback while paused; continue outer loop and wait at top
+                        continue
+
                     # Start playback
                     print(f"[TTS] Playing sentence {idx+1}/{total}: {self._tts_sentences[idx][:50]}...")
                     self.player.set_property("uri", f"file://{audio_file}")
@@ -327,6 +354,13 @@ class TTSEngine:
                         # if user changed index, break to move to new index
                         if self._current_play_index != idx:
                             break
+                        # if paused during playback, stop playback and break
+                        if self.paused:
+                            try:
+                                self.player.set_state(Gst.State.NULL)
+                            except Exception:
+                                pass
+                            break
                         time.sleep(0.02)
 
                     # Stop playback if necessary
@@ -335,8 +369,8 @@ class TTSEngine:
                     except Exception:
                         pass
 
-                    # If we completed playback for this index (no manual jump), cleanup the audio file to save space
-                    if self._current_play_index == idx:
+                    # If we completed playback for this index (no manual jump and not paused), cleanup the audio file to save space
+                    if (self._current_play_index == idx) and (not self.paused):
                         try:
                             with self._audio_lock:
                                 af = self._audio_files.get(idx)
@@ -354,7 +388,7 @@ class TTSEngine:
                         played_count += 1
                         self._current_play_index = idx + 1
                     else:
-                        # user jumped; continue loop with new index
+                        # user jumped or paused; continue loop with new index or wait
                         pass
 
                 # End playback loop
@@ -388,7 +422,7 @@ class TTSEngine:
         # immediate highlight
         if self._tts_highlight_callback:
             GLib.idle_add(self._tts_highlight_callback, idx, self._tts_sentences[idx])
-        # cancel active playback so playback loop notices index change
+        # stop current playback to cause loop to re-evaluate
         try:
             self.player.set_state(Gst.State.NULL)
         except Exception:
@@ -397,9 +431,7 @@ class TTSEngine:
         self._schedule_delayed_synthesis(idx, delay=0.5)
 
     def prev_sentence(self):
-        """Go to previous sentence during playback: immediate highlight, schedule delayed synth for that index.
-           (We synthesize previous sentences only when user explicitly requests them.)
-        """
+        """Go to previous sentence during playback: immediate highlight, schedule delayed synth for that index."""
         if not self._tts_sentences:
             return
         with self._audio_lock:
@@ -408,7 +440,7 @@ class TTSEngine:
         # immediate highlight
         if self._tts_highlight_callback:
             GLib.idle_add(self._tts_highlight_callback, idx, self._tts_sentences[idx])
-        # cancel active playback so playback loop notices index change
+        # stop current playback to cause loop to re-evaluate
         try:
             self.player.set_state(Gst.State.NULL)
         except Exception:
@@ -416,8 +448,36 @@ class TTSEngine:
         # schedule delayed on-demand synth for this index
         self._schedule_delayed_synthesis(idx, delay=0.5)
 
+    def pause(self):
+        """Pause playback: stop player and put engine into paused state.
+           While paused, the synthesis worker will only produce the next 2 sentences.
+        """
+        print("[TTS] Pausing TTS")
+        self.paused = True
+        self._resume_event.clear()
+        try:
+            self.player.set_state(Gst.State.NULL)
+        except Exception:
+            pass
+        # synthesis worker respects paused flag and will limit lookahead to next 2 sentences.
+
+    def resume(self):
+        """Resume playback from paused state."""
+        print("[TTS] Resuming TTS")
+        self.paused = False
+        # wake playback thread
+        self._resume_event.set()
+        # ensure delayed timer state is sane
+        self._cancel_delayed_timer()
+
     def stop(self):
         self.should_stop = True
+        self.paused = False
+        # wake any waiting playback thread so it can exit
+        try:
+            self._resume_event.set()
+        except Exception:
+            pass
         if self.player:
             try:
                 self.player.set_state(Gst.State.NULL)
@@ -475,8 +535,9 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             tts_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             header_bar.pack_start(tts_box)
 
+            # Play/Pause toggle. Initially play icon.
             self.tts_play_button = Gtk.Button(icon_name="media-playback-start-symbolic")
-            self.tts_play_button.set_tooltip_text("Read current page")
+            self.tts_play_button.set_tooltip_text("Play / Pause TTS")
             self.tts_play_button.connect("clicked", self.on_tts_play)
             tts_box.append(self.tts_play_button)
 
@@ -794,7 +855,8 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                 # Enable controls
                 try:
                     self.tts_stop_button.set_sensitive(True)
-                    self.tts_play_button.set_sensitive(False)
+                    # set play button to "pause" icon because playback is starting
+                    self.tts_play_button.set_icon_name("media-playback-pause-symbolic")
                     if hasattr(self, 'tts_prev_button'):
                         self.tts_prev_button.set_sensitive(True)
                     if hasattr(self, 'tts_next_button'):
@@ -831,6 +893,16 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                             el.parentNode.replaceChild(textNode, el);
                         });
                         doc.normalize();
+                    } else {
+                        // fallback for plain HTML documents loaded directly
+                        var doc2 = document;
+                        var highlights = doc2.querySelectorAll('.tts-highlight');
+                        highlights.forEach(function(el) {
+                            var text = el.textContent;
+                            var textNode = doc2.createTextNode(text);
+                            el.parentNode.replaceChild(textNode, el);
+                        });
+                        doc2.normalize();
                     }
                 } catch(e) {
                     console.error('Error clearing highlights:', e);
@@ -845,166 +917,164 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             (function() {{
                 try {{
                     var iframe = document.querySelector('#viewer iframe');
-                    if (iframe && iframe.contentDocument) {{
-                        var doc = iframe.contentDocument;
+                    var doc = (iframe && iframe.contentDocument) ? iframe.contentDocument : document;
 
-                        // Clear previous highlights
-                        var oldHighlights = doc.querySelectorAll('.tts-highlight');
-                        oldHighlights.forEach(function(el) {{
-                            var text = el.textContent;
-                            var textNode = doc.createTextNode(text);
-                            el.parentNode.replaceChild(textNode, el);
-                        }});
-                        doc.normalize();
+                    // Clear previous highlights
+                    var oldHighlights = doc.querySelectorAll('.tts-highlight');
+                    oldHighlights.forEach(function(el) {{
+                        var text = el.textContent;
+                        var textNode = doc.createTextNode(text);
+                        el.parentNode.replaceChild(textNode, el);
+                    }});
+                    doc.normalize();
 
-                        var sentenceToFind = '{escaped_text}';
+                    var sentenceToFind = '{escaped_text}';
 
-                        // Normalize function - removes extra whitespace
-                        function normalize(text) {{
-                            return text.replace(/\\s+/g, ' ').trim();
-                        }}
+                    // Normalize function - removes extra whitespace
+                    function normalize(text) {{
+                        return text.replace(/\\s+/g, ' ').trim();
+                    }}
 
-                        var normalizedSearch = normalize(sentenceToFind);
-                        var searchWords = normalizedSearch.split(' ');
-                        var firstWord = searchWords[0];
-                        var lastWord = searchWords[searchWords.length - 1];
+                    var normalizedSearch = normalize(sentenceToFind);
+                    var searchWords = normalizedSearch.split(' ');
+                    var firstWord = searchWords[0];
+                    var lastWord = searchWords[searchWords.length - 1];
 
-                        console.log('Searching for:', normalizedSearch.substring(0, 50));
+                    console.log('Searching for:', normalizedSearch.substring(0, 50));
 
-                        // Function to highlight within an element
-                        function highlightInElement(element) {{
-                            var fullText = element.textContent || '';
-                            var normalizedFull = normalize(fullText);
+                    // Function to highlight within an element
+                    function highlightInElement(element) {{
+                        var fullText = element.textContent || '';
+                        var normalizedFull = normalize(fullText);
 
-                            // Find the sentence using normalized text
-                            var index = normalizedFull.indexOf(normalizedSearch);
-                            if (index < 0) {{
-                                // Try fuzzy match - look for first few words
-                                if (searchWords.length >= 2) {{
-                                    var partialSearch = searchWords.slice(0, Math.min(3, searchWords.length)).join(' ');
-                                    index = normalizedFull.indexOf(partialSearch);
-                                    if (index < 0) return false;
-                                    // Adjust to find full sentence
-                                    var endIndex = index + partialSearch.length;
-                                    for (var i = endIndex; i < normalizedFull.length && i < endIndex + 200; i++) {{
-                                        if (/[.!?]/.test(normalizedFull[i])) {{
-                                            normalizedSearch = normalizedFull.substring(index, i + 1).trim();
-                                            break;
-                                        }}
-                                    }}
-                                }} else {{
-                                    return false;
-                                }}
-                            }}
-
-                            console.log('Found at index:', index, 'in element:', element.tagName);
-
-                            // Map normalized position back to actual text position
-                            var actualStartPos = -1;
-                            var actualEndPos = -1;
-                            var normPos = 0;
-                            var inWhitespace = false;
-
-                            for (var i = 0; i < fullText.length; i++) {{
-                                var char = fullText[i];
-                                var isWhitespace = /\\s/.test(char);
-
-                                if (!isWhitespace) {{
-                                    if (normPos === index && actualStartPos === -1) {{
-                                        actualStartPos = i;
-                                    }}
-                                    normPos++;
-                                    if (normPos === index + normalizedSearch.length) {{
-                                        actualEndPos = i + 1;
+                        // Find the sentence using normalized text
+                        var index = normalizedFull.indexOf(normalizedSearch);
+                        if (index < 0) {{
+                            // Try fuzzy match - look for first few words
+                            if (searchWords.length >= 2) {{
+                                var partialSearch = searchWords.slice(0, Math.min(3, searchWords.length)).join(' ');
+                                index = normalizedFull.indexOf(partialSearch);
+                                if (index < 0) return false;
+                                // Adjust to find full sentence
+                                var endIndex = index + partialSearch.length;
+                                for (var i = endIndex; i < normalizedFull.length && i < endIndex + 200; i++) {{
+                                    if (/[.!?]/.test(normalizedFull[i])) {{
+                                        normalizedSearch = normalizedFull.substring(index, i + 1).trim();
                                         break;
                                     }}
-                                    inWhitespace = false;
-                                }} else if (!inWhitespace && normPos > 0 && normPos < index + normalizedSearch.length) {{
-                                    normPos++;
-                                    inWhitespace = true;
                                 }}
-                            }}
-
-                            if (actualStartPos === -1 || actualEndPos === -1) {{
-                                console.error('Could not map positions');
+                            }} else {{
                                 return false;
                             }}
-
-                            console.log('Actual positions:', actualStartPos, '-', actualEndPos);
-
-                            // Get all text nodes in the element
-                            var walker = doc.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
-                            var textNodes = [];
-                            while (walker.nextNode()) {{
-                                textNodes.push(walker.currentNode);
-                            }}
-
-                            // Highlight across text nodes
-                            var currentPos = 0;
-                            var highlighted = false;
-
-                            for (var i = 0; i < textNodes.length; i++) {{
-                                var node = textNodes[i];
-                                var nodeLength = node.textContent.length;
-                                var nodeEnd = currentPos + nodeLength;
-
-                                // Check if this node overlaps with target range
-                                if (currentPos < actualEndPos && nodeEnd > actualStartPos) {{
-                                    var highlightStart = Math.max(0, actualStartPos - currentPos);
-                                    var highlightEnd = Math.min(nodeLength, actualEndPos - currentPos);
-
-                                    var beforeText = node.textContent.substring(0, highlightStart);
-                                    var matchText = node.textContent.substring(highlightStart, highlightEnd);
-                                    var afterText = node.textContent.substring(highlightEnd);
-
-                                    var parent = node.parentNode;
-
-                                    if (beforeText) {{
-                                        var before = doc.createTextNode(beforeText);
-                                        parent.insertBefore(before, node);
-                                    }}
-
-                                    var highlight = doc.createElement('span');
-                                    highlight.className = 'tts-highlight';
-                                    // Use inline style but derive colors from host variables if possible
-                                    var bg = getComputedStyle(document.documentElement).getPropertyValue('--tts-highlight-bg') || 'rgba(255,235,59,0.95)';
-                                    var fg = getComputedStyle(document.documentElement).getPropertyValue('--tts-highlight-text') || '#000000';
-                                    highlight.style.backgroundColor = bg.trim();
-                                    highlight.style.color = fg.trim();
-                                    highlight.style.padding = '2px 0';
-                                    highlight.textContent = matchText;
-                                    parent.insertBefore(highlight, node);
-
-                                    if (afterText) {{
-                                        var after = doc.createTextNode(afterText);
-                                        parent.insertBefore(after, node);
-                                    }}
-
-                                    parent.removeChild(node);
-
-                                    // Scroll to first highlight
-                                    if (!highlighted) {{
-                                        highlight.scrollIntoView({{
-                                            behavior: 'smooth',
-                                            block: 'center'
-                                        }});
-                                        highlighted = true;
-                                    }}
-                                }}
-
-                                currentPos = nodeEnd;
-                            }}
-
-                            return highlighted;
                         }}
 
-                        // Search in block elements
-                        var blockElements = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6, div, li, td, th, blockquote');
-                        for (var i = 0; i < blockElements.length; i++) {{
-                            if (highlightInElement(blockElements[i])) {{
-                                console.log('Successfully highlighted in:', blockElements[i].tagName);
-                                break;
+                        console.log('Found at index:', index, 'in element:', element.tagName);
+
+                        // Map normalized position back to actual text position
+                        var actualStartPos = -1;
+                        var actualEndPos = -1;
+                        var normPos = 0;
+                        var inWhitespace = false;
+
+                        for (var i = 0; i < fullText.length; i++) {{
+                            var char = fullText[i];
+                            var isWhitespace = /\\s/.test(char);
+
+                            if (!isWhitespace) {{
+                                if (normPos === index && actualStartPos === -1) {{
+                                    actualStartPos = i;
+                                }}
+                                normPos++;
+                                if (normPos === index + normalizedSearch.length) {{
+                                    actualEndPos = i + 1;
+                                    break;
+                                }}
+                                inWhitespace = false;
+                            }} else if (!inWhitespace && normPos > 0 && normPos < index + normalizedSearch.length) {{
+                                normPos++;
+                                inWhitespace = true;
                             }}
+                        }}
+
+                        if (actualStartPos === -1 || actualEndPos === -1) {{
+                            console.error('Could not map positions');
+                            return false;
+                        }}
+
+                        console.log('Actual positions:', actualStartPos, '-', actualEndPos);
+
+                        // Get all text nodes in the element
+                        var walker = doc.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
+                        var textNodes = [];
+                        while (walker.nextNode()) {{
+                            textNodes.push(walker.currentNode);
+                        }}
+
+                        // Highlight across text nodes
+                        var currentPos = 0;
+                        var highlighted = false;
+
+                        for (var i = 0; i < textNodes.length; i++) {{
+                            var node = textNodes[i];
+                            var nodeLength = node.textContent.length;
+                            var nodeEnd = currentPos + nodeLength;
+
+                            // Check if this node overlaps with target range
+                            if (currentPos < actualEndPos && nodeEnd > actualStartPos) {{
+                                var highlightStart = Math.max(0, actualStartPos - currentPos);
+                                var highlightEnd = Math.min(nodeLength, actualEndPos - currentPos);
+
+                                var beforeText = node.textContent.substring(0, highlightStart);
+                                var matchText = node.textContent.substring(highlightStart, highlightEnd);
+                                var afterText = node.textContent.substring(highlightEnd);
+
+                                var parent = node.parentNode;
+
+                                if (beforeText) {{
+                                    var before = doc.createTextNode(beforeText);
+                                    parent.insertBefore(before, node);
+                                }}
+
+                                var highlight = doc.createElement('span');
+                                highlight.className = 'tts-highlight';
+                                // Use inline style but derive colors from host variables if possible
+                                var bg = getComputedStyle(document.documentElement).getPropertyValue('--tts-highlight-bg') || 'rgba(255,235,59,0.95)';
+                                var fg = getComputedStyle(document.documentElement).getPropertyValue('--tts-highlight-text') || '#000000';
+                                highlight.style.backgroundColor = bg.trim();
+                                highlight.style.color = fg.trim();
+                                highlight.style.padding = '2px 0';
+                                highlight.textContent = matchText;
+                                parent.insertBefore(highlight, node);
+
+                                if (afterText) {{
+                                    var after = doc.createTextNode(afterText);
+                                    parent.insertBefore(after, node);
+                                }}
+
+                                parent.removeChild(node);
+
+                                // Scroll to first highlight
+                                if (!highlighted) {{
+                                    highlight.scrollIntoView({{
+                                        behavior: 'smooth',
+                                        block: 'center'
+                                    }});
+                                    highlighted = true;
+                                }}
+                            }}
+
+                            currentPos = nodeEnd;
+                        }}
+
+                        return highlighted;
+                    }}
+
+                    // Search in block elements
+                    var blockElements = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6, div, li, td, th, blockquote');
+                    for (var i = 0; i < blockElements.length; i++) {{
+                        if (highlightInElement(blockElements[i])) {{
+                            console.log('Successfully highlighted in:', blockElements[i].tagName);
+                            break;
                         }}
                     }}
                 }} catch(e) {{
@@ -1019,20 +1089,26 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             self.webview.evaluate_javascript(js_code, len(js_code), None, None, None, None, None, None)
 
     def on_tts_play(self, button):
-        """Request current page text for TTS"""
-        js_code = """
-        (function() {
-            try {
-                var iframe = document.querySelector('#viewer iframe');
-                if (iframe && iframe.contentDocument) {
-                    var body = iframe.contentDocument.body;
+        """Play/Pause toggle button handler.
+           - If not playing, this triggers extraction and starts TTS (play)
+           - If playing and not paused -> pause
+           - If playing and paused -> resume
+        """
+        # If TTS not started yet, treat as Play: request page text
+        if not (self.tts_engine and self.tts_engine.is_playing):
+            # Start TTS: get page text
+            js_code = """
+            (function() {
+                try {
+                    var iframe = document.querySelector('#viewer iframe');
+                    var targetDoc = (iframe && iframe.contentDocument) ? iframe.contentDocument : document;
+                    var body = targetDoc.body;
 
                     // Extract text with structure preservation
                     function extractStructuredText(element) {
                         var sentences = [];
 
                         function getTextContent(node) {
-                            // Get all text content, ignoring structure within
                             if (node.nodeType === Node.TEXT_NODE) {
                                 return node.textContent;
                             } else if (node.nodeType === Node.ELEMENT_NODE) {
@@ -1055,10 +1131,9 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                                     if (text) {
                                         sentences.push(text);
                                     }
-                                    return; // Don't traverse children
+                                    return;
                                 }
 
-                                // For other elements, traverse children
                                 for (var i = 0; i < node.childNodes.length; i++) {
                                     traverse(node.childNodes[i]);
                                 }
@@ -1071,10 +1146,8 @@ class EpubViewerWindow(Adw.ApplicationWindow):
 
                     var blockTexts = extractStructuredText(body);
 
-                    // Now split each block into sentences
                     var allSentences = [];
                     blockTexts.forEach(function(blockText) {
-                        // Split on sentence boundaries
                         var parts = blockText.split(/([.!?]+(?:\\s+|$))/);
                         for (var i = 0; i < parts.length - 1; i += 2) {
                             var sentence = parts[i] + (parts[i+1] || '');
@@ -1083,7 +1156,6 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                                 allSentences.push(sentence);
                             }
                         }
-                        // Handle last part if no punctuation
                         if (parts.length % 2 === 1 && parts[parts.length - 1].trim()) {
                             allSentences.push(parts[parts.length - 1].trim());
                         }
@@ -1096,18 +1168,37 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                     } else {
                         window.postMessage({ type: 'pageText', payload: text }, '*');
                     }
-                } else {
-                    console.error('Could not find iframe content');
+                } catch(e) {
+                    console.error('Error getting page text:', e);
                 }
-            } catch(e) {
-                console.error('Error getting page text:', e);
-            }
-        })();
-        """
-        try:
-            self.webview.evaluate_javascript(js_code, None, None, None, None, None, None, None)
-        except TypeError:
-            self.webview.evaluate_javascript(js_code, len(js_code), None, None, None, None, None, None)
+            })();
+            """
+            try:
+                self.webview.evaluate_javascript(js_code, None, None, None, None, None, None, None)
+            except TypeError:
+                self.webview.evaluate_javascript(js_code, len(js_code), None, None, None, None, None, None)
+            # When pageText arrives, tts_engine.speak_sentences_list will be called by on_page_text.
+            return
+
+        # If we are playing currently, toggle pause/resume
+        if self.tts_engine.is_playing and not self.tts_engine.paused:
+            # Pause
+            self.tts_engine.pause()
+            # update icon to play
+            try:
+                self.tts_play_button.set_icon_name("media-playback-start-symbolic")
+            except Exception:
+                pass
+            # While paused we want to synthesize only next 2 sentences; engine respects that automatically.
+            return
+        elif self.tts_engine.is_playing and self.tts_engine.paused:
+            # Resume
+            self.tts_engine.resume()
+            try:
+                self.tts_play_button.set_icon_name("media-playback-pause-symbolic")
+            except Exception:
+                pass
+            return
 
     def on_tts_prev(self, button):
         """Go to previous sentence while TTS is playing"""
@@ -1131,6 +1222,7 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         """Called when TTS finishes"""
         try:
             self.tts_play_button.set_sensitive(True)
+            self.tts_play_button.set_icon_name("media-playback-start-symbolic")
             self.tts_stop_button.set_sensitive(False)
             if hasattr(self, 'tts_prev_button'):
                 self.tts_prev_button.set_sensitive(False)
@@ -1315,6 +1407,31 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             pass
 
     def load_file(self, file_path):
+        # Stop and clear any running TTS / synthesis before loading new file (requirement 2)
+        try:
+            if self.tts_engine:
+                self.tts_engine.stop()
+            # clear highlights
+            try:
+                self.highlight_sentence(-1, "")
+            except Exception:
+                pass
+            # disable TTS controls while new file loads
+            try:
+                if hasattr(self, 'tts_prev_button'):
+                    self.tts_prev_button.set_sensitive(False)
+                if hasattr(self, 'tts_next_button'):
+                    self.tts_next_button.set_sensitive(False)
+                if hasattr(self, 'tts_stop_button'):
+                    self.tts_stop_button.set_sensitive(False)
+                if hasattr(self, 'tts_play_button'):
+                    self.tts_play_button.set_sensitive(True)
+                    self.tts_play_button.set_icon_name("media-playback-start-symbolic")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
         file_ext = pathlib.Path(file_path).suffix.lower()
         if file_ext == '.epub':
             self.load_epub(file_path)
@@ -1422,12 +1539,12 @@ class EpubViewerWindow(Adw.ApplicationWindow):
 
       try {{
         const book = ePub(epubUrl);
-
+        
         window.rendition = book.renderTo("viewer", {{ 
           width: "100%", 
           height: "100%"
         }});
-
+        
         window.rendition.display();
 
         book.loaded.navigation.then(function(nav){{
@@ -1504,5 +1621,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-    main()
+
 
