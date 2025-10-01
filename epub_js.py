@@ -1231,6 +1231,38 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         except Exception:
             pass
 
+    def clear_toc(self):
+        """Clear the Table of Contents sidebar (remove rows, disconnect handler, hide sidebar)."""
+        try:
+            # Remove all children from the listbox (works for both ListBox and Box containers)
+            child = self.toc_listbox.get_first_child()
+            while child:
+                next_child = child.get_next_sibling()
+                try:
+                    self.toc_listbox.remove(child)
+                except Exception:
+                    # fallback for different GTK versions / child removal methods
+                    try:
+                        child.unparent()
+                    except Exception:
+                        pass
+                child = next_child
+        except Exception:
+            # best-effort; ignore errors to avoid breaking flow
+            pass
+
+        # Try disconnecting the row-activated handler if it was connected
+        try:
+            self.toc_listbox.disconnect_by_func(self.on_toc_row_activated)
+        except Exception:
+            pass
+
+        # Hide the sidebar (no TOC to show)
+        try:
+            self.toc_sidebar.set_visible(False)
+        except Exception:
+            pass
+
     def populate_toc(self, toc_data, parent_box=None, level=0):
         """Recursively populate TOC with nested items"""
         if parent_box is None:
@@ -1407,6 +1439,11 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             pass
 
     def load_file(self, file_path):
+        # clear previous TOC immediately when switching files
+        try:
+            self.clear_toc()
+        except Exception:
+            pass
         # Stop and clear any running TTS / synthesis before loading new file (requirement 2)
         try:
             if self.tts_engine:
