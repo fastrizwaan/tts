@@ -650,93 +650,20 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         if file_path:
             self.load_file(file_path)
 
-            
     def setup_webview(self):
         settings = self.webview.get_settings()
         try:
             settings.set_enable_javascript(True)
         except Exception:
             pass
+        # try enabling file access if available
         for name in ("set_allow_file_access_from_file_urls",
-                     "set_allow_universal_access_from_file_urls"):  # REMOVE console logging
+                     "set_allow_universal_access_from_file_urls",
+                     "set_enable_write_console_messages_to_stdout"):
             try:
                 getattr(settings, name)(True)
             except Exception:
                 pass
-        
-
-        # --- DARK/LIGHT THEME SUPPORT (minimal changes) ---
-        # Inject CSS variables + prefers-color-scheme handling into every page/frame
-        # so pages (and EPUB viewer iframe content) can adapt to the system theme automatically.
-        theme_inject_js = r"""
-        (function() {
-            try {
-                // Create a <style> with CSS variables that adapt to system theme.
-                var css = `
-                    :root {
-                        --app-bg: #ffffff;
-                        --app-text: #000000;
-                        --app-link: #1a73e8;
-                        --tts-highlight-bg: rgba(255,235,59,0.95); /* light: yellow */
-                        --tts-highlight-text: #000000;
-                    }
-                    @media (prefers-color-scheme: dark) {
-                        :root {
-                            --app-bg: #0f1113;
-                            --app-text: #e6e6e6;
-                            --app-link: #8ab4f8;
-                            --tts-highlight-bg: rgba(255,235,59,0.95); /* keep highlight visible on dark */
-                            --tts-highlight-text: #000000;
-                        }
-                    }
-                    html, body {
-                        background: var(--app-bg) !important;
-                        color: var(--app-text) !important;
-                        transition: background 150ms ease, color 150ms ease;
-                    }
-                    a { color: var(--app-link) !important; }
-                    /* Make sure EPUB viewer container uses the variables as well */
-                    #viewer, #viewer * {
-                        background: transparent !important;
-                        color: inherit !important;
-                    }
-                `;
-                var style = document.createElement('style');
-                style.setAttribute('data-app-theme','injected');
-                style.textContent = css;
-                (document.head || document.documentElement).appendChild(style);
-
-                // Also set the inline computed background/text on root to help pages that have inline styles
-                document.documentElement.style.background = "var(--app-bg)";
-                document.body && (document.body.style.background = "var(--app-bg)");
-                document.documentElement.style.color = "var(--app-text)";
-                
-                // Observe changes to prefers-color-scheme and re-apply inline styles to keep webview updated
-                try {
-                    var mq = window.matchMedia('(prefers-color-scheme: dark)');
-                    mq.addEventListener && mq.addEventListener('change', function() {
-                        document.documentElement.style.background = "var(--app-bg)";
-                        document.body && (document.body.style.background = "var(--app-bg)");
-                        document.documentElement.style.color = "var(--app-text)";
-                    });
-                } catch(e){}
-            } catch(e){
-                console.error('Theme injection failed', e);
-            }
-        })();
-        """
-        try:
-            user_script = WebKit.UserScript(
-                theme_inject_js,
-                WebKit.UserContentInjectedFrames.ALL_FRAMES,
-                WebKit.UserScriptInjectionTime.START,
-                None,
-                None
-            )
-            self.webview.get_user_content_manager().add_script(user_script)
-        except Exception as e:
-            print("[warn] Failed to add theme injection script:", e)
-
                 
     def setup_column_selector(self, header_bar):
         """Setup column width selector dropdown"""
@@ -802,55 +729,99 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         js_code = f"""
         (function() {{
             try {{
-                var columnCount = {column_count};
-                var columnWidth = {column_width};
+                console.log('[Column] Applying columns: count={column_count}, width={column_width}');
                 
-                // Target the epub.js iframe content directly
+                function applyColumnStyle(doc) {{
+                    if (!doc || !doc.body) return false;
+                    
+                    var style = doc.getElementById('column-style-override');
+                    if (!style) {{
+                        style = doc.createElement('style');
+                        style.id = 'column-style-override';
+                        (doc.head || doc.documentElement).appendChild(style);
+                    }}
+                    
+                    var columnCount = {column_count};
+                    var columnWidth = {column_width};
+                    
+                    var css = '';
+                    if (columnCount !== null && columnCount > 1) {{
+                        css = `
+                            body {{
+                                column-count: ${{columnCount}} !important;
+                                column-gap: 2em !important;
+                                column-fill: balance !important;
+                                height: 100vh !important;
+                                overflow: auto !important;
+                            }}
+                            p {{
+                                margin: 0.5em 0 !important;
+                            }}
+                            h1, h2, h3, h4, h5, h6 {{
+                                break-after: avoid-column !important;
+                            }}
+                            img {{
+                                max-width: 100% !important;
+                                height: auto !important;
+                                break-inside: avoid !important;
+                            }}
+                        `;
+                    }} else if (columnWidth !== null) {{
+                        css = `
+                            body {{
+                                column-width: ${{columnWidth}} !important;
+                                column-gap: 2em !important;
+                                column-fill: balance !important;
+                                height: 100vh !important;
+                                overflow: auto !important;
+                            }}
+                            p {{
+                                margin: 0.5em 0 !important;
+                            }}
+                            h1, h2, h3, h4, h5, h6 {{
+                                break-after: avoid-column !important;
+                            }}
+                            img {{
+                                max-width: 100% !important;
+                                height: auto !important;
+                                break-inside: avoid !important;
+                            }}
+                        `;
+                    }} else {{
+                        css = `
+                            body {{
+                                column-count: 1 !important;
+                                column-width: auto !important;
+                            }}
+                        `;
+                    }}
+                    
+                    style.textContent = css;
+                    console.log('[Column] Style applied');
+                    return true;
+                }}
+                
+                // Try EPUB iframe first
                 var iframe = document.querySelector('#viewer iframe');
-                var doc = iframe && iframe.contentDocument ? iframe.contentDocument : document;
-                
-                // Override epub.js pagination styles
-                var style = doc.getElementById('column-override') || doc.createElement('style');
-                style.id = 'column-override';
-                
-                if (columnCount !== null && columnCount > 1) {{
-                    style.textContent = `
-                        body {{
-                            column-count: ${{columnCount}} !important;
-                            column-gap: 2em !important;
-                            column-fill: auto !important;
-                            height: 100vh !important;
-                        }}
-                        /* Disable epub.js pagination */
-                        .epub-container {{
-                            column-count: inherit !important;
-                        }}
-                    `;
-                }} else if (columnWidth !== null) {{
-                    style.textContent = `
-                        body {{
-                            column-width: ${{columnWidth}} !important;
-                            column-gap: 2em !important;
-                            column-fill: auto !important;
-                            height: 100vh !important;
-                        }}
-                    `;
+                if (iframe && iframe.contentDocument && iframe.contentDocument.body) {{
+                    applyColumnStyle(iframe.contentDocument);
+                    console.log('[Column] Applied to EPUB iframe');
+                }} else if (document.body) {{
+                    // Fallback to main document for HTML files
+                    applyColumnStyle(document);
+                    console.log('[Column] Applied to main document');
                 }} else {{
-                    style.textContent = 'body {{ column-count: 1 !important; }}';
+                    // Retry after delay
+                    setTimeout(function() {{
+                        var iframe2 = document.querySelector('#viewer iframe');
+                        if (iframe2 && iframe2.contentDocument) {{
+                            applyColumnStyle(iframe2.contentDocument);
+                        }}
+                    }}, 500);
                 }}
                 
-                (doc.head || doc.documentElement).appendChild(style);
-                
-                // Hook into epub.js rendering to reapply on page change
-                if (window.rendition) {{
-                    window.rendition.hooks.content.register(function(contents) {{
-                        var s = contents.document.createElement('style');
-                        s.textContent = style.textContent;
-                        contents.document.head.appendChild(s);
-                    }});
-                }}
             }} catch(e) {{
-                console.error('[Column]', e);
+                console.error('[Column] Error:', e);
             }}
         }})();
         """
