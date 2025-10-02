@@ -18,7 +18,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("WebKit", "6.0")
 gi.require_version("Adw", "1")
 gi.require_version("Gst", "1.0")
-from gi.repository import Gtk, WebKit, GLib, Adw, Gst, Gio
+from gi.repository import Gtk, WebKit, GLib, Adw, Gst
 
 try:
     import soundfile as sf
@@ -521,22 +521,11 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         
         self._toc_handler_id = None
         
-        # Column settings
-        self.current_column_count = 2  # Default to 2 columns
-        self.current_column_width = None  # None means using count mode
-        self.column_gap = 40
-        self.column_padding = 20
-        
-        # Setup actions for column menu
-        self.setup_column_actions()
-        
-        
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_content(main_box)
 
         header_bar = Adw.HeaderBar()
         main_box.append(header_bar)
-
 
         # Navigation buttons
         nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -660,67 +649,6 @@ class EpubViewerWindow(Adw.ApplicationWindow):
 
         if file_path:
             self.load_file(file_path)
-
-
-
-    def setup_column_actions(self):
-        """Setup GAction handlers for column menu"""
-        # Action for setting fixed column count
-        set_columns_action = Gio.SimpleAction.new("set-columns", GLib.VariantType.new("i"))
-        set_columns_action.connect("activate", self.on_set_columns_action)
-        self.add_action(set_columns_action)
-        
-        # Action for setting column width
-        set_width_action = Gio.SimpleAction.new("set-column-width", GLib.VariantType.new("i"))
-        set_width_action.connect("activate", self.on_set_column_width_action)
-        self.add_action(set_width_action)
-
-    def on_set_columns_action(self, action, parameter):
-        """Handle column count selection from menu"""
-        count = parameter.get_int32()
-        self.current_column_count = max(1, count)
-        self.current_column_width = None  # Switch to count mode
-        print(f"[Column] Setting to {self.current_column_count} fixed columns")
-        GLib.idle_add(self.apply_columns_after_load)
-
-    def on_set_column_width_action(self, action, parameter):
-        """Handle column width selection from menu"""
-        width = parameter.get_int32()
-        self.current_column_width = max(50, width)
-        self.current_column_count = None  # Switch to width mode
-        print(f"[Column] Setting to {self.current_column_width}px column width")
-        GLib.idle_add(self.apply_columns_after_load)
-
-    def setup_header_bar(self, header_bar):
-        """Setup header bar with column menu - call this in your UI setup"""
-        # ... existing navigation buttons code ...
-        
-        # Column settings menu
-        menu_button = Gtk.MenuButton()
-        menu_button.set_icon_name("open-menu-symbolic")
-        menu_button.set_tooltip_text("Column Layout")
-        
-        menu = Gio.Menu()
-        
-        # Fixed column count submenu
-        columns_menu = Gio.Menu()
-        for i in range(1, 11):
-            label = f"{i} Column{'s' if i > 1 else ''}"
-            columns_menu.append(label, f"win.set-columns({i})")
-        menu.append_submenu("Fixed Columns", columns_menu)
-        
-        # Column width submenu
-        width_menu = Gio.Menu()
-        for w in (100, 150, 200, 250, 300, 350, 400, 450, 500):
-            width_menu.append(f"{w}px width", f"win.set-column-width({w})")
-        menu.append_submenu("Column Width", width_menu)
-        
-        menu_button.set_menu_model(menu)
-        header_bar.pack_end(menu_button)
-
-
-
-
 
             
     def setup_webview(self):
@@ -863,91 +791,97 @@ class EpubViewerWindow(Adw.ApplicationWindow):
         GLib.idle_add(self.apply_columns_after_load)
 
     def apply_columns_after_load(self):
-        """Apply column settings to the current page with proper newspaper-style layout"""
+        """Apply column settings to the current page"""
         if not hasattr(self, 'current_column_count'):
             return False
         
-        # Determine which mode we're in
-        is_fixed_count = self.current_column_count is not None
-        is_pixel_width = self.current_column_width is not None
-        
-        if is_fixed_count:
-            column_css = f"column-count: {self.current_column_count}; column-gap: 2em;"
-        elif is_pixel_width:
-            column_css = f"column-width: {self.current_column_width}px; column-gap: 2em;"
-        else:
-            column_css = "column-count: 1; column-gap: 0;"
+        column_count = self.current_column_count if self.current_column_count else 'null'
+        column_width = f'"{self.current_column_width}px"' if self.current_column_width else 'null'
         
         js_code = f"""
         (function() {{
             try {{
+                var columnCount = {column_count};
+                var columnWidth = {column_width};
+                
+                // Target the epub.js iframe content
                 var iframe = document.querySelector('#viewer iframe');
                 var doc = iframe && iframe.contentDocument ? iframe.contentDocument : document;
                 
+                // Create or update style element
                 var style = doc.getElementById('column-override') || doc.createElement('style');
                 style.id = 'column-override';
                 
-                // Newspaper-style column layout
-                style.textContent = `
-                    body {{
-                        {column_css}
-                        column-fill: balance !important;
-                        height: calc(100vh - 40px) !important;
-                        overflow-x: auto !important;
-                        overflow-y: hidden !important;
-                        padding: 20px !important;
-                        margin: 0 !important;
-                        box-sizing: border-box !important;
-                    }}
-                    
-                    /* Allow content to flow naturally across columns */
-                    p, div {{
-                        break-inside: auto;
-                        margin: 0 0 1em 0;
-                    }}
-                    
-                    /* Prevent headers from breaking */
-                    h1, h2, h3, h4, h5, h6 {{
-                        break-after: avoid-column;
-                        break-inside: avoid;
-                        margin-top: 1.5em;
-                        margin-bottom: 0.5em;
-                    }}
-                    
-                    /* Images fit within columns and don't break */
-                    img {{
-                        max-width: 100% !important;
-                        height: auto !important;
-                        display: block !important;
-                        break-inside: avoid !important;
-                        margin: 1em auto !important;
-                    }}
-                    
-                    /* First image (cover/title) spans all columns */
-                    body > img:first-of-type,
-                    body > div:first-of-type img,
-                    body > figure:first-of-type img {{
-                        column-span: all;
-                        max-width: 50% !important;
-                        margin: 2em auto !important;
-                    }}
-                    
-                    blockquote {{
-                        margin: 1em 2em;
-                        padding-left: 1em;
-                        border-left: 3px solid #3584e4;
-                        break-inside: avoid;
-                    }}
-                    
-                    /* Lists flow naturally but items don't break */
-                    li {{
-                        break-inside: avoid;
-                    }}
-                `;
+                if (columnCount !== null) {{
+                    // Column count mode - columns adjust with window size
+                    style.textContent = `
+                        body {{
+                            column-count: ${{columnCount}} !important;
+                            column-gap: 2em !important;
+                            column-fill: balance !important;
+                            height: 100vh !important;
+                            overflow-x: auto !important;
+                        }}
+                        body > * {{
+                            /* Allow content to flow naturally across columns */
+                            break-inside: auto;
+                        }}
+                        h1, h2, h3, h4, h5, h6 {{
+                            break-after: avoid-column;
+                            break-inside: avoid;
+                        }}
+                        img {{
+                            max-width: 100% !important;
+                            height: auto !important;
+                            display: block !important;
+                            break-inside: avoid !important;
+                            margin: 0.5em 0;
+                        }}
+                    `;
+                }} else if (columnWidth !== null) {{
+                    // Fixed pixel width mode - newspaper style with flowing columns
+                    style.textContent = `
+                        body {{
+                            column-width: ${{columnWidth}} !important;
+                            column-gap: 2em !important;
+                            column-fill: balance !important;
+                            height: 100vh !important;
+                            overflow-x: auto !important;
+                        }}
+                        body > * {{
+                            /* Allow content to flow naturally across columns */
+                            break-inside: auto;
+                        }}
+                        h1, h2, h3, h4, h5, h6 {{
+                            break-after: avoid-column;
+                            break-inside: avoid;
+                        }}
+                        img {{
+                            max-width: 100% !important;
+                            height: auto !important;
+                            display: block !important;
+                            break-inside: avoid !important;
+                            margin: 0.5em 0;
+                        }}
+                    `;
+                }} else {{
+                    // Single column mode
+                    style.textContent = `
+                        body {{
+                            column-count: 1 !important;
+                            width: 100% !important;
+                        }}
+                        img {{
+                            max-width: 100% !important;
+                            height: auto !important;
+                            display: block !important;
+                        }}
+                    `;
+                }}
                 
                 (doc.head || doc.documentElement).appendChild(style);
                 
-                // Hook into epub.js to reapply on page changes
+                // Hook into epub.js rendering to reapply on page changes
                 if (window.rendition && !window.columnStyleApplied) {{
                     window.columnStyleApplied = true;
                     window.rendition.hooks.content.register(function(contents) {{
@@ -1278,9 +1212,9 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             traceback.print_exc()
 
     def highlight_sentence(self, sentence_idx, sentence_text):
-        """Highlight current sentence and scroll to show it in columnar layout"""
+        """Highlight the current sentence being read and scroll to it"""
         if sentence_idx < 0:
-            # Clear highlights
+            # Clear all highlights
             js_code = """
             (function() {
                 try {
@@ -1299,6 +1233,7 @@ class EpubViewerWindow(Adw.ApplicationWindow):
             })();
             """
         else:
+            # Escape special characters for JavaScript
             escaped_text = sentence_text.replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n').replace('\r', '\\r').replace('"', '\\"')
 
             js_code = f"""
@@ -1323,17 +1258,28 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                     }}
 
                     var normalizedSearch = normalize(sentenceToFind);
+                    var searchWords = normalizedSearch.split(' ');
 
                     function highlightInElement(element) {{
                         var fullText = element.textContent || '';
                         var normalizedFull = normalize(fullText);
                         var index = normalizedFull.indexOf(normalizedSearch);
                         
-                        if (index < 0) return false;
+                        if (index < 0) {{
+                            if (searchWords.length >= 2) {{
+                                var partialSearch = searchWords.slice(0, Math.min(3, searchWords.length)).join(' ');
+                                index = normalizedFull.indexOf(partialSearch);
+                                if (index < 0) return false;
+                            }} else {{
+                                return false;
+                            }}
+                        }}
 
-                        // Map to actual positions
-                        var actualStartPos = -1, actualEndPos = -1;
-                        var normPos = 0, inWhitespace = false;
+                        // Map normalized position to actual text position
+                        var actualStartPos = -1;
+                        var actualEndPos = -1;
+                        var normPos = 0;
+                        var inWhitespace = false;
 
                         for (var i = 0; i < fullText.length; i++) {{
                             var char = fullText[i];
@@ -1357,9 +1303,12 @@ class EpubViewerWindow(Adw.ApplicationWindow):
 
                         if (actualStartPos === -1 || actualEndPos === -1) return false;
 
+                        // Get all text nodes
                         var walker = doc.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
                         var textNodes = [];
-                        while (walker.nextNode()) textNodes.push(walker.currentNode);
+                        while (walker.nextNode()) {{
+                            textNodes.push(walker.currentNode);
+                        }}
 
                         var currentPos = 0;
                         var highlighted = false;
@@ -1379,7 +1328,10 @@ class EpubViewerWindow(Adw.ApplicationWindow):
 
                                 var parent = node.parentNode;
 
-                                if (beforeText) parent.insertBefore(doc.createTextNode(beforeText), node);
+                                if (beforeText) {{
+                                    var before = doc.createTextNode(beforeText);
+                                    parent.insertBefore(before, node);
+                                }}
 
                                 var highlight = doc.createElement('span');
                                 highlight.className = 'tts-highlight';
@@ -1391,29 +1343,26 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                                 highlight.textContent = matchText;
                                 parent.insertBefore(highlight, node);
 
-                                if (afterText) parent.insertBefore(doc.createTextNode(afterText), node);
+                                if (afterText) {{
+                                    var after = doc.createTextNode(afterText);
+                                    parent.insertBefore(after, node);
+                                }}
+
                                 parent.removeChild(node);
 
-                                // Smart scroll for columns - horizontal and vertical
+                                // Scroll to highlight - this works with columns
                                 if (!highlighted) {{
+                                    // Get the column position
                                     var rect = highlight.getBoundingClientRect();
+                                    var bodyRect = doc.body.getBoundingClientRect();
                                     
-                                    // Calculate which column the highlight is in
-                                    var computedStyle = window.getComputedStyle(doc.body);
-                                    var columnWidth = parseFloat(computedStyle.columnWidth) || 400;
-                                    var columnGap = parseFloat(computedStyle.columnGap) || 32;
+                                    // Calculate horizontal scroll position for columns
+                                    var scrollX = highlight.offsetLeft - (window.innerWidth / 2) + (rect.width / 2);
                                     
-                                    // Scroll to show the column containing the highlight
-                                    var highlightX = highlight.offsetLeft;
-                                    var columnIndex = Math.floor(highlightX / (columnWidth + columnGap));
-                                    var targetScrollX = columnIndex * (columnWidth + columnGap);
-                                    
-                                    // Center vertically in viewport
-                                    var targetScrollY = highlight.offsetTop - (window.innerHeight / 3);
-                                    
+                                    // Scroll both horizontally (for columns) and vertically
                                     window.scrollTo({{
-                                        left: Math.max(0, targetScrollX),
-                                        top: Math.max(0, targetScrollY),
+                                        left: Math.max(0, scrollX),
+                                        top: highlight.offsetTop - (window.innerHeight / 3),
                                         behavior: 'smooth'
                                     }});
                                     
@@ -1427,9 +1376,12 @@ class EpubViewerWindow(Adw.ApplicationWindow):
                         return highlighted;
                     }}
 
+                    // Search in block elements
                     var blockElements = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6, div, li, td, th, blockquote');
                     for (var i = 0; i < blockElements.length; i++) {{
-                        if (highlightInElement(blockElements[i])) break;
+                        if (highlightInElement(blockElements[i])) {{
+                            break;
+                        }}
                     }}
                 }} catch(e) {{
                     console.error('Error highlighting sentence:', e);
