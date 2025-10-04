@@ -450,6 +450,9 @@ class EpubViewer(Adw.ApplicationWindow):
         self.current_chapter = 0
         self.temp_dir = None
 
+        self.css_content = ""
+        
+        
         # column settings
         self.column_mode = 'width'
         self.fixed_column_count = 2
@@ -1146,23 +1149,67 @@ class EpubViewer(Adw.ApplicationWindow):
 
     def load_epub(self, filepath):
         try:
-            if self.temp_dir and os.path.exists(self.temp_dir):
-                shutil.rmtree(self.temp_dir)
-            # Use Flatpak app cache directory
+            # remove previous temp dir if any
+            if getattr(self, "temp_dir", None) and os.path.exists(self.temp_dir):
+                try:
+                    shutil.rmtree(self.temp_dir)
+                except Exception:
+                    pass
+
+            # Use Flatpak app cache directory (keep existing behavior)
             app_cache_dir = os.path.expanduser("~/.var/app/io.github.fastrizwaan.tts/cache")
             epub_cache_dir = os.path.join(app_cache_dir, "epub-temp")
             os.makedirs(epub_cache_dir, exist_ok=True)
             self.temp_dir = tempfile.mkdtemp(dir=epub_cache_dir)
-            
+
             # Set environment variables to redirect TTS library temp usage
             tts_temp_dir = os.path.join(self.temp_dir, "tts-lib-temp")
             os.makedirs(tts_temp_dir, exist_ok=True)
             os.environ['TMPDIR'] = tts_temp_dir
             os.environ['TMP'] = tts_temp_dir
             os.environ['TEMP'] = tts_temp_dir
-            
+
+            # read book
             self.current_book = epub.read_epub(filepath)
+
+            # extract all items to temp_dir so resources can be referenced by relative paths
+            for item in self.current_book.get_items():
+                try:
+                    name = None
+                    try:
+                        name = item.get_name()
+                    except Exception:
+                        name = getattr(item, "id", None)
+                    if not name:
+                        # fallback unique name
+                        name = f"item-{uuid.uuid4().hex}"
+                    # normalize path and ensure directories exist
+                    safe_name = name.replace("\\", "/")
+                    full_path = os.path.join(self.temp_dir, safe_name)
+                    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                    with open(full_path, "wb") as f:
+                        f.write(item.get_content())
+                except Exception:
+                    # ignore single item failures
+                    pass
+
+            # build item_map (name -> item) for convenience
+            try:
+                self.item_map = {}
+                for item in self.current_book.get_items():
+                    try:
+                        nm = item.get_name()
+                    except Exception:
+                        nm = getattr(item, "id", None)
+                    if nm:
+                        self.item_map[nm] = item
+            except Exception:
+                self.item_map = {}
+
+            # load css from book items and then prepare chapters
             self.extract_chapters()
+            self.extract_css()
+            print("extracted_css")
             if self.chapters:
                 self.current_chapter = 0
                 self.load_chapter()
@@ -1173,95 +1220,26 @@ class EpubViewer(Adw.ApplicationWindow):
         self.chapters = []
         if not self.current_book:
             return
-
-        # Robustly parse spine entries (some EPUBs provide tuples, some plain ids, some empty)
-        spine_items = []
-        try:
-            raw_spine = getattr(self.current_book, "spine", []) or []
-            for entry in raw_spine:
-                if isinstance(entry, (list, tuple)) and len(entry) > 0:
-                    spine_items.append(entry[0])
-                elif isinstance(entry, str):
-                    spine_items.append(entry)
-        except Exception:
-            spine_items = []
-
-        # bail early if no spine entries found
-        if not spine_items:
-            return
-
-        # ensure resources are extracted first (images/css)
-        try:
-            self.extract_resources()
-        except Exception:
-            pass
-
+        spine_items = [item[0] for item in self.current_book.spine]
+        self.extract_resources()
         for item_id in spine_items:
-            try:
-                # find the matching item by id (fall back to href/name if needed)
-                item = None
-                for book_item in self.current_book.get_items():
-                    try:
-                        if getattr(book_item, "id", None) == item_id:
-                            item = book_item
-                            break
-                    except Exception:
-                        continue
-                # fallback: sometimes spine contains hrefs rather than ids
-                if item is None:
-                    for book_item in self.current_book.get_items():
-                        try:
-                            name = None
-                            try:
-                                name = book_item.get_name()
-                            except Exception:
-                                name = getattr(book_item, "id", None)
-                            if name and os.path.basename(str(name)) == os.path.basename(str(item_id)):
-                                item = book_item
-                                break
-                        except Exception:
-                            continue
-
-                if not item:
-                    continue
-
-                media_type = getattr(item, "media_type", "") or ""
-                # only include xhtml/xhtml+xml items
-                if media_type.lower() not in ('application/xhtml+xml', 'application/xml', 'text/html', 'text/xhtml'):
-                    continue
-
-                # read and process content
-                try:
-                    raw = item.get_content()
-                    if isinstance(raw, bytes):
-                        content = raw.decode('utf-8', errors='replace')
-                    else:
-                        content = str(raw)
-                except Exception:
-                    # skip if can't read content
-                    continue
-
-                chapter_file = os.path.join(self.temp_dir, f"{item_id}.html") if self.temp_dir else None
+            item = None
+            for book_item in self.current_book.get_items():
+                if getattr(book_item, "id", None) == item_id:
+                    item = book_item
+                    break
+            if item and getattr(item, "media_type", "") == 'application/xhtml+xml':
+                content = item.get_content().decode('utf-8')
+                chapter_file = os.path.join(self.temp_dir, f"{item_id}.html")
                 processed_content = self.process_chapter_content(content, item)
-                if chapter_file:
-                    try:
-                        with open(chapter_file, 'w', encoding='utf-8') as f:
-                            f.write(processed_content)
-                    except Exception:
-                        # if writing fails, still add in-memory path fallback
-                        chapter_file = None
-
-                title = self.extract_title(content)
+                with open(chapter_file, 'w', encoding='utf-8') as f:
+                    f.write(processed_content)
                 self.chapters.append({
                     'id': item_id,
-                    'title': title or "Untitled Chapter",
-                    'file': chapter_file or '',
+                    'title': self.extract_title(content),
+                    'file': chapter_file,
                     'item': item
                 })
-            except Exception:
-                # keep parsing next spine entries even if one fails
-                continue
-
 
     def process_chapter_content(self, content, item):
         """
@@ -1329,6 +1307,7 @@ class EpubViewer(Adw.ApplicationWindow):
 
         css_styles = f"""
         <style>
+        {self.css_content}
         html, body {{ height:100%; margin:0; padding:0; }}
         body {{
             {body_style}
@@ -1365,6 +1344,7 @@ class EpubViewer(Adw.ApplicationWindow):
             blockquote {{ border-left-color:#62a0ea; }}
             .tts-highlight {{background:rgba(0,127,0,0.75);box-shadow:0 0 0 2px rgba(0,127,0,0.75)}}
         }}
+
         </style>
         """
 
@@ -1521,7 +1501,7 @@ class EpubViewer(Adw.ApplicationWindow):
             body_content = pat.sub(repl, body_content)
 
         # final assembled HTML
-        return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{css_styles}</head><body>{body_content}{script}</body></html>"""
+        return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{self.css_content}</head><body>{body_content}{script}</body></html>"""
 
 
     def extract_resources(self):
@@ -1972,6 +1952,7 @@ class EpubViewer(Adw.ApplicationWindow):
         dialog.present()
 
     def cleanup(self):
+        self.css_content = ""
         if self.tts:
             try:
                 self.tts.stop()
@@ -2000,6 +1981,22 @@ class EpubViewer(Adw.ApplicationWindow):
                         shutil.rmtree(tts_lib_temp)
                 except Exception:
                     pass
+
+    def extract_css(self):
+        self.css_content = ""
+        print(self.css_content)
+        if not self.current_book:
+            print("No self.current_book")
+            return
+        try:
+            for item in self.current_book.get_items_of_type(ebooklib.ITEM_STYLE):
+                try:
+                    self.css_content += item.get_content().decode("utf-8", errors="replace") + "\n"
+                    print(self.css_content)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # --- TTS controls & helpers ---
     def _collect_sentences_for_current_chapter(self):

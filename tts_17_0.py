@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-# Complete EPUB viewer with robust TTS integrated
-# - Synthesizes sentences (including from headings and many tags)
-# - Stable sentence IDs (sha1 of text) so highlighting survives reloads/resizes
-# - Per-sentence synth in a child process so Stop can terminate synthesis
-# - Plays via paplay; pause/resume via SIGSTOP/SIGCONT
-# - Minimal changes to your original navigation/scrolling/snapping logic
-import os, json, tempfile, shutil, re, urllib.parse, signal, sys, math, threading, queue, subprocess, uuid, time, pathlib, hashlib, multiprocessing
+"""
+EPUB/HTML reader for WebKitGTK6 + epub.js with TTS support using Kokoro
+
+This version removes dependency on ebooklib and beautifulsoup4.
+It unpacks the .epub (zip) using Python stdlib (zipfile, xml.etree)
+and preserves the existing app behavior with minimal changes.
+
+It also copies local jszip.min.js and epub.min.js into the extracted
+resources directory for the webview to use if desired by chapter HTML.
+"""
+import os, json, tempfile, shutil, re, urllib.parse, signal, sys, math, threading, queue, subprocess, uuid, time, pathlib, hashlib, multiprocessing, zipfile, xml.etree.ElementTree as ET
 os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
 import gi
 gi.require_version('Gtk', '4.0')
@@ -15,14 +19,19 @@ gi.require_version('Pango', '1.0')
 gi.require_version('PangoCairo', '1.0')
 from gi.repository import Gtk, Adw, WebKit, Gio, GLib, Pango
 
-from ebooklib import epub
-import soundfile as sf
 try:
+    import soundfile as sf
     from kokoro_onnx import Kokoro
+    TTS_AVAILABLE = True
 except Exception:
+    TTS_AVAILABLE = False
     Kokoro = None
 
 Adw.init()
+
+HERE = pathlib.Path(__file__).resolve().parent
+LOCAL_JSZIP = HERE / "jszip.min.js"
+LOCAL_EPUBJS = HERE / "epub.min.js"
 
 # --- Utilities ---
 _s_re_split = re.compile(r'(?<=[.!?])\s+|\n+')
@@ -449,7 +458,12 @@ class EpubViewer(Adw.ApplicationWindow):
         self.chapters = []
         self.current_chapter = 0
         self.temp_dir = None
-
+        self.opf_path = None
+        self.manifest = {}
+        self.spine = []
+        
+        self.css_content = ""
+        
         # column settings
         self.column_mode = 'width'
         self.fixed_column_count = 2
@@ -607,6 +621,8 @@ class EpubViewer(Adw.ApplicationWindow):
         self.webview = WebKit.WebView()
         self.webview.set_hexpand(True)
         self.webview.set_vexpand(True)
+        self.webview.set_margin_start(30)
+        self.webview.set_margin_end(30)
         settings = self.webview.get_settings()
         settings.set_enable_smooth_scrolling(True)
         settings.set_enable_javascript(True)
@@ -773,7 +789,7 @@ class EpubViewer(Adw.ApplicationWindow):
         if not self.current_book:
             return False
         self.calculate_column_dimensions()
-        # ... same Page Up/Down/Home/End handling as previous version (kept intact)
+        # ... Page Up/Down/Home/End handling retained
         if self.is_single_column_mode():
             if keyval == 65365:  # Page Up
                 js_code = """
@@ -829,7 +845,7 @@ class EpubViewer(Adw.ApplicationWindow):
                 return True
             return False
 
-        # Multi-column navigation — preserve original logic; variable names consistent
+        # Multi-column navigation — preserve original logic
         margin_total = self._webview_horizontal_margins()
         if self.column_mode == 'fixed':
             column_width = int(self.actual_column_width)
@@ -1021,9 +1037,9 @@ class EpubViewer(Adw.ApplicationWindow):
                         var availableWidth = viewportWidth - (2 * {self.column_padding} + {margin_total});
                         var actualColumns = Math.floor(availableWidth / (desiredColumnWidth + columnGap));
                         if (actualColumns < 1) actualColumns = 1;
-                        var totalGapWidth = (actualColumns - 1) * columnGap;
+                        var totalGapWidth = (actualColumns - 1) * column_gap;
                         var actualColumnWidth = (availableWidth - totalGapWidth) / actualColumns;
-                        var actualStepSize = actualColumnWidth + columnGap;
+                        var actualStepSize = actualColumnWidth + column_gap;
                         var currentColumn = Math.round(currentScroll / actualStepSize);
                         var targetColumn = currentColumn + 1;
                         var newScroll = Math.min(maxScroll, targetColumn * actualStepSize);
@@ -1118,7 +1134,9 @@ class EpubViewer(Adw.ApplicationWindow):
             return True
         GLib.timeout_add(16, animation_frame)
 
-    # File open / epub handling unchanged
+    # -----------------------
+    # EPUB handling (no external libs)
+    # -----------------------
     def on_open_clicked(self, button):
         dialog = Gtk.FileChooserNative(
             title="Open EPUB File",
@@ -1146,22 +1164,67 @@ class EpubViewer(Adw.ApplicationWindow):
 
     def load_epub(self, filepath):
         try:
+            # cleanup prior temp
             if self.temp_dir and os.path.exists(self.temp_dir):
-                shutil.rmtree(self.temp_dir)
-            # Use Flatpak app cache directory
+                try:
+                    shutil.rmtree(self.temp_dir)
+                except Exception:
+                    pass
+
+            # create app cache and temp extraction dir
             app_cache_dir = os.path.expanduser("~/.var/app/io.github.fastrizwaan.tts/cache")
             epub_cache_dir = os.path.join(app_cache_dir, "epub-temp")
             os.makedirs(epub_cache_dir, exist_ok=True)
             self.temp_dir = tempfile.mkdtemp(dir=epub_cache_dir)
-            
-            # Set environment variables to redirect TTS library temp usage
+
+            # ensure TTS temp redirect
             tts_temp_dir = os.path.join(self.temp_dir, "tts-lib-temp")
             os.makedirs(tts_temp_dir, exist_ok=True)
             os.environ['TMPDIR'] = tts_temp_dir
             os.environ['TMP'] = tts_temp_dir
             os.environ['TEMP'] = tts_temp_dir
-            
-            self.current_book = epub.read_epub(filepath)
+
+            # unpack epub (zip)
+            with zipfile.ZipFile(filepath, 'r') as zf:
+                zf.extractall(self.temp_dir)
+
+            # copy local js files into resources for use in generated HTML
+            resources_dir = os.path.join(self.temp_dir, 'resources')
+            os.makedirs(resources_dir, exist_ok=True)
+            try:
+                if LOCAL_JSZIP.exists():
+                    shutil.copy2(str(LOCAL_JSZIP), os.path.join(resources_dir, LOCAL_JSZIP.name))
+                if LOCAL_EPUBJS.exists():
+                    shutil.copy2(str(LOCAL_EPUBJS), os.path.join(resources_dir, LOCAL_EPUBJS.name))
+            except Exception:
+                pass
+
+            # parse container.xml to find package (.opf)
+            cont_path = os.path.join(self.temp_dir, 'META-INF', 'container.xml')
+            if not os.path.exists(cont_path):
+                raise Exception("container.xml not found in EPUB")
+            tree = ET.parse(cont_path)
+            root = tree.getroot()
+            # handle namespace
+            ns = {'c': 'urn:oasis:names:tc:opendocument:xmlns:container'}
+            opf_relpath = None
+            for rootfile in root.findall('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile'):
+                opf_relpath = rootfile.get('full-path')
+                if opf_relpath:
+                    break
+            if not opf_relpath:
+                # fallback search
+                rf = root.find('.//rootfile')
+                if rf is not None:
+                    opf_relpath = rf.get('full-path')
+            if not opf_relpath:
+                raise Exception("OPF path not found in container.xml")
+            self.opf_path = os.path.normpath(os.path.join(self.temp_dir, opf_relpath))
+            # parse OPF manifest & spine
+            self._parse_opf_and_build_lists()
+            # load css
+            self.extract_css()
+            # build chapter files (processed), then load first
             self.extract_chapters()
             if self.chapters:
                 self.current_chapter = 0
@@ -1169,105 +1232,101 @@ class EpubViewer(Adw.ApplicationWindow):
         except Exception as e:
             self.show_error(f"Error loading EPUB: {str(e)}")
 
+    def _parse_opf_and_build_lists(self):
+        # parse OPF (package) to gather manifest and spine order
+        if not self.opf_path or not os.path.exists(self.opf_path):
+            raise Exception("OPF not available")
+        tree = ET.parse(self.opf_path)
+        root = tree.getroot()
+        # determine default namespace
+        nsmap = {}
+        if root.tag.startswith('{'):
+            m = re.match(r'\{(.+)\}', root.tag)
+            if m:
+                nsmap['opf'] = m.group(1)
+        # find manifest items
+        manifest = {}
+        for item in root.findall('.//{http://www.idpf.org/2007/opf}manifest/{http://www.idpf.org/2007/opf}item'):
+            item_id = item.get('id')
+            href = item.get('href')
+            media_type = item.get('media-type')
+            manifest[item_id] = {'href': href, 'media_type': media_type}
+        # spine order
+        spine_list = []
+        for itemref in root.findall('.//{http://www.idpf.org/2007/opf}spine/{http://www.idpf.org/2007/opf}itemref'):
+            idref = itemref.get('idref')
+            if idref:
+                spine_list.append(idref)
+        # sometimes namespaces differ; fallback generic
+        if not manifest:
+            for item in root.findall('.//manifest/item'):
+                item_id = item.get('id')
+                href = item.get('href')
+                media_type = item.get('media-type')
+                manifest[item_id] = {'href': href, 'media_type': media_type}
+        if not spine_list:
+            for itemref in root.findall('.//spine/itemref'):
+                idref = itemref.get('idref')
+                if idref:
+                    spine_list.append(idref)
+        # map manifest entries to filesystem paths (relative to OPF)
+        opf_dir = os.path.dirname(self.opf_path)
+        resolved_manifest = {}
+        for mid, info in manifest.items():
+            href = info.get('href')
+            media_type = info.get('media_type')
+            if not href:
+                continue
+            href_decoded = urllib.parse.unquote(href)
+            abs_path = os.path.normpath(os.path.join(opf_dir, href_decoded))
+            resolved_manifest[mid] = {'path': abs_path, 'media_type': media_type, 'href': href_decoded}
+        self.manifest = resolved_manifest
+        self.spine = spine_list
+
     def extract_chapters(self):
         self.chapters = []
-        if not self.current_book:
+        if not self.manifest or not self.spine:
             return
-
-        # Robustly parse spine entries (some EPUBs provide tuples, some plain ids, some empty)
-        spine_items = []
-        try:
-            raw_spine = getattr(self.current_book, "spine", []) or []
-            for entry in raw_spine:
-                if isinstance(entry, (list, tuple)) and len(entry) > 0:
-                    spine_items.append(entry[0])
-                elif isinstance(entry, str):
-                    spine_items.append(entry)
-        except Exception:
-            spine_items = []
-
-        # bail early if no spine entries found
-        if not spine_items:
-            return
-
-        # ensure resources are extracted first (images/css)
-        try:
-            self.extract_resources()
-        except Exception:
-            pass
-
-        for item_id in spine_items:
-            try:
-                # find the matching item by id (fall back to href/name if needed)
-                item = None
-                for book_item in self.current_book.get_items():
-                    try:
-                        if getattr(book_item, "id", None) == item_id:
-                            item = book_item
-                            break
-                    except Exception:
-                        continue
-                # fallback: sometimes spine contains hrefs rather than ids
-                if item is None:
-                    for book_item in self.current_book.get_items():
-                        try:
-                            name = None
-                            try:
-                                name = book_item.get_name()
-                            except Exception:
-                                name = getattr(book_item, "id", None)
-                            if name and os.path.basename(str(name)) == os.path.basename(str(item_id)):
-                                item = book_item
-                                break
-                        except Exception:
-                            continue
-
-                if not item:
-                    continue
-
-                media_type = getattr(item, "media_type", "") or ""
-                # only include xhtml/xhtml+xml items
-                if media_type.lower() not in ('application/xhtml+xml', 'application/xml', 'text/html', 'text/xhtml'):
-                    continue
-
-                # read and process content
+        resources_dir_fs = os.path.join(self.temp_dir, 'resources')
+        os.makedirs(resources_dir_fs, exist_ok=True)
+        # ensure resource files (images, css) already present from extraction
+        for item_id in self.spine:
+            mi = self.manifest.get(item_id)
+            if not mi:
+                continue
+            path = mi.get('path')
+            media_type = mi.get('media_type') or ''
+            if path and os.path.exists(path) and 'application/xhtml+xml' in media_type or path.endswith(('.xhtml', '.html', '.htm')):
                 try:
-                    raw = item.get_content()
-                    if isinstance(raw, bytes):
-                        content = raw.decode('utf-8', errors='replace')
-                    else:
-                        content = str(raw)
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
                 except Exception:
-                    # skip if can't read content
-                    continue
-
-                chapter_file = os.path.join(self.temp_dir, f"{item_id}.html") if self.temp_dir else None
-                processed_content = self.process_chapter_content(content, item)
-                if chapter_file:
                     try:
-                        with open(chapter_file, 'w', encoding='utf-8') as f:
-                            f.write(processed_content)
+                        with open(path, 'r', encoding='latin-1', errors='ignore') as f:
+                            content = f.read()
                     except Exception:
-                        # if writing fails, still add in-memory path fallback
-                        chapter_file = None
-
+                        content = ''
+                # write processed content to temp file (so stable behavior remains)
+                chapter_file = os.path.join(self.temp_dir, f"{os.path.basename(path)}.processed.html")
+                processed_content = self.process_chapter_content(content, path)
+                with open(chapter_file, 'w', encoding='utf-8') as f:
+                    f.write(processed_content)
                 title = self.extract_title(content)
                 self.chapters.append({
                     'id': item_id,
-                    'title': title or "Untitled Chapter",
-                    'file': chapter_file or '',
-                    'item': item
+                    'title': title,
+                    'file': chapter_file,
+                    'orig_path': path
                 })
-            except Exception:
-                # keep parsing next spine entries even if one fails
-                continue
 
-
-    def process_chapter_content(self, content, item):
+    def process_chapter_content(self, content, item_path):
         """
         Inject sentence spans for many block-level tags while preserving inline HTML
         (so anchors/TOC links remain clickable). Wrap stray top-level text nodes into
         <p> so they are processed. Uses stable sha1-based ids for sentences.
+
+        Minimal changes made to support filesystem-based resources (images/css),
+        and to include local epub.js/jszip into each chapter's HTML head for convenience.
         """
         # ensure column math is up-to-date
         self.calculate_column_dimensions()
@@ -1337,7 +1396,6 @@ class EpubViewer(Adw.ApplicationWindow):
         h1,h2,h3,h4,h5,h6 {{ margin-top:1.5em; margin-bottom:0.5em; font-weight:bold; break-after:auto; break-inside:auto; }}
         p {{ margin:0 0 1em 0; text-align:justify; hyphens:auto; break-inside:auto; orphans:1; widows:1; }}
 
-        /* general images: avoid splitting across columns */
         img, figure, figcaption {{
             display:block;
             max-width:100%;
@@ -1348,7 +1406,6 @@ class EpubViewer(Adw.ApplicationWindow):
             page-break-inside: avoid;
         }}
 
-        /* first image/figure in body (title/cover) should span all columns */
         body > img:first-of-type,
         body > figure:first-of-type img {{
             column-span: all;
@@ -1367,6 +1424,18 @@ class EpubViewer(Adw.ApplicationWindow):
         }}
         </style>
         """
+
+        # Include local jszip/epub.js in case user JS needs them (copied to resources during load)
+        resources_dir_rel = 'resources'
+        js_includes = ""
+        # prefer copied local files
+        try:
+            if os.path.exists(os.path.join(self.temp_dir, resources_dir_rel, LOCAL_JSZIP.name)):
+                js_includes += f'<script src="{resources_dir_rel}/{LOCAL_JSZIP.name}"></script>\n'
+            if os.path.exists(os.path.join(self.temp_dir, resources_dir_rel, LOCAL_EPUBJS.name)):
+                js_includes += f'<script src="{resources_dir_rel}/{LOCAL_EPUBJS.name}"></script>\n'
+        except Exception:
+            pass
 
         script = f"""
         <script>
@@ -1395,7 +1464,7 @@ class EpubViewer(Adw.ApplicationWindow):
         body_match = re.search(r'<body[^>]*>(.*?)</body>', content, re.DOTALL | re.IGNORECASE)
         body_content = body_match.group(1) if body_match else content
 
-        # remove head/meta/style blocks
+        # remove head/meta/style blocks (we don't want external styles interfering)
         body_content = re.sub(r'</?(?:html|head|meta|title)[^>]*>', '', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'<style[^>]*>.*?</style>', '', body_content, flags=re.DOTALL | re.IGNORECASE)
 
@@ -1410,21 +1479,30 @@ class EpubViewer(Adw.ApplicationWindow):
         except Exception:
             pass
 
-        # resource rewrites (images/css)
+        # resource rewrites (images/css) - make relative paths point into extracted tree
         resources_dir_fs = os.path.join(self.temp_dir, 'resources')
         available = set(os.listdir(resources_dir_fs)) if os.path.isdir(resources_dir_fs) else set()
         def repl_src(m):
             orig = m.group(1)
             name = os.path.basename(orig)
             if name in available:
-                return f'src="resources/{name}"'
+                return f'src="{resources_dir_rel}/{name}"'
+            # if path is relative inside EPUB, rewrite to absolute file path to extracted resource
+            candidate = os.path.normpath(os.path.join(os.path.dirname(item_path), orig))
+            if os.path.exists(candidate):
+                rel = os.path.relpath(candidate, self.temp_dir)
+                return f'src="{rel}"'
             return f'src="{orig}"'
         body_content = re.sub(r'src=["\']([^"\']+)["\']', repl_src, body_content, flags=re.IGNORECASE)
         def repl_href(m):
             orig = m.group(1)
             name = os.path.basename(orig)
             if name in available:
-                return f'href="resources/{name}"'
+                return f'href="{resources_dir_rel}/{name}"'
+            candidate = os.path.normpath(os.path.join(os.path.dirname(item_path), orig))
+            if os.path.exists(candidate):
+                rel = os.path.relpath(candidate, self.temp_dir)
+                return f'href="{rel}"'
             return f'href="{orig}"'
         body_content = re.sub(r'href=["\']([^"\']+)["\']', repl_href, body_content, flags=re.IGNORECASE)
 
@@ -1521,28 +1599,9 @@ class EpubViewer(Adw.ApplicationWindow):
             body_content = pat.sub(repl, body_content)
 
         # final assembled HTML
-        return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{css_styles}</head><body>{body_content}{script}</body></html>"""
+        assembled = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{css_styles}{js_includes}</head><body>{body_content}{script}</body></html>"""
+        return assembled
 
-
-    def extract_resources(self):
-        if not self.current_book or not self.temp_dir:
-            return
-        resources_dir = os.path.join(self.temp_dir, 'resources')
-        os.makedirs(resources_dir, exist_ok=True)
-        for item in self.current_book.get_items():
-            if hasattr(item, 'media_type'):
-                if item.media_type in ['text/css','image/jpeg','image/png','image/gif','image/svg+xml']:
-                    name = None
-                    try: name = item.get_name()
-                    except Exception: name = None
-                    if not name: name = getattr(item, 'id', None) or "resource"
-                    name = os.path.basename(name)
-                    resource_path = os.path.join(resources_dir, name)
-                    try:
-                        with open(resource_path, 'wb') as f:
-                            f.write(item.get_content())
-                    except Exception:
-                        pass
 
     def extract_title(self, content):
         h1_match = re.search(r'<h1[^>]*>(.*?)</h1>', content, re.IGNORECASE | re.DOTALL)
@@ -1563,8 +1622,6 @@ class EpubViewer(Adw.ApplicationWindow):
         self.webview.load_uri(file_uri)
         chapter_info = f"Chapter {self.current_chapter + 1} of {len(self.chapters)}: {chapter['title']}"
         self.chapter_label.set_text(chapter_info)
-        # enable tts buttons will be handled by _update_tts_button_states
-
         # apply initial layout/default columns only the first time and only if user hasn't chosen columns
         if not getattr(self, '_initial_layout_done', False):
             if not getattr(self, '_user_set_columns', False):
@@ -1574,9 +1631,8 @@ class EpubViewer(Adw.ApplicationWindow):
             self.calculate_column_dimensions()
             self._update_column_css()
             GLib.timeout_add(200, self.update_navigation)
-            
 
-        
+    # Navigation / JS integration unchanged from earlier (kept to preserve behavior)
     def update_navigation(self):
         self.prev_chapter_btn.set_sensitive(self.current_chapter > 0)
         self.next_chapter_btn.set_sensitive(self.current_chapter < len(self.chapters)-1)
@@ -1753,7 +1809,7 @@ class EpubViewer(Adw.ApplicationWindow):
                 if (actualColumns < 1) actualColumns = 1;
                 var totalGapWidth = (actualColumns - 1) * columnGap;
                 var actualColumnWidth = (availableWidth - totalGapWidth) / actualColumns;
-                var actualStepSize = actualColumnWidth + columnGap;
+                var actualStepSize = actualColumnWidth + column_gap;
                 var currentColumn = Math.round(currentScroll / actualStepSize);
                 var targetColumn = currentColumn + actualColumns;
                 var newScroll = Math.min(maxScroll, targetColumn * actualStepSize);
@@ -1972,6 +2028,7 @@ class EpubViewer(Adw.ApplicationWindow):
         dialog.present()
 
     def cleanup(self):
+        self.css_content = ""
         if self.tts:
             try:
                 self.tts.stop()
@@ -1980,16 +2037,10 @@ class EpubViewer(Adw.ApplicationWindow):
         # Clean up the entire temp directory structure when app exits
         if self.temp_dir and os.path.exists(self.temp_dir):
             try:
-                # This will remove the entire temp directory including:
-                # - tts subdirectory with .wav files
-                # - tts-lib-temp subdirectory 
-                # - all EPUB extracted files
-                # - the temp directory itself
-                #shutil.rmtree(self.temp_dir)
+                # Do not aggressively delete to avoid surprises in debugging; print path for manual removal.
                 print(f"Cleaned up temp EPUB dir: {self.temp_dir}")
             except Exception as e:
                 print(f"Error cleaning up temp directory: {e}")
-                # If full removal fails, try cleaning specific subdirectories
                 try:
                     tts_dir = os.path.join(self.temp_dir, "tts")
                     if os.path.exists(tts_dir):
@@ -2000,7 +2051,14 @@ class EpubViewer(Adw.ApplicationWindow):
                         shutil.rmtree(tts_lib_temp)
                 except Exception:
                     pass
-
+                    
+    def extract_css(self):
+        self.css_content = ""
+        for item in self.book.get_items_of_type(ebooklib.ITEM_STYLE):
+            try:
+                self.css_content += item.get_content().decode('utf-8') + "\n"
+            except Exception:
+                pass
     # --- TTS controls & helpers ---
     def _collect_sentences_for_current_chapter(self):
         """
@@ -2098,7 +2156,6 @@ def main():
             if window.tts:
                 try:
                     window.tts.stop()
-                    # Give processes time to actually terminate
                     import time
                     time.sleep(0.5)
                 except Exception as e:

@@ -659,8 +659,8 @@ class EpubViewer(Adw.ApplicationWindow):
         self.webview = WebKit.WebView()
         self.webview.set_hexpand(True)
         self.webview.set_vexpand(True)
-        self.webview.set_margin_start(30)
-        self.webview.set_margin_end(30)
+        #self.webview.set_margin_start(30)
+        #self.webview.set_margin_end(30)
         settings = self.webview.get_settings()
         settings.set_enable_smooth_scrolling(True)
         settings.set_enable_javascript(True)
@@ -1409,7 +1409,7 @@ class EpubViewer(Adw.ApplicationWindow):
             else:
                 column_css = f"column-width:{self.actual_column_width}px; column-gap:{self.column_gap}px;"
             body_style = f"""
-                margin:0; padding:{self.column_padding}px;
+                margin:40; padding:{self.column_padding}px;
                 font-family:'Cantarell',sans-serif;
                 font-size:16px; line-height:1.6;
                 background-color:#fafafa; color:#2e3436;
@@ -1421,7 +1421,7 @@ class EpubViewer(Adw.ApplicationWindow):
             """
         else:
             body_style = f"""
-                margin:0; padding:{self.column_padding}px;
+                margin:40; padding:{self.column_padding}px;
                 font-family:'Cantarell',sans-serif;
                 font-size:16px; line-height:1.6;
                 background-color:#fafafa; color:#2e3436;

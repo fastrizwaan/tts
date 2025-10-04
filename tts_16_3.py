@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-# Complete EPUB viewer with robust TTS integrated
-# - Synthesizes sentences (including from headings and many tags)
-# - Stable sentence IDs (sha1 of text) so highlighting survives reloads/resizes
-# - Per-sentence synth in a child process so Stop can terminate synthesis
-# - Plays via paplay; pause/resume via SIGSTOP/SIGCONT
-# - Minimal changes to your original navigation/scrolling/snapping logic
-import os, json, tempfile, shutil, re, urllib.parse, signal, sys, math, threading, queue, subprocess, uuid, time, pathlib, hashlib, multiprocessing
+"""
+EPUB/HTML reader for WebKitGTK6 + epub.js with TTS support using Kokoro
+"""
+import os, json, tempfile, shutil, re, signal, sys, threading, queue, subprocess, uuid, time, pathlib, hashlib, multiprocessing, base64
 os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
 import gi
 gi.require_version('Gtk', '4.0')
@@ -15,7 +12,6 @@ gi.require_version('Pango', '1.0')
 gi.require_version('PangoCairo', '1.0')
 from gi.repository import Gtk, Adw, WebKit, Gio, GLib, Pango
 
-from ebooklib import epub
 import soundfile as sf
 try:
     from kokoro_onnx import Kokoro
@@ -23,6 +19,10 @@ except Exception:
     Kokoro = None
 
 Adw.init()
+
+HERE = pathlib.Path(__file__).resolve().parent
+LOCAL_JSZIP = HERE / "jszip.min.js"
+LOCAL_EPUBJS = HERE / "epub.min.js"
 
 # --- Utilities ---
 _s_re_split = re.compile(r'(?<=[.!?])\s+|\n+')
@@ -35,7 +35,6 @@ def stable_id_for_text(text):
     return h[:12]
 
 # This helper runs inside a subprocess to synthesize a single sentence via Kokoro.
-# It is top-level so it can be pickled by multiprocessing.
 def synth_single_process(model_path, voices_path, text, outpath, voice, speed, lang):
     try:
         from kokoro_onnx import Kokoro
@@ -44,14 +43,11 @@ def synth_single_process(model_path, voices_path, text, outpath, voice, speed, l
         return 2
     try:
         print(f"[TTS] Synthesizing: {repr(text)}")
-
         kokoro = Kokoro(model_path, voices_path)
         samples, sample_rate = kokoro.create(text, voice=voice, speed=speed, lang=lang)
         sf.write(outpath, samples, sample_rate)
-
         duration = len(samples) / float(sample_rate) if samples is not None else 0
         print(f"[TTS] Synthesized -> {outpath} (dur={duration:.2f}s)")
-
         return 0
     except Exception as e:
         print("synth_single_process error:", e, file=sys.stderr)
@@ -60,12 +56,6 @@ def synth_single_process(model_path, voices_path, text, outpath, voice, speed, l
 
 # --- TTS Manager ---
 class TTSManager:
-    """
-    Manages synthesis + playback.
-    - synth_queue: (sid, text)
-    - spawn per-sentence subprocess (synth_single_process) so Stop can kill it
-    - play_queue: (sid, wavpath) consumed by player thread which uses paplay
-    """
     def __init__(self, webview_getter, base_temp_dir,
                  kokoro_model_path=None, voices_bin_path=None,
                  voice="af_sarah", speed=1.0, lang="en-us"):
@@ -82,39 +72,26 @@ class TTSManager:
 
         self.synth_queue = queue.Queue()
         self.play_queue = queue.Queue()
-
         self._synth_thread = None
         self._player_thread = None
-
         self._stop_event = threading.Event()
-        self._paused = threading.Event()  # when set => paused
-
+        self._paused = threading.Event()
         self._current_play_proc = None
-        self._current_synth_proc = None  # multiprocessing.Process for current synth
+        self._current_synth_proc = None
         self._threads_running = False
-
         self.current_chapter_id = None
         self.current_highlight_id = None
-
-        self._user_set_columns = False
-        self._initial_layout_done = False
-
-        
-        # File cache management - keep track of played files
-        self.played_files = []  # List of (sid, filepath) in play order
-        self.max_cache_files = 5  # Keep last 5 played files
+        self.played_files = []
+        self.max_cache_files = 5
         self.current_playing_file = None
 
     def start(self, chapter_id, sentences):
-        # If starting a new chapter, stop previous
         if self.current_chapter_id != chapter_id:
             self.stop()
         self.current_chapter_id = chapter_id
-        # Ensure TTS directory exists before starting synthesis
         os.makedirs(self.tts_dir, exist_ok=True)
         self._stop_event.clear()
         for sid, text in sentences:
-            # ensure non-empty
             if text and text.strip():
                 self.synth_queue.put((sid, text))
         if not self._threads_running:
@@ -147,15 +124,12 @@ class TTSManager:
                 pass
 
     def stop(self):
-        # clear flags
         self._stop_event.set()
-        # clear synth queue
         try:
             while not self.synth_queue.empty():
                 self.synth_queue.get_nowait()
         except Exception:
             pass
-        # clear play queue and delete queued wavs
         try:
             while not self.play_queue.empty():
                 sid, f = self.play_queue.get_nowait()
@@ -166,7 +140,6 @@ class TTSManager:
                     pass
         except Exception:
             pass
-        # kill current synth subprocess (if running)
         if self._current_synth_proc:
             try:
                 self._current_synth_proc.terminate()
@@ -177,18 +150,14 @@ class TTSManager:
             except Exception:
                 pass
             self._current_synth_proc = None
-        # kill current playback
         if self._current_play_proc:
             try:
                 self._current_play_proc.kill()
             except Exception:
                 pass
             self._current_play_proc = None
-        # clear highlight in UI
         self._run_js_clear_highlight()
-        # mark stopped so threads exit
         self._threads_running = False
-        # wait for threads to actually finish before cleaning up files
         if self._synth_thread and self._synth_thread.is_alive():
             try:
                 self._synth_thread.join(timeout=1.0)
@@ -199,12 +168,11 @@ class TTSManager:
                 self._player_thread.join(timeout=1.0)
             except Exception:
                 pass
-        # Clean up all cached files and any remaining TTS files
         self._clean_cache_files()
         try:
             if os.path.exists(self.tts_dir):
                 for fn in os.listdir(self.tts_dir):
-                    if fn.endswith('.wav'):  # Clean up any remaining TTS wav files
+                    if fn.endswith('.wav'):
                         fp = os.path.join(self.tts_dir, fn)
                         try:
                             os.remove(fp)
@@ -217,25 +185,19 @@ class TTSManager:
         self.current_highlight_id = None
 
     def _synth_worker(self):
-        # worker thread: for each sentence, spawn a subprocess to synthesize,
-        # allowing stop() to terminate it immediately.
         while not self._stop_event.is_set():
             try:
                 sid, text = self.synth_queue.get(timeout=0.2)
             except queue.Empty:
-                # idle
                 if self._stop_event.is_set():
                     break
                 else:
                     continue
-            # prepare path
             outname = f"{sid}_{uuid.uuid4().hex[:8]}.wav"
             outpath = os.path.join(self.tts_dir, outname)
-            # spawn a multiprocessing.Process to run synth_single_process
             proc = multiprocessing.Process(target=synth_single_process, args=(self.kokoro_model_path, self.voices_bin_path, text, outpath, self.voice, self.speed, self.lang))
             proc.start()
             self._current_synth_proc = proc
-            # wait loop, but respond to stop
             while True:
                 if self._stop_event.is_set():
                     try:
@@ -249,27 +211,20 @@ class TTSManager:
                     break
                 time.sleep(0.05)
             self._current_synth_proc = None
-            # if file created, enqueue for playback
             if os.path.exists(outpath) and not self._stop_event.is_set():
                 self.play_queue.put((sid, outpath))
             else:
-                # cleanup if file missing
                 try:
                     if os.path.exists(outpath):
                         os.remove(outpath)
                 except Exception:
                     pass
-        # thread exit
         return
 
     def _manage_file_cache(self, new_file_path, sid):
-        """Manage the rolling cache of TTS files - keep current + last 5"""
-        # Add new file to played files list
         self.played_files.append((sid, new_file_path))
-        
-        # If we exceed the cache limit, remove oldest files
         while len(self.played_files) > self.max_cache_files:
-            old_sid, old_path = self.played_files.pop(0)  # Remove oldest
+            old_sid, old_path = self.played_files.pop(0)
             try:
                 if os.path.exists(old_path) and old_path != self.current_playing_file:
                     os.remove(old_path)
@@ -277,7 +232,6 @@ class TTSManager:
                 pass
 
     def _clean_cache_files(self):
-        """Clean up all cached TTS files"""
         for sid, filepath in self.played_files:
             try:
                 if os.path.exists(filepath):
@@ -297,13 +251,9 @@ class TTSManager:
             except queue.Empty:
                 continue
             
-            # Set current playing file
             self.current_playing_file = wavpath
-            
-            # highlight in UI
             self.current_highlight_id = sid
             self._run_js_highlight(sid)
-            # play via paplay
             try:
                 proc = subprocess.Popen(["paplay", wavpath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 self._current_play_proc = proc
@@ -329,16 +279,13 @@ class TTSManager:
             except Exception as e:
                 print("player error:", e)
             finally:
-                # un-highlight after played (if not paused)
                 if not self._paused.is_set():
                     self._run_js_unhighlight(sid)
                     self.current_highlight_id = None
                 
-                # Add to cache and manage file cleanup AFTER playing
                 if not self._stop_event.is_set():
                     self._manage_file_cache(wavpath, sid)
                 else:
-                    # If stopped, delete the file immediately
                     try:
                         if os.path.exists(wavpath):
                             os.remove(wavpath)
@@ -351,51 +298,38 @@ class TTSManager:
         return
 
     def is_playing(self):
-        """Check if TTS is currently playing (not stopped and not paused)"""
         return self._threads_running and not self._stop_event.is_set()
 
     def is_paused(self):
-        """Check if TTS is currently paused"""
         return self._paused.is_set() and not self._stop_event.is_set()
 
-    # UI JS helpers
     def _run_js_highlight(self, sid):
         webview = self.get_webview()
         if not webview:
             return
-        # Use scrollIntoView to snap to left for multi-column layouts
         js = f"""
         (function() {{
             try {{
                 var el = document.querySelector('[data-tts-id="{sid}"]');
                 if (!el) return;
-                // remove previous
                 document.querySelectorAll('.tts-highlight').forEach(function(p){{ p.classList.remove('tts-highlight'); }});
                 el.classList.add('tts-highlight');
-                // For multi-column layouts, snap to left of the column containing the element
                 try {{
                     var rect = el.getBoundingClientRect();
                     var viewportWidth = window.innerWidth || document.documentElement.clientWidth;
-                    
-                    // Check if we're in multi-column mode (scrollWidth > clientWidth)
                     var scrollWidth = document.documentElement.scrollWidth;
                     var clientWidth = document.documentElement.clientWidth;
                     
                     if (scrollWidth > clientWidth) {{
-                        // Multi-column mode - snap to left of containing column
                         var currentScroll = window.pageXOffset || document.documentElement.scrollLeft;
-                        
-                        // If element is not fully visible, scroll to make it visible at the left
                         if (rect.left < 0 || rect.right > viewportWidth) {{
-                            var targetScroll = currentScroll + rect.left - 20; // 20px margin from left
+                            var targetScroll = currentScroll + rect.left - 20;
                             window.scrollTo({{ left: Math.max(0, targetScroll), behavior: 'smooth' }});
                         }}
                     }} else {{
-                        // Single column mode - center vertically
                         el.scrollIntoView({{ behavior: 'smooth', block: 'center', inline: 'nearest' }});
                     }}
                 }} catch(e) {{
-                    console.log('Fallback scroll');
                     el.scrollIntoView({{ behavior: 'smooth', block: 'nearest', inline: 'start' }});
                 }}
             }} catch(e){{ console.error('highlight error', e); }}
@@ -431,12 +365,12 @@ class TTSManager:
         GLib.idle_add(lambda: webview.evaluate_javascript(js, -1, None, None, None, None, None))
 
     def reapply_highlight_after_reload(self):
-        # Called after chapter reload/resize to reapply highlight if any
         if self.current_highlight_id:
             self._run_js_highlight(self.current_highlight_id)
 
+
 # -----------------------
-# EpubViewer (complete)
+# EpubViewer
 # -----------------------
 class EpubViewer(Adw.ApplicationWindow):
     def __init__(self, app):
@@ -444,8 +378,7 @@ class EpubViewer(Adw.ApplicationWindow):
         self.set_title("EPUB Viewer")
         self.set_default_size(1200, 800)
 
-        # epub
-        self.current_book = None
+        self.current_book_path = None
         self.chapters = []
         self.current_chapter = 0
         self.temp_dir = None
@@ -460,12 +393,8 @@ class EpubViewer(Adw.ApplicationWindow):
 
         # resize debouncing
         self.resize_timeout_id = None
-        self.allocation_timeout_id = None
 
-        # tts manager
         self.tts = None
-
-        # setup UI
         self.setup_ui()
         self.setup_navigation()
 
@@ -496,7 +425,7 @@ class EpubViewer(Adw.ApplicationWindow):
         menu.append_submenu("Columns (fixed)", columns_menu)
 
         width_menu = Gio.Menu()
-        for w in (50,100,150,200,300,350,400,450,500):
+        for w in (100, 150, 200, 250, 300, 350, 400, 450, 500):
             width_menu.append(f"{w}px width", f"app.set-column-width({w})")
         menu.append_submenu("Use column width", width_menu)
         menu_button.set_menu_model(menu)
@@ -583,7 +512,6 @@ class EpubViewer(Adw.ApplicationWindow):
             header_bar.pack_start(nav_box)
             header_bar.pack_end(menu_button)
         except AttributeError:
-            # fall back for older libadwaita
             button_box_start = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
             button_box_start.set_spacing(6)
             button_box_start.append(open_button)
@@ -607,6 +535,8 @@ class EpubViewer(Adw.ApplicationWindow):
         self.webview = WebKit.WebView()
         self.webview.set_hexpand(True)
         self.webview.set_vexpand(True)
+        self.webview.set_margin_start(30)
+        self.webview.set_margin_end(30)
         settings = self.webview.get_settings()
         settings.set_enable_smooth_scrolling(True)
         settings.set_enable_javascript(True)
@@ -627,43 +557,37 @@ class EpubViewer(Adw.ApplicationWindow):
         self.info_bar.append(self.chapter_label)
         self.main_box.append(self.info_bar)
 
-        # resize notifications
         self.connect("notify::default-width", self.on_window_resize)
         self.connect("notify::default-height", self.on_window_resize)
         self.connect("notify::maximized", self.on_window_resize)
         self.connect("notify::fullscreened", self.on_window_resize)
 
-        # Add periodic TTS button state update
         GLib.timeout_add(500, self._update_tts_button_states)
 
     def _update_tts_button_states(self):
-        """Periodically update TTS button states based on actual TTS state"""
         if not self.tts:
-            return True  # Continue the timeout
+            return True
         
         is_playing = self.tts.is_playing()
         is_paused = self.tts.is_paused()
         
         if not is_playing and not is_paused:
-            # TTS is stopped
-            self.tts_play_btn.set_sensitive(bool(self.current_book and self.chapters))
+            self.tts_play_btn.set_sensitive(bool(self.current_book_path and self.chapters))
             self.tts_pause_btn.set_sensitive(False)
             self.tts_stop_btn.set_sensitive(False)
             self.tts_pause_btn.set_icon_name("media-playback-pause-symbolic")
         elif is_playing and not is_paused:
-            # TTS is actively playing
             self.tts_play_btn.set_sensitive(False)
             self.tts_pause_btn.set_sensitive(True)
             self.tts_stop_btn.set_sensitive(True)
             self.tts_pause_btn.set_icon_name("media-playback-pause-symbolic")
         elif is_paused:
-            # TTS is paused
             self.tts_play_btn.set_sensitive(False)
             self.tts_pause_btn.set_sensitive(True)
             self.tts_stop_btn.set_sensitive(True)
             self.tts_pause_btn.set_icon_name("media-playback-start-symbolic")
         
-        return True  # Continue the timeout
+        return True
 
     def setup_navigation(self):
         self.h_adjustment = self.scrolled_window.get_hadjustment()
@@ -700,8 +624,8 @@ class EpubViewer(Adw.ApplicationWindow):
             count = 1
         self.column_mode = 'fixed'
         self.fixed_column_count = count
-        if self.current_book:
-            self.extract_chapters()
+        if self.current_book_path:
+            self.calculate_column_dimensions()
             self.load_chapter()
             GLib.timeout_add(150, self.update_navigation)
 
@@ -713,9 +637,8 @@ class EpubViewer(Adw.ApplicationWindow):
             w = 400
         self.column_mode = 'width'
         self.desired_column_width = w
-        if self.current_book:
+        if self.current_book_path:
             self.calculate_column_dimensions()
-            self.extract_chapters()
             self.load_chapter()
             GLib.timeout_add(150, self.update_navigation)
 
@@ -734,7 +657,6 @@ class EpubViewer(Adw.ApplicationWindow):
     def _after_load_update(self):
         self.calculate_column_dimensions()
         self.update_navigation()
-        # init tts manager now that temp_dir exists
         try:
             if self.temp_dir and self.tts is None:
                 kokoro_model = os.environ.get("KOKORO_ONNX_PATH", "/app/share/kokoro-models/kokoro-v1.0.onnx")
@@ -742,14 +664,12 @@ class EpubViewer(Adw.ApplicationWindow):
                 self.tts = TTSManager(lambda: self.webview, self.temp_dir, kokoro_model_path=kokoro_model, voices_bin_path=voices_bin)
         except Exception as e:
             print("TTS init error:", e)
-        # reapply highlight after reload
         try:
             if self.tts:
                 self.tts.reapply_highlight_after_reload()
         except Exception:
             pass
         return False
-
 
     def calculate_column_dimensions(self):
         width = self.get_allocated_width()
@@ -770,10 +690,10 @@ class EpubViewer(Adw.ApplicationWindow):
         self._refresh_buttons_based_on_adjustment()
 
     def on_key_pressed(self, controller, keyval, keycode, state):
-        if not self.current_book:
+        if not self.current_book_path:
             return False
         self.calculate_column_dimensions()
-        # ... same Page Up/Down/Home/End handling as previous version (kept intact)
+        
         if self.is_single_column_mode():
             if keyval == 65365:  # Page Up
                 js_code = """
@@ -829,7 +749,7 @@ class EpubViewer(Adw.ApplicationWindow):
                 return True
             return False
 
-        # Multi-column navigation — preserve original logic; variable names consistent
+        # Multi-column navigation
         margin_total = self._webview_horizontal_margins()
         if self.column_mode == 'fixed':
             column_width = int(self.actual_column_width)
@@ -938,11 +858,11 @@ class EpubViewer(Adw.ApplicationWindow):
         return False
 
     def on_scroll_event(self, controller, dx, dy):
-        if not self.current_book:
+        if not self.current_book_path:
             return False
         if self.is_single_column_mode():
             return False
-        # direction detection
+        
         if abs(dx) > 0.1 or abs(dy) > 0.1:
             scroll_left = dx > 0.1 or dy < -0.1
             scroll_right = dx < -0.1 or dy > 0.1
@@ -1045,7 +965,7 @@ class EpubViewer(Adw.ApplicationWindow):
         return False
 
     def snap_to_nearest_step(self):
-        if not self.current_book or self.is_single_column_mode():
+        if not self.current_book_path or self.is_single_column_mode():
             self.snap_timeout_id = None
             return False
         self.calculate_column_dimensions()
@@ -1096,29 +1016,6 @@ class EpubViewer(Adw.ApplicationWindow):
         self.snap_timeout_id = None
         return False
 
-    def smooth_scroll_to(self, target_pos):
-        if not self.h_adjustment:
-            return False
-        current_pos = self.h_adjustment.get_value()
-        distance = target_pos - current_pos
-        if abs(distance) < 1:
-            self.h_adjustment.set_value(target_pos)
-            return False
-        steps = 20
-        step_size = distance / steps
-        step_count = 0
-        def animation_frame():
-            nonlocal step_count
-            if step_count >= steps:
-                self.h_adjustment.set_value(target_pos)
-                return False
-            new_pos = current_pos + (step_size * (step_count + 1))
-            self.h_adjustment.set_value(new_pos)
-            step_count += 1
-            return True
-        GLib.timeout_add(16, animation_frame)
-
-    # File open / epub handling unchanged
     def on_open_clicked(self, button):
         dialog = Gtk.FileChooserNative(
             title="Open EPUB File",
@@ -1148,132 +1045,131 @@ class EpubViewer(Adw.ApplicationWindow):
         try:
             if self.temp_dir and os.path.exists(self.temp_dir):
                 shutil.rmtree(self.temp_dir)
-            # Use Flatpak app cache directory
             app_cache_dir = os.path.expanduser("~/.var/app/io.github.fastrizwaan.tts/cache")
             epub_cache_dir = os.path.join(app_cache_dir, "epub-temp")
             os.makedirs(epub_cache_dir, exist_ok=True)
             self.temp_dir = tempfile.mkdtemp(dir=epub_cache_dir)
             
-            # Set environment variables to redirect TTS library temp usage
             tts_temp_dir = os.path.join(self.temp_dir, "tts-lib-temp")
             os.makedirs(tts_temp_dir, exist_ok=True)
             os.environ['TMPDIR'] = tts_temp_dir
             os.environ['TMP'] = tts_temp_dir
             os.environ['TEMP'] = tts_temp_dir
             
-            self.current_book = epub.read_epub(filepath)
-            self.extract_chapters()
+            self.current_book_path = filepath
+            self.extract_epub()
             if self.chapters:
                 self.current_chapter = 0
                 self.load_chapter()
         except Exception as e:
             self.show_error(f"Error loading EPUB: {str(e)}")
 
-    def extract_chapters(self):
+    def extract_epub(self):
+        """Extract EPUB using epub.js"""
         self.chapters = []
-        if not self.current_book:
+        if not self.current_book_path:
             return
-
-        # Robustly parse spine entries (some EPUBs provide tuples, some plain ids, some empty)
-        spine_items = []
+        
         try:
-            raw_spine = getattr(self.current_book, "spine", []) or []
-            for entry in raw_spine:
-                if isinstance(entry, (list, tuple)) and len(entry) > 0:
-                    spine_items.append(entry[0])
-                elif isinstance(entry, str):
-                    spine_items.append(entry)
-        except Exception:
-            spine_items = []
-
-        # bail early if no spine entries found
-        if not spine_items:
+            with open(self.current_book_path, 'rb') as f:
+                epub_data = f.read()
+            epub_base64 = base64.b64encode(epub_data).decode('utf-8')
+        except Exception as e:
+            print(f"Error reading EPUB: {e}")
             return
-
-        # ensure resources are extracted first (images/css)
+        
         try:
-            self.extract_resources()
-        except Exception:
-            pass
-
-        for item_id in spine_items:
+            with open(LOCAL_JSZIP, 'r', encoding='utf-8') as f:
+                jszip_code = f.read()
+            with open(LOCAL_EPUBJS, 'r', encoding='utf-8') as f:
+                epubjs_code = f.read()
+        except Exception as e:
+            print(f"Error loading libraries: {e}")
+            return
+        
+        # Use epub.js to extract chapter HTML
+        extraction_html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head><body>
+<script>{jszip_code}</script>
+<script>{epubjs_code}</script>
+<script>
+var epubData = atob("{epub_base64}");
+var epubArray = new Uint8Array(epubData.length);
+for (var i = 0; i < epubData.length; i++) {{
+    epubArray[i] = epubData.charCodeAt(i);
+}}
+var book = ePub(epubArray.buffer);
+book.ready.then(function() {{
+    return book.spine.each(function(item, index) {{
+        return item.load(book.load.bind(book)).then(function(doc) {{
+            var content = new XMLSerializer().serializeToString(doc);
+            var title = item.navItem ? item.navItem.label : 'Chapter ' + (index + 1);
+            var data = {{
+                index: index,
+                id: item.idref ||'chapter_' + index,
+                title: title,
+                content: content
+            }};
+            window.webkit.messageHandlers.epubExtractor.postMessage(JSON.stringify(data));
+        }});
+    }});
+}}).then(function() {{
+    window.webkit.messageHandlers.epubExtractor.postMessage(JSON.stringify({{done: true}}));
+}});
+</script>
+</body></html>"""
+        
+        # Create temporary extraction webview
+        extraction_view = WebKit.WebView()
+        extraction_manager = extraction_view.get_user_content_manager()
+        extraction_manager.register_script_message_handler("epubExtractor")
+        
+        chapters_data = []
+        extraction_done = [False]
+        
+        def on_extract_message(manager, js_result):
             try:
-                # find the matching item by id (fall back to href/name if needed)
-                item = None
-                for book_item in self.current_book.get_items():
-                    try:
-                        if getattr(book_item, "id", None) == item_id:
-                            item = book_item
-                            break
-                    except Exception:
-                        continue
-                # fallback: sometimes spine contains hrefs rather than ids
-                if item is None:
-                    for book_item in self.current_book.get_items():
-                        try:
-                            name = None
-                            try:
-                                name = book_item.get_name()
-                            except Exception:
-                                name = getattr(book_item, "id", None)
-                            if name and os.path.basename(str(name)) == os.path.basename(str(item_id)):
-                                item = book_item
-                                break
-                        except Exception:
-                            continue
-
-                if not item:
-                    continue
-
-                media_type = getattr(item, "media_type", "") or ""
-                # only include xhtml/xhtml+xml items
-                if media_type.lower() not in ('application/xhtml+xml', 'application/xml', 'text/html', 'text/xhtml'):
-                    continue
-
-                # read and process content
                 try:
-                    raw = item.get_content()
-                    if isinstance(raw, bytes):
-                        content = raw.decode('utf-8', errors='replace')
-                    else:
-                        content = str(raw)
-                except Exception:
-                    # skip if can't read content
-                    continue
+                    js_value = js_result.get_js_value()
+                    msg = js_value.to_string()
+                except AttributeError:
+                    msg = js_result.to_string()
+                
+                data = json.loads(msg)
+                if data.get('done'):
+                    extraction_done[0] = True
+                else:
+                    chapters_data.append(data)
+            except Exception as e:
+                print(f"Extraction error: {e}")
+        
+        extraction_manager.connect("script-message-received::epubExtractor", on_extract_message)
+        extraction_view.load_html(extraction_html, "file:///")
+        
+        # Wait for extraction
+        timeout = 0
+        while not extraction_done[0] and timeout < 1000:
+            GLib.MainContext.default().iteration(False)
+            timeout += 1
+            time.sleep(0.01)
+        
+        # Process extracted chapters
+        for chapter_data in sorted(chapters_data, key=lambda x: x['index']):
+            chapter_file = os.path.join(self.temp_dir, f"chapter_{chapter_data['index']}.html")
+            processed_content = self.process_chapter_content(chapter_data['content'], chapter_data)
+            with open(chapter_file, 'w', encoding='utf-8') as f:
+                f.write(processed_content)
+            self.chapters.append({
+                'id': chapter_data['id'],
+                'title': chapter_data['title'],
+                'file': chapter_file
+            })
 
-                chapter_file = os.path.join(self.temp_dir, f"{item_id}.html") if self.temp_dir else None
-                processed_content = self.process_chapter_content(content, item)
-                if chapter_file:
-                    try:
-                        with open(chapter_file, 'w', encoding='utf-8') as f:
-                            f.write(processed_content)
-                    except Exception:
-                        # if writing fails, still add in-memory path fallback
-                        chapter_file = None
-
-                title = self.extract_title(content)
-                self.chapters.append({
-                    'id': item_id,
-                    'title': title or "Untitled Chapter",
-                    'file': chapter_file or '',
-                    'item': item
-                })
-            except Exception:
-                # keep parsing next spine entries even if one fails
-                continue
-
-
-    def process_chapter_content(self, content, item):
-        """
-        Inject sentence spans for many block-level tags while preserving inline HTML
-        (so anchors/TOC links remain clickable). Wrap stray top-level text nodes into
-        <p> so they are processed. Uses stable sha1-based ids for sentences.
-        """
-        # ensure column math is up-to-date
+    def process_chapter_content(self, content, chapter_data):
+        """Process and inject TTS spans into chapter HTML"""
         self.calculate_column_dimensions()
         apply_columns = not self.is_single_column_mode()
 
-        # build body_style same as the rest of the app expects
         if apply_columns:
             if self.column_mode == 'fixed':
                 column_css = f"column-count: {self.fixed_column_count}; column-gap: {self.column_gap}px;"
@@ -1336,8 +1232,6 @@ class EpubViewer(Adw.ApplicationWindow):
         .tts-highlight {{background:rgba(255, 215, 0, 0.35);box-shadow:0 0 0 2px rgba(255, 215, 0, 0.35)}}
         h1,h2,h3,h4,h5,h6 {{ margin-top:1.5em; margin-bottom:0.5em; font-weight:bold; break-after:auto; break-inside:auto; }}
         p {{ margin:0 0 1em 0; text-align:justify; hyphens:auto; break-inside:auto; orphans:1; widows:1; }}
-
-        /* general images: avoid splitting across columns */
         img, figure, figcaption {{
             display:block;
             max-width:100%;
@@ -1347,8 +1241,6 @@ class EpubViewer(Adw.ApplicationWindow):
             -webkit-column-break-inside: avoid;
             page-break-inside: avoid;
         }}
-
-        /* first image/figure in body (title/cover) should span all columns */
         body > img:first-of-type,
         body > figure:first-of-type img {{
             column-span: all;
@@ -1356,10 +1248,8 @@ class EpubViewer(Adw.ApplicationWindow):
             max-width: none;
             margin: 2em auto;
         }}
-
         blockquote {{ margin:1em 2em; font-style:italic; border-left:3px solid #3584e4; padding-left:1em; }}
         div, section, article, span, ul, ol, li {{ break-inside:auto; }}
-
         @media (prefers-color-scheme: dark) {{
             body {{ background-color:#242424; color:#e3e3e3; }}
             blockquote {{ border-left-color:#62a0ea; }}
@@ -1368,38 +1258,15 @@ class EpubViewer(Adw.ApplicationWindow):
         </style>
         """
 
-        script = f"""
-        <script>
-        document.addEventListener('DOMContentLoaded', function() {{
-            window.EPUB_VIEWER_SETTINGS = {{
-                applyColumns: {( 'true' if apply_columns else 'false')},
-                fixedColumnCount: {self.fixed_column_count if self.column_mode=='fixed' else 'null'},
-                desiredColumnWidth: {self.actual_column_width if self.column_mode=='width' else 'null'},
-                columnGap: {self.column_gap}
-            }};
-            window.epubScrollState = {{
-                scrollLeft: 0,
-                scrollTop: 0,
-                scrollWidth: document.documentElement.scrollWidth,
-                scrollHeight: document.documentElement.scrollHeight,
-                clientWidth: document.documentElement.clientWidth,
-                clientHeight: document.documentElement.clientHeight,
-                maxScrollX: Math.max(0, document.documentElement.scrollWidth - document.documentElement.clientWidth),
-                maxScrollY: Math.max(0, document.documentElement.scrollHeight - document.documentElement.clientHeight)
-            }};
-        }});
-        </script>
-        """
-
-        # extract body content
+        # Extract body content
         body_match = re.search(r'<body[^>]*>(.*?)</body>', content, re.DOTALL | re.IGNORECASE)
         body_content = body_match.group(1) if body_match else content
 
-        # remove head/meta/style blocks
+        # Remove head/meta/style
         body_content = re.sub(r'</?(?:html|head|meta|title)[^>]*>', '', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'<style[^>]*>.*?</style>', '', body_content, flags=re.DOTALL | re.IGNORECASE)
 
-        # Wrap bare top-level text nodes into <p> so they get processed
+        # Wrap bare text in paragraphs
         try:
             body_content = re.sub(
                 r'(?<=^|>)(\s*[^<\s][^<]*?)(?=<|$)',
@@ -1410,25 +1277,7 @@ class EpubViewer(Adw.ApplicationWindow):
         except Exception:
             pass
 
-        # resource rewrites (images/css)
-        resources_dir_fs = os.path.join(self.temp_dir, 'resources')
-        available = set(os.listdir(resources_dir_fs)) if os.path.isdir(resources_dir_fs) else set()
-        def repl_src(m):
-            orig = m.group(1)
-            name = os.path.basename(orig)
-            if name in available:
-                return f'src="resources/{name}"'
-            return f'src="{orig}"'
-        body_content = re.sub(r'src=["\']([^"\']+)["\']', repl_src, body_content, flags=re.IGNORECASE)
-        def repl_href(m):
-            orig = m.group(1)
-            name = os.path.basename(orig)
-            if name in available:
-                return f'href="resources/{name}"'
-            return f'href="{orig}"'
-        body_content = re.sub(r'href=["\']([^"\']+)["\']', repl_href, body_content, flags=re.IGNORECASE)
-
-        # TARGET_TAGS expanded to catch top-level containers and labels/anchors
+        # Inject TTS spans
         TARGET_TAGS = [
             'p','div','span','section','article','li','label',
             'blockquote','figcaption','caption','dt','dd',
@@ -1440,7 +1289,6 @@ class EpubViewer(Adw.ApplicationWindow):
             pattern = re.compile(rf'<{tag}([^>]*)>(.*?)</{tag}>', flags=re.DOTALL | re.IGNORECASE)
 
             def find_html_span_for_plain_range(html, plain_start, plain_len):
-                # Map a plain-text character range to HTML indices (skip tags)
                 p = 0
                 html_start = None
                 html_end = None
@@ -1466,7 +1314,6 @@ class EpubViewer(Adw.ApplicationWindow):
                 attrs = m.group(1) or ''
                 inner = m.group(2) or ''
 
-                # plain text (for sentence splitting)
                 plain = re.sub(r'<[^>]+>', '', inner)
                 plain = plain.replace('\r', ' ').replace('\n', ' ')
                 sents = split_sentences(plain)
@@ -1482,7 +1329,6 @@ class EpubViewer(Adw.ApplicationWindow):
                     if not s_clean:
                         continue
                     plen = len(s_clean)
-                    # find next occurrence in plain text after cur_plain_pos
                     next_pos = plain.find(s_clean, cur_plain_pos)
                     if next_pos == -1:
                         next_pos = plain.find(s_clean)
@@ -1492,7 +1338,6 @@ class EpubViewer(Adw.ApplicationWindow):
 
                     span = find_html_span_for_plain_range(inner, next_pos, plen)
                     if not span or span[0] is None or span[1] is None:
-                        # fallback: escape and replace first visible occurrence in out_html
                         sid = stable_id_for_text(s_clean)
                         esc = (s_clean.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
                         span_html = f'<span data-tts-id="{sid}">{esc}</span>'
@@ -1515,45 +1360,11 @@ class EpubViewer(Adw.ApplicationWindow):
 
             return pattern, repl
 
-        # Apply replacers in order
         for tag in TARGET_TAGS:
             pat, repl = make_replacer(tag)
             body_content = pat.sub(repl, body_content)
 
-        # final assembled HTML
-        return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{css_styles}</head><body>{body_content}{script}</body></html>"""
-
-
-    def extract_resources(self):
-        if not self.current_book or not self.temp_dir:
-            return
-        resources_dir = os.path.join(self.temp_dir, 'resources')
-        os.makedirs(resources_dir, exist_ok=True)
-        for item in self.current_book.get_items():
-            if hasattr(item, 'media_type'):
-                if item.media_type in ['text/css','image/jpeg','image/png','image/gif','image/svg+xml']:
-                    name = None
-                    try: name = item.get_name()
-                    except Exception: name = None
-                    if not name: name = getattr(item, 'id', None) or "resource"
-                    name = os.path.basename(name)
-                    resource_path = os.path.join(resources_dir, name)
-                    try:
-                        with open(resource_path, 'wb') as f:
-                            f.write(item.get_content())
-                    except Exception:
-                        pass
-
-    def extract_title(self, content):
-        h1_match = re.search(r'<h1[^>]*>(.*?)</h1>', content, re.IGNORECASE | re.DOTALL)
-        if h1_match:
-            title = re.sub(r'<[^>]+>', '', h1_match.group(1)).strip()
-            if title: return title
-        title_match = re.search(r'<title[^>]*>(.*?)</title>', content, re.IGNORECASE | re.DOTALL)
-        if title_match:
-            title = re.sub(r'<[^>]+>', '', title_match.group(1)).strip()
-            if title: return title
-        return "Untitled Chapter"
+        return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{css_styles}</head><body>{body_content}</body></html>"""
 
     def load_chapter(self):
         if not self.chapters or self.current_chapter >= len(self.chapters):
@@ -1563,20 +1374,7 @@ class EpubViewer(Adw.ApplicationWindow):
         self.webview.load_uri(file_uri)
         chapter_info = f"Chapter {self.current_chapter + 1} of {len(self.chapters)}: {chapter['title']}"
         self.chapter_label.set_text(chapter_info)
-        # enable tts buttons will be handled by _update_tts_button_states
 
-        # apply initial layout/default columns only the first time and only if user hasn't chosen columns
-        if not getattr(self, '_initial_layout_done', False):
-            if not getattr(self, '_user_set_columns', False):
-                self.column_mode = 'fixed'
-                self.fixed_column_count = 2
-            self._initial_layout_done = True
-            self.calculate_column_dimensions()
-            self._update_column_css()
-            GLib.timeout_add(200, self.update_navigation)
-            
-
-        
     def update_navigation(self):
         self.prev_chapter_btn.set_sensitive(self.current_chapter > 0)
         self.next_chapter_btn.set_sensitive(self.current_chapter < len(self.chapters)-1)
@@ -1587,7 +1385,7 @@ class EpubViewer(Adw.ApplicationWindow):
             except Exception:
                 pass
             self.h_adjustment.connect("value-changed", self.on_scroll_position_changed)
-        if self.current_book and self.chapters:
+        if self.current_book_path and self.chapters:
             self.prev_page_btn.set_sensitive(True)
             self.next_page_btn.set_sensitive(True)
         GLib.timeout_add(100, self._delayed_navigation_update)
@@ -1598,7 +1396,7 @@ class EpubViewer(Adw.ApplicationWindow):
         return False
 
     def _refresh_buttons_based_on_adjustment(self):
-        if not self.h_adjustment or not self.current_book:
+        if not self.h_adjustment or not self.current_book_path:
             self.prev_page_btn.set_sensitive(False)
             self.next_page_btn.set_sensitive(False)
             return
@@ -1622,7 +1420,7 @@ class EpubViewer(Adw.ApplicationWindow):
             GLib.timeout_add(300, self.update_navigation)
 
     def on_prev_page(self, button):
-        if not self.current_book:
+        if not self.current_book_path:
             return
         if self.is_single_column_mode():
             js_code = """
@@ -1691,7 +1489,7 @@ class EpubViewer(Adw.ApplicationWindow):
         self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_js_result, None)
 
     def on_next_page(self, button):
-        if not self.current_book:
+        if not self.current_book_path:
             return
         if self.is_single_column_mode():
             js_code = """
@@ -1767,202 +1565,33 @@ class EpubViewer(Adw.ApplicationWindow):
         GLib.timeout_add(100, self._update_page_buttons_from_js)
 
     def _update_page_buttons_from_js(self):
-        self.webview.evaluate_javascript("""
-        (function() {
-            return {
-                scrollLeft: window.pageXOffset || document.documentElement.scrollLeft,
-                scrollWidth: document.documentElement.scrollWidth,
-                clientWidth: document.documentElement.clientWidth
-            };
-        })();
-        """, -1, None, None, None, self._on_scroll_info_result, None)
+        self.update_page_info()
         return False
 
-    def _on_scroll_info_result(self, webview, result, user_data):
-        try:
-            self._query_and_update_scroll_state()
-        except Exception as e:
-            print("Error getting scroll info:", e)
-            if self.current_book:
-                self.prev_page_btn.set_sensitive(True)
-                self.next_page_btn.set_sensitive(True)
-
-    def _query_and_update_scroll_state(self):
-        if self.current_book and self.chapters:
-            self.webview.evaluate_javascript("""
-            (function() {
-                var scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
-                var scrollWidth = document.documentElement.scrollWidth;
-                var clientWidth = document.documentElement.clientWidth;
-                var maxScroll = Math.max(0, scrollWidth - clientWidth);
-                return {
-                    scrollLeft: scrollLeft,
-                    maxScroll: maxScroll,
-                    canScrollLeft: scrollLeft > 1,
-                    canScrollRight: scrollLeft < maxScroll - 1
-                };
-            })();
-            """, -1, None, None, None, self._on_page_state_result, None)
-
-    def _on_page_state_result(self, webview, result, user_data):
-        if self.current_book and self.chapters:
-            self.prev_page_btn.set_sensitive(True)
-            self.next_page_btn.set_sensitive(True)
-            self.calculate_column_dimensions()
-            step = max(1, int(self.actual_column_width + self.column_gap))
-            js_code = f"""
-            (function() {{
-                var scrollWidth = document.documentElement.scrollWidth || document.body.scrollWidth;
-                var clientWidth = document.documentElement.clientWidth || window.innerWidth;
-                var scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
-                var totalWidth = Math.max(0, scrollWidth - clientWidth);
-                var totalPages = totalWidth > 0 ? Math.ceil((totalWidth + {step}) / {step}) : 1;
-                var currentPage = totalWidth > 0 ? Math.floor(scrollLeft / {step}) + 1 : 1;
-                currentPage = Math.max(1, Math.min(currentPage, totalPages));
-                return currentPage + '/' + totalPages;
-            }})();
-            """
-            self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_page_info_result, None)
-
-    def _on_page_info_result(self, webview, result, user_data):
-        try:
-            if self.current_book:
-                self.page_info.set_text("Page")
-            else:
-                self.page_info.set_text("--/--")
-        except:
-            if self.current_book:
-                self.page_info.set_text("Page")
-            else:
-                self.page_info.set_text("--/--")
-
     def update_page_info(self):
-        if not self.current_book:
+        if not self.current_book_path:
             self.page_info.set_text("--/--")
             self.prev_page_btn.set_sensitive(False)
             self.next_page_btn.set_sensitive(False)
             return
-        self._query_and_update_scroll_state()
-
-    def on_size_allocate(self, widget, allocation, baseline=None):
-        if self.current_book and self.chapters:
-            if hasattr(self, 'allocation_timeout_id') and self.allocation_timeout_id:
-                GLib.source_remove(self.allocation_timeout_id)
-            self.allocation_timeout_id = GLib.timeout_add(150, self._on_allocation_timeout)
-
-    def _on_allocation_timeout(self):
-        self.allocation_timeout_id = None
-        self.calculate_column_dimensions()
-        if self.current_book and self.chapters:
-            self._update_column_css()
-        return False
-
-    def _update_column_css(self):
-        if self.is_single_column_mode():
-            js_code = """
-            (function() {
-                var body = document.body;
-                if (body) {
-                    body.style.columnCount = '1';
-                    body.style.columnWidth = 'auto';
-                    body.style.columnGap = '0';
-                    body.style.height = 'auto';
-                    body.style.overflowX = 'hidden';
-                    body.style.overflowY = 'auto';
-                }
-            })();
-            """
-        else:
-            if self.column_mode == 'fixed':
-                column_css = f"column-count: {self.fixed_column_count}; column-gap: {self.column_gap}px;"
-            else:
-                column_css = f"column-width: {self.actual_column_width}px; column-gap: {self.column_gap}px;"
-            js_code = f"""
-            (function() {{
-                var body = document.body;
-                if (body) {{
-                    body.style.columnCount = '';
-                    body.style.columnWidth = '';
-                    body.style.cssText = body.style.cssText.replace(/column-[^;]*;?/g, '');
-                    var newStyle = '{column_css}';
-                    var styles = newStyle.split(';');
-                    for (var i = 0; i < styles.length; i++) {{
-                        var style = styles[i].trim();
-                        if (style) {{
-                            var parts = style.split(':');
-                            if (parts.length === 2) {{
-                                var prop = parts[0].trim();
-                                var val = parts[1].trim();
-                                if (prop === 'column-count') body.style.columnCount = val;
-                                else if (prop === 'column-width') body.style.columnWidth = val;
-                                else if (prop === 'column-gap') body.style.columnGap = val;
-                            }}
-                        }}
-                    }}
-                    body.style.height = 'calc(100vh - {self.column_padding * 2}px)';
-                    body.style.overflowX = 'auto';
-                    body.style.overflowY = 'hidden';
-                    setTimeout(function() {{
-                        var currentScroll = window.pageXOffset || document.documentElement.scrollLeft;
-                        if (currentScroll > 0) {{
-                            window.dispatchEvent(new Event('resize'));
-                        }}
-                    }}, 100);
-                }}
-            }})();
-            """
-        self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_js_result, None)
+        self.page_info.set_text("Page")
+        if self.current_book_path and self.chapters:
+            self.prev_page_btn.set_sensitive(True)
+            self.next_page_btn.set_sensitive(True)
 
     def on_window_resize(self, *args):
         self.calculate_column_dimensions()
-        if self.current_book and self.chapters:
+        if self.current_book_path and self.chapters:
             if hasattr(self, 'resize_timeout_id') and self.resize_timeout_id:
                 GLib.source_remove(self.resize_timeout_id)
             self.resize_timeout_id = GLib.timeout_add(250, self._delayed_resize_reload)
 
     def _delayed_resize_reload(self):
         self.resize_timeout_id = None
-        if self.current_book:
-            js_code = """
-            (function() {
-                return {
-                    scrollLeft: window.pageXOffset || document.documentElement.scrollLeft,
-                    scrollTop: window.pageYOffset || document.documentElement.scrollTop,
-                    scrollWidth: document.documentElement.scrollWidth,
-                    clientWidth: document.documentElement.clientWidth
-                };
-            })();
-            """
-            self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_pre_resize_scroll_info, None)
-        else:
-            self._do_resize_reload(0,0)
-        return False
-
-    def _on_pre_resize_scroll_info(self, webview, result, user_data):
-        # We intentionally regenerate chapters to update column layout, but because IDs are stable they persist.
-        self._do_resize_reload(0,0)
-
-    def _do_resize_reload(self, preserved_scroll_x=0, preserved_scroll_y=0):
-        self.calculate_column_dimensions()
-        self.extract_chapters()
-        self.load_chapter()
-        if preserved_scroll_x > 0 or preserved_scroll_y > 0:
-            GLib.timeout_add(500, lambda: self._restore_scroll_position(preserved_scroll_x, preserved_scroll_y))
-        GLib.timeout_add(600, self.update_navigation)
-
-    def _restore_scroll_position(self, scroll_x, scroll_y):
-        if self.is_single_column_mode():
-            js_code = f"""
-            window.scrollTo({{ top: {scroll_y}, behavior: 'auto' }});
-            """
-        else:
-            js_code = f"""
-            window.scrollTo({{ left: {scroll_x}, behavior: 'auto' }});
-            """
-        self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_js_result, None)
-        # Reapply highlight (stable ids)
-        if self.tts:
-            GLib.timeout_add(200, lambda: self.tts.reapply_highlight_after_reload())
+        if self.current_book_path:
+            self.calculate_column_dimensions()
+            self.load_chapter()
+            GLib.timeout_add(600, self.update_navigation)
         return False
 
     def show_error(self, message):
@@ -1977,19 +1606,11 @@ class EpubViewer(Adw.ApplicationWindow):
                 self.tts.stop()
             except Exception:
                 pass
-        # Clean up the entire temp directory structure when app exits
         if self.temp_dir and os.path.exists(self.temp_dir):
             try:
-                # This will remove the entire temp directory including:
-                # - tts subdirectory with .wav files
-                # - tts-lib-temp subdirectory 
-                # - all EPUB extracted files
-                # - the temp directory itself
-                #shutil.rmtree(self.temp_dir)
                 print(f"Cleaned up temp EPUB dir: {self.temp_dir}")
             except Exception as e:
                 print(f"Error cleaning up temp directory: {e}")
-                # If full removal fails, try cleaning specific subdirectories
                 try:
                     tts_dir = os.path.join(self.temp_dir, "tts")
                     if os.path.exists(tts_dir):
@@ -2001,12 +1622,8 @@ class EpubViewer(Adw.ApplicationWindow):
                 except Exception:
                     pass
 
-    # --- TTS controls & helpers ---
     def _collect_sentences_for_current_chapter(self):
-        """
-        Collect (sid, text) pairs from chapter HTML by matching data-tts-id spans.
-        Because IDs are stable (sha1 of text), they survive regeneration.
-        """
+        """Collect (sid, text) pairs from chapter HTML"""
         if not self.chapters or self.current_chapter >= len(self.chapters):
             return []
         chapter = self.chapters[self.current_chapter]
@@ -2025,7 +1642,7 @@ class EpubViewer(Adw.ApplicationWindow):
         return pairs
 
     def on_tts_play(self, button):
-        if not self.current_book or not self.chapters:
+        if not self.current_book_path or not self.chapters:
             return
         sentences = self._collect_sentences_for_current_chapter()
         if not sentences:
@@ -2051,12 +1668,9 @@ class EpubViewer(Adw.ApplicationWindow):
     def on_tts_stop(self, button):
         if not self.tts:
             return
-        # Stop must kill synths and clear queues & files
         self.tts.stop()
 
-# -----------------------
-# App class & main
-# -----------------------
+
 class EpubViewerApp(Adw.Application):
     def __init__(self):
         super().__init__(application_id="io.github.fastrizwaan.tts")
@@ -2065,12 +1679,12 @@ class EpubViewerApp(Adw.Application):
         window = self.get_active_window()
         if not window:
             window = EpubViewer(self)
-        # actions
+        
         for i in range(1, 11):
             act = Gio.SimpleAction.new(f"set-columns", GLib.VariantType.new("i"))
             act.connect("activate", self.on_set_columns)
             self.add_action(act)
-        for w in (50,100,150,200,300,350,400,450,500):
+        for w in (100, 150, 200, 250, 300, 350, 400, 450, 500):
             act_w = Gio.SimpleAction.new(f"set-column-width", GLib.VariantType.new("i"))
             act_w.connect("activate", self.on_set_column_width)
             self.add_action(act_w)
@@ -2088,27 +1702,23 @@ class EpubViewerApp(Adw.Application):
         if window:
             window.set_column_width(w)
 
+
 def main():
     app = EpubViewerApp()
     def cleanup_handler(signum, frame):
         print("Received signal, cleaning up...")
         window = app.get_active_window()
         if window:
-            # Stop TTS first to terminate all subprocesses
             if window.tts:
                 try:
                     window.tts.stop()
-                    # Give processes time to actually terminate
-                    import time
                     time.sleep(0.5)
                 except Exception as e:
                     print(f"Error stopping TTS: {e}")
-            # Then do general cleanup
             try:
                 window.cleanup()
             except Exception as e:
                 print(f"Error in cleanup: {e}")
-        # Now it's safe to exit
         sys.exit(0)
     signal.signal(signal.SIGINT, cleanup_handler)
     signal.signal(signal.SIGTERM, cleanup_handler)
@@ -2117,11 +1727,9 @@ def main():
     finally:
         w = app.get_active_window()
         if w:
-            # Stop TTS processes before final cleanup
             if w.tts:
                 try:
                     w.tts.stop()
-                    import time
                     time.sleep(0.5)
                 except Exception:
                     pass
@@ -2129,4 +1737,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
