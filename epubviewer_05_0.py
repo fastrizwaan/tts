@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # EPUB viewer with libadwaita + GTK4 ListView sidebar TOC (nested, clickable)
-# Library view (persistent), saves scaled covers, remembers progress, grid of recent books.
-# - Highlights search matches in library (Pango markup)
-# - Library always shows Open button and hides sidebar toggle
-# - Loaded EPUB hides Open button, shows sidebar toggle and sidebar; library search hidden while reading
-# - Search button packed before menu (menu at rightmost)
-# - Better relative-path support for ops/oebps lowercase prefixes
 import gi, os, tempfile, traceback, shutil, urllib.parse, glob, re, json, hashlib
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -16,6 +10,26 @@ import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
 import zipfile, pathlib
+
+import threading
+import time
+import tempfile as _tempfile
+import soundfile as sf
+
+# Try to import TTS dependencies
+TTS_AVAILABLE = False
+try:
+    from kokoro_onnx import Kokoro
+    import gi
+    gi.require_version('Gst', '1.0')
+    from gi.repository import Gst
+    TTS_AVAILABLE = True
+    print("[info] TTS dependencies available")
+except ImportError as e:
+    print(f"[warn] TTS not available: {e}")
+    Kokoro = None
+    Gst = None
+
 
 # --- Safe NCX monkey-patch (avoid crashes on some EPUBs) ---
 import ebooklib.epub
@@ -237,12 +251,504 @@ def highlight_markup(text: str, query: str) -> str:
     parts.append(GLib.markup_escape_text(esc_text[last:]))
     return "".join(parts)
 
+
+class TTSEngine:
+    def __init__(self, webview_getter, base_temp_dir, kokoro_model_path=None, voices_bin_path=None):
+        self.webview_getter = webview_getter
+        self.base_temp_dir = base_temp_dir
+        self.kokoro = None
+        self.is_playing_flag = False
+        self.should_stop = False
+        self.current_thread = None
+
+        # Playback / navigation state
+        self._tts_sentences = []
+        self._tts_sids = []
+        self._tts_voice = None
+        self._tts_speed = 1.0
+        self._tts_lang = "en-us"
+        self._tts_finished_callback = None
+        self._tts_highlight_callback = None
+
+        # index and audio cache
+        self._current_play_index = 0
+        self._audio_files = {}
+        self._audio_lock = threading.Lock()
+        self._synthesis_done = threading.Event()
+
+        # delayed on-demand synth timer
+        self._delayed_timer = None
+        self._delayed_timer_lock = threading.Lock()
+
+        # paused state
+        self.paused = False
+        self._resume_event = threading.Event()
+        self._resume_event.set()
+
+        # init kokoro if available
+        if TTS_AVAILABLE and Kokoro:
+            try:
+                model_path = os.environ.get("KOKORO_ONNX_PATH", "/app/share/kokoro-models/kokoro-v1.0.onnx")
+                voices_path = os.environ.get("KOKORO_VOICES_PATH", "/app/share/kokoro-models/voices-v1.0.bin")
+                
+                if os.path.exists(model_path) and os.path.exists(voices_path):
+                    self.kokoro = Kokoro(model_path, voices_path)
+                    print("[info] Kokoro TTS initialized")
+                else:
+                    print(f"[warn] Kokoro models not found at {model_path}")
+            except Exception as e:
+                print(f"[error] Failed to initialize Kokoro: {e}")
+                self.kokoro = None
+
+        # Initialize GStreamer
+        try:
+            if TTS_AVAILABLE and Gst:
+                Gst.init(None)
+                self.player = Gst.ElementFactory.make("playbin", "player")
+                bus = self.player.get_bus()
+                bus.add_signal_watch()
+                bus.connect("message", self.on_gst_message)
+                self.playback_finished = False
+            else:
+                self.player = None
+                self.playback_finished = True
+        except Exception as e:
+            print(f"[warn] GStreamer init failed: {e}")
+            self.player = None
+            self.playback_finished = True
+
+    def is_playing(self):
+        return bool(self.is_playing_flag) and not bool(self.paused)
+
+    def is_paused(self):
+        return bool(self.paused)
+
+    def on_gst_message(self, bus, message):
+        try:
+            t = message.type
+            if t == Gst.MessageType.EOS:
+                if self.player:
+                    self.player.set_state(Gst.State.NULL)
+                self.playback_finished = True
+            elif t == Gst.MessageType.ERROR:
+                if self.player:
+                    self.player.set_state(Gst.State.NULL)
+                err, debug = message.parse_error()
+                print(f"[error] GStreamer error: {err}, {debug}")
+                self.playback_finished = True
+        except Exception as e:
+            print("on_gst_message error:", e)
+
+    def split_sentences(self, text):
+        import re
+        sentences = re.split(r'([.!?]+(?:\s+|$))', text)
+        result = []
+        for i in range(0, len(sentences)-1, 2):
+            sentence = sentences[i] + (sentences[i+1] if i+1 < len(sentences) else '')
+            sentence = sentence.strip()
+            if sentence:
+                result.append(sentence)
+        if len(sentences) % 2 == 1 and sentences[-1].strip():
+            result.append(sentences[-1].strip())
+        return result
+
+    def synthesize_sentence(self, sentence, voice, speed, lang):
+        if not self.kokoro:
+            return None
+        try:
+            base = self.base_temp_dir or tempfile.gettempdir()
+            try:
+                os.makedirs(base, exist_ok=True)
+            except Exception:
+                base = tempfile.gettempdir()
+
+            samples, sample_rate = self.kokoro.create(sentence, voice=voice, speed=speed, lang=lang)
+
+            ntf = _tempfile.NamedTemporaryFile(prefix="tts_", suffix=".wav", delete=False, dir=base)
+            ntf_name = ntf.name
+            ntf.close()
+            sf.write(ntf_name, samples, sample_rate)
+            return ntf_name
+        except Exception as e:
+            print(f"[error] Synthesis error: {e}")
+            return None
+
+    def _cancel_delayed_timer(self):
+        with self._delayed_timer_lock:
+            if self._delayed_timer:
+                try:
+                    self._delayed_timer.cancel()
+                except Exception:
+                    pass
+                self._delayed_timer = None
+
+    def _schedule_delayed_synthesis(self, idx, delay=0.5):
+        self._cancel_delayed_timer()
+
+        def timer_cb():
+            try:
+                if self.should_stop:
+                    return
+                with self._audio_lock:
+                    if self._audio_files.get(idx):
+                        return
+                if idx != self._current_play_index:
+                    return
+                print(f"[TTS] Delayed synthesis for sentence {idx+1}")
+                audio_file = self.synthesize_sentence(
+                    self._tts_sentences[idx], 
+                    self._tts_voice, 
+                    self._tts_speed, 
+                    self._tts_lang
+                )
+                if audio_file:
+                    with self._audio_lock:
+                        self._audio_files[idx] = audio_file
+            except Exception as e:
+                print(f"[error] delayed synthesis: {e}")
+            finally:
+                with self._delayed_timer_lock:
+                    self._delayed_timer = None
+
+        timer = threading.Timer(delay, timer_cb)
+        with self._delayed_timer_lock:
+            self._delayed_timer = timer
+        timer.daemon = True
+        timer.start()
+
+    def speak_sentences_list(self, sentences_with_meta, voice="af_sarah", speed=1.0, 
+                            lang="en-us", highlight_callback=None, finished_callback=None):
+        if not self.kokoro:
+            print("[warn] TTS not available")
+            if finished_callback:
+                GLib.idle_add(finished_callback)
+            return
+
+        self.stop()
+        time.sleep(0.05)
+
+        self.should_stop = False
+        self._tts_sentences = []
+        self._tts_sids = []
+        
+        for s in sentences_with_meta:
+            if isinstance(s, dict):
+                self._tts_sids.append(s.get("sid"))
+                self._tts_sentences.append(s.get("text"))
+            else:
+                self._tts_sids.append(None)
+                self._tts_sentences.append(str(s))
+
+        self._tts_voice = voice
+        self._tts_speed = speed
+        self._tts_lang = lang
+        self._tts_finished_callback = finished_callback
+        self._tts_highlight_callback = highlight_callback
+        self._audio_files = {}
+        self._current_play_index = 0
+        self._synthesis_done.clear()
+        self._cancel_delayed_timer()
+        self.paused = False
+        self._resume_event.set()
+
+        def tts_thread():
+            try:
+                total = len(self._tts_sentences)
+                print(f"[TTS] Speaking {total} sentences")
+
+                def synthesis_worker():
+                    try:
+                        synth_idx = 0
+                        while not self.should_stop and synth_idx < total:
+                            with self._audio_lock:
+                                cur = self._current_play_index
+
+                            if synth_idx < cur:
+                                synth_idx = cur
+
+                            lookahead_limit = cur + (1 if self.paused else 3)
+
+                            if synth_idx > lookahead_limit:
+                                time.sleep(0.05)
+                                continue
+
+                            with self._audio_lock:
+                                if self._audio_files.get(synth_idx):
+                                    synth_idx += 1
+                                    continue
+
+                            if synth_idx <= lookahead_limit:
+                                if self.should_stop:
+                                    break
+                                print(f"[TTS] Pre-synthesizing {synth_idx+1}/{total}")
+                                audio_file = self.synthesize_sentence(
+                                    self._tts_sentences[synth_idx],
+                                    self._tts_voice,
+                                    self._tts_speed,
+                                    self._tts_lang
+                                )
+                                if audio_file:
+                                    with self._audio_lock:
+                                        if synth_idx not in self._audio_files:
+                                            self._audio_files[synth_idx] = audio_file
+                                synth_idx += 1
+                            else:
+                                time.sleep(0.05)
+
+                        self._synthesis_done.set()
+                    except Exception as e:
+                        print(f"[error] Synthesis worker: {e}")
+                        self._synthesis_done.set()
+
+                synth_thread = threading.Thread(target=synthesis_worker, daemon=True)
+                synth_thread.start()
+
+                self.is_playing_flag = True
+
+                while self._current_play_index < total and not self.should_stop:
+                    idx = self._current_play_index
+
+                    if self._tts_highlight_callback:
+                        GLib.idle_add(
+                            self._tts_highlight_callback, 
+                            idx, 
+                            {"sid": self._tts_sids[idx], "text": self._tts_sentences[idx]}
+                        )
+
+                    while self.paused and not self.should_stop:
+                        self._cancel_delayed_timer()
+                        self._resume_event.wait(0.1)
+
+                    if self.should_stop:
+                        break
+
+                    audio_file = None
+                    with self._audio_lock:
+                        audio_file = self._audio_files.get(idx)
+
+                    if not audio_file:
+                        self._schedule_delayed_synthesis(idx, delay=0.5)
+                        waited = 0.0
+                        while not self.should_stop:
+                            with self._audio_lock:
+                                audio_file = self._audio_files.get(idx)
+                            if audio_file:
+                                break
+                            if self._current_play_index != idx:
+                                break
+                            time.sleep(0.02)
+                            waited += 0.02
+                            if self._synthesis_done.is_set() and waited > 0.5:
+                                break
+
+                    if self.should_stop:
+                        break
+
+                    with self._audio_lock:
+                        audio_file = self._audio_files.get(idx)
+
+                    if not audio_file:
+                        print(f"[TTS] On-demand synth for {idx+1}")
+                        audio_file = self.synthesize_sentence(
+                            self._tts_sentences[idx],
+                            self._tts_voice,
+                            self._tts_speed,
+                            self._tts_lang
+                        )
+                        if audio_file:
+                            with self._audio_lock:
+                                self._audio_files[idx] = audio_file
+
+                    if not audio_file:
+                        print(f"[warn] No audio for {idx}, skipping")
+                        self._current_play_index = idx + 1
+                        continue
+
+                    if self.paused:
+                        continue
+
+                    print(f"[TTS] Playing {idx+1}/{total}")
+                    if self.player:
+                        try:
+                            self.player.set_property("uri", f"file://{audio_file}")
+                            self.player.set_state(Gst.State.PLAYING)
+                            self.playback_finished = False
+                        except Exception as e:
+                            print("player error:", e)
+                            self.playback_finished = True
+                    else:
+                        self.playback_finished = True
+                        time.sleep(0.05)
+
+                    while not self.playback_finished and not self.should_stop:
+                        if self._current_play_index != idx:
+                            break
+                        if self.paused:
+                            try:
+                                if self.player:
+                                    self.player.set_state(Gst.State.NULL)
+                            except Exception:
+                                pass
+                            break
+                        time.sleep(0.02)
+
+                    try:
+                        if self.player:
+                            self.player.set_state(Gst.State.NULL)
+                    except Exception:
+                        pass
+
+                    if (self._current_play_index == idx) and (not self.paused):
+                        try:
+                            with self._audio_lock:
+                                af = self._audio_files.get(idx)
+                                if af:
+                                    try:
+                                        os.remove(af)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        del self._audio_files[idx]
+                                    except KeyError:
+                                        pass
+                        except Exception:
+                            pass
+                        self._current_play_index = idx + 1
+
+                self.is_playing_flag = False
+                self._cancel_delayed_timer()
+                
+                if self._tts_highlight_callback and not self.should_stop:
+                    GLib.idle_add(self._tts_highlight_callback, -1, {"sid": None, "text": ""})
+
+                if self._tts_finished_callback:
+                    GLib.idle_add(self._tts_finished_callback)
+
+            except Exception as e:
+                print(f"[error] TTS thread: {e}")
+                import traceback
+                traceback.print_exc()
+                if self._tts_finished_callback:
+                    GLib.idle_add(self._tts_finished_callback)
+
+        self.current_thread = threading.Thread(target=tts_thread, daemon=True)
+        self.current_thread.start()
+
+    def next_sentence(self):
+        if not self._tts_sentences:
+            return
+        with self._audio_lock:
+            self._current_play_index = min(len(self._tts_sentences)-1, self._current_play_index + 1)
+            idx = self._current_play_index
+        if self._tts_highlight_callback:
+            GLib.idle_add(
+                self._tts_highlight_callback, 
+                idx, 
+                {"sid": self._tts_sids[idx], "text": self._tts_sentences[idx]}
+            )
+        try:
+            if self.player:
+                self.player.set_state(Gst.State.NULL)
+        except Exception:
+            pass
+        self._schedule_delayed_synthesis(idx, delay=0.5)
+
+    def prev_sentence(self):
+        if not self._tts_sentences:
+            return
+        with self._audio_lock:
+            self._current_play_index = max(0, self._current_play_index - 1)
+            idx = self._current_play_index
+        if self._tts_highlight_callback:
+            GLib.idle_add(
+                self._tts_highlight_callback, 
+                idx, 
+                {"sid": self._tts_sids[idx], "text": self._tts_sentences[idx]}
+            )
+        try:
+            if self.player:
+                self.player.set_state(Gst.State.NULL)
+        except Exception:
+            pass
+        self._schedule_delayed_synthesis(idx, delay=0.5)
+
+    def pause(self):
+        print("[TTS] Pausing")
+        self.paused = True
+        self._resume_event.clear()
+        try:
+            if self.player:
+                self.player.set_state(Gst.State.NULL)
+        except Exception:
+            pass
+
+    def resume(self):
+        print("[TTS] Resuming")
+        self.paused = False
+        self._resume_event.set()
+        self._cancel_delayed_timer()
+
+    def stop(self):
+        self.should_stop = True
+        self.paused = False
+        self.playback_finished = True
+        try:
+            self._resume_event.set()
+        except Exception:
+            pass
+
+        self._cancel_delayed_timer()
+
+        if self.player:
+            try:
+                self.player.set_state(Gst.State.NULL)
+            except Exception:
+                pass
+
+        self.is_playing_flag = False
+
+        if self.current_thread:
+            try:
+                self.current_thread.join(timeout=1.0)
+            except Exception:
+                pass
+
+        try:
+            with self._audio_lock:
+                for idx, path in list(self._audio_files.items()):
+                    try:
+                        if path and os.path.exists(path):
+                            os.remove(path)
+                    except Exception:
+                        pass
+                self._audio_files.clear()
+        except Exception:
+            pass
+
+
+
+
 class EPubViewer(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
         self.set_default_size(1000, 800)
         self.set_title(APP_NAME)
+        self.temp_dir = None  # ← Make sure this is here FIRST
 
+        # TTS support
+        self.tts = None
+        self._tts_sentences_cache = []
+        
+        # Initialize TTS if available
+        if TTS_AVAILABLE:
+            try:
+                self.tts = TTSEngine(
+                    webview_getter=lambda: self.webview,
+                    base_temp_dir=self.temp_dir
+                )
+            except Exception as e:
+                print(f"[warn] Could not initialize TTS: {e}")
+                self.tts = None
 
         # state
         self.book = None
@@ -280,7 +786,7 @@ class EPubViewer(Adw.ApplicationWindow):
         header.add_css_class("flat")
 
         # library button in sidebar header (kept for parity)
-        self.library_btn = Gtk.Button(icon_name="view-grid-symbolic")
+        self.library_btn = Gtk.Button(icon_name="show-library-symbolic")
         self.library_btn.set_tooltip_text("Show Library")
         self.library_btn.add_css_class("flat")
         self.library_btn.connect("clicked", self.on_library_clicked)
@@ -423,28 +929,90 @@ class EPubViewer(Adw.ApplicationWindow):
         self.toolbar.add_top_bar(self.content_header)
         self.toolbar.add_top_bar(self.library_search_revealer)
 
-        self.scrolled = Gtk.ScrolledWindow(); self.scrolled.set_vexpand(True)
+        # This should come FIRST - creating content_box
+        self.scrolled = Gtk.ScrolledWindow()
+        self.scrolled.set_vexpand(True)
 
         # bottom navigation
         bottom_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        bottom_bar.set_margin_top(6); bottom_bar.set_margin_bottom(6)
-        bottom_bar.set_margin_start(6); bottom_bar.set_margin_end(6)
-        self.prev_btn = Gtk.Button(icon_name="go-previous-symbolic"); self.prev_btn.add_css_class("flat")
-        self.prev_btn.set_sensitive(False); self.prev_btn.connect("clicked", self.prev_page)
+        bottom_bar.set_margin_top(6)
+        bottom_bar.set_margin_bottom(6)
+        bottom_bar.set_margin_start(6)
+        bottom_bar.set_margin_end(6)
+        self.prev_btn = Gtk.Button(icon_name="go-previous-symbolic")
+        self.prev_btn.add_css_class("flat")
+        self.prev_btn.set_sensitive(False)
+        self.prev_btn.connect("clicked", self.prev_page)
         bottom_bar.append(self.prev_btn)
-        self.progress = Gtk.ProgressBar(); self.progress.set_show_text(True); self.progress.set_hexpand(True)
+        self.progress = Gtk.ProgressBar()
+        self.progress.set_show_text(True)
+        self.progress.set_hexpand(True)
         bottom_bar.append(self.progress)
-        self.next_btn = Gtk.Button(icon_name="go-next-symbolic"); self.next_btn.add_css_class("flat")
-        self.next_btn.set_sensitive(False); self.next_btn.connect("clicked", self.next_page)
+        self.next_btn = Gtk.Button(icon_name="go-next-symbolic")
+        self.next_btn.add_css_class("flat")
+        self.next_btn.set_sensitive(False)
+        self.next_btn.connect("clicked", self.next_page)
         bottom_bar.append(self.next_btn)
 
-        # reader content box
-        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL); content_box.set_vexpand(True)
-        content_box.append(self.scrolled); content_box.append(bottom_bar)
+        # NOW create content_box
+        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        content_box.set_vexpand(True)
+        content_box.append(self.scrolled)
+        content_box.append(bottom_bar)
+
+        # TTS controls bar - THIS COMES AFTER content_box is created
+        tts_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        tts_bar.set_margin_top(6)
+        tts_bar.set_margin_bottom(6)
+        tts_bar.set_margin_start(6)
+        tts_bar.set_margin_end(6)
+        tts_bar.set_halign(Gtk.Align.CENTER)
+
+        self.tts_prev_sentence_btn = Gtk.Button(icon_name="media-skip-backward-symbolic")
+        self.tts_prev_sentence_btn.add_css_class("flat")
+        self.tts_prev_sentence_btn.set_tooltip_text("Previous sentence")
+        self.tts_prev_sentence_btn.set_sensitive(False)
+        self.tts_prev_sentence_btn.connect("clicked", self.on_tts_prev_sentence)
+        tts_bar.append(self.tts_prev_sentence_btn)
+
+        self.tts_play_btn = Gtk.Button(icon_name="media-playback-start-symbolic")
+        self.tts_play_btn.add_css_class("flat")
+        self.tts_play_btn.set_tooltip_text("Play TTS")
+        self.tts_play_btn.set_sensitive(False)
+        self.tts_play_btn.connect("clicked", self.on_tts_play)
+        tts_bar.append(self.tts_play_btn)
+
+        self.tts_pause_btn = Gtk.Button(icon_name="media-playback-pause-symbolic")
+        self.tts_pause_btn.add_css_class("flat")
+        self.tts_pause_btn.set_tooltip_text("Pause/Resume TTS")
+        self.tts_pause_btn.set_sensitive(False)
+        self.tts_pause_btn.connect("clicked", self.on_tts_pause)
+        tts_bar.append(self.tts_pause_btn)
+
+        self.tts_stop_btn = Gtk.Button(icon_name="media-playback-stop-symbolic")
+        self.tts_stop_btn.add_css_class("flat")
+        self.tts_stop_btn.set_tooltip_text("Stop TTS")
+        self.tts_stop_btn.set_sensitive(False)
+        self.tts_stop_btn.connect("clicked", self.on_tts_stop)
+        tts_bar.append(self.tts_stop_btn)
+
+        self.tts_next_sentence_btn = Gtk.Button(icon_name="media-skip-forward-symbolic")
+        self.tts_next_sentence_btn.add_css_class("flat")
+        self.tts_next_sentence_btn.set_tooltip_text("Next sentence")
+        self.tts_next_sentence_btn.set_sensitive(False)
+        self.tts_next_sentence_btn.connect("clicked", self.on_tts_next_sentence)
+        tts_bar.append(self.tts_next_sentence_btn)
+
+        # Append TTS bar to content_box
+        content_box.append(tts_bar)
+
+        # Save reference and set content
         self._reader_content_box = content_box
         self.toolbar.set_content(content_box)
         self.split.set_content(self.toolbar)
 
+        # Start periodic TTS button state updates
+        GLib.timeout_add(500, self._update_tts_button_states)
         # WebKit fallback
         try:
             gi.require_version("WebKit", "6.0")
@@ -624,169 +1192,6 @@ class EPubViewer(Adw.ApplicationWindow):
             except Exception: pass
         except Exception:
             pass
-
-    def show_library(self):
-        self._disable_responsive_sidebar()
-        # Override any breakpoint effects by explicitly managing split state
-        GLib.idle_add(self._force_library_sidebar_state)
-        wrap = Adw.WrapBox()
-        wrap.set_align(Gtk.Align.FILL); wrap.set_pack_direction(Gtk.Orientation.HORIZONTAL)
-        wrap.set_child_spacing(10); wrap.set_line_spacing(10)
-        wrap.add_css_class("library-grid")
-        wrap.set_margin_start(0); wrap.set_margin_end(0); wrap.set_margin_top(0); wrap.set_margin_bottom(0)
-
-        try:
-            self.split.set_show_sidebar(False)
-            # When showing library, sidebar should always be hidden
-            # Force it to stay hidden regardless of window size
-            self.split.set_collapsed(False)  # Not in overlay mode
-            self.split.set_show_sidebar(False)
-            self.split.set_collapsed(False)
-        except Exception: pass
-        try:
-            self.content_sidebar_toggle.set_visible(False)
-            
-        except Exception: pass
-
-        try:
-            self.open_btn.set_visible(True)
-        except Exception: pass
-
-        try:
-            self.search_toggle_btn.set_visible(True)
-            self.library_search_revealer.set_reveal_child(bool(self.library_search_text))
-            try:
-                if self._lib_search_handler_id:
-                    self.library_search_entry.handler_block(self._lib_search_handler_id)
-                self._safe_set_search_text(self.library_search_text)
-
-            finally:
-                try:
-                    if self._lib_search_handler_id:
-                        self.library_search_entry.handler_unblock(self._lib_search_handler_id)
-                except Exception:
-                    pass
-        except Exception: pass
-
-        query = (self.library_search_text or "").strip().lower()
-        entries = self._get_library_entries_for_display()
-        if query:
-            entries = [e for e in entries if query in (e.get("title") or "").lower() or query in (e.get("author") or "").lower() or query in (os.path.basename(e.get("path","")).lower())]
-
-        if not entries:
-            lbl = Gtk.Label(label="No books in library\nOpen a book to add it here.")
-            lbl.set_justify(Gtk.Justification.CENTER); lbl.set_margin_top(40)
-            self.toolbar.set_content(lbl); self.content_title_label.set_text("Library")
-            return
-
-        for entry in entries:
-            title = entry.get("title") or os.path.basename(entry.get("path",""))
-            author = entry.get("author") or ""
-            cover = entry.get("cover")
-            path = entry.get("path")
-            idx = entry.get("index", 0)
-            progress = entry.get("progress", 0.0)
-
-            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            card.add_css_class("library-card")
-            card.set_size_request(160, 160); card.set_hexpand(False); card.set_vexpand(False)
-
-            img = Gtk.Image(); img.set_size_request(160, 160)
-            if cover and os.path.exists(cover):
-                try:
-                    pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(cover, 180, 200, True)
-                    tex = Gdk.Texture.new_for_pixbuf(pix); img.set_from_paintable(tex)
-                except Exception:
-                    pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 180, 200); pb.fill(0xddddddff)
-                    img.set_from_paintable(Gdk.Texture.new_for_pixbuf(pb))
-            else:
-                pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 180, 200); pb.fill(0xddddddff)
-                img.set_from_paintable(Gdk.Texture.new_for_pixbuf(pb))
-            img.add_css_class("cover"); img.set_halign(Gtk.Align.CENTER)
-            card.append(img)
-
-            t = Gtk.Label()
-            t.add_css_class("title"); t.set_ellipsize(Pango.EllipsizeMode.END)
-            t.set_wrap(True); t.set_max_width_chars(16); t.set_lines(2)
-            t.set_halign(Gtk.Align.CENTER); t.set_justify(Gtk.Justification.CENTER)
-            t.set_markup(highlight_markup(title, self.library_search_text))
-            card.append(t)
-
-            meta_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-            meta_row.set_hexpand(True); meta_row.set_valign(Gtk.Align.CENTER)
-            meta_row.set_margin_top(0)
-            prog_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL); prog_box.set_halign(Gtk.Align.START)
-            prog_lbl = Gtk.Label(); prog_lbl.add_css_class("meta"); prog_lbl.set_valign(Gtk.Align.CENTER)
-            prog_lbl.set_label(f"{int(progress*100)}%")
-            prog_box.append(prog_lbl); meta_row.append(prog_box)
-
-            author_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL); author_box.set_hexpand(True); author_box.set_halign(Gtk.Align.CENTER)
-            a = Gtk.Label(); a.add_css_class("author"); a.set_ellipsize(Pango.EllipsizeMode.END); a.set_max_width_chars(18); author_box.set_margin_top(0)
-            a.set_halign(Gtk.Align.CENTER); a.set_justify(Gtk.Justification.CENTER)
-            a.set_markup(highlight_markup(author, self.library_search_text))
-            author_box.append(a); meta_row.append(author_box)
-
-            right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL); right_box.set_halign(Gtk.Align.END)
-            menu_btn = Gtk.MenuButton(icon_name="view-more-symbolic"); menu_btn.add_css_class("flat")
-            pop = Gtk.Popover(); pop.set_has_arrow(False)
-            pop_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-            pop_box.set_margin_top(6); pop_box.set_margin_bottom(6); pop_box.set_margin_start(6); pop_box.set_margin_end(6)
-            open_folder_btn = Gtk.Button(label="Open folder"); open_folder_btn.add_css_class("flat")
-            rem_btn = Gtk.Button(label="Remove ebook"); rem_btn.add_css_class("flat")
-            pop_box.append(open_folder_btn); pop_box.append(rem_btn)
-            pop.set_child(pop_box); menu_btn.set_popover(pop)
-
-            open_folder_btn.connect("clicked", lambda b, p=path: self._open_parent_folder(p))
-            def _remove_entry(btn, p=path, coverp=cover):
-                try:
-                    dlg = Adw.MessageDialog.new(self, "Remove", f"Remove «{os.path.basename(p)}» from library?")
-                    dlg.add_response("cancel", "Cancel"); dlg.add_response("ok", "Remove")
-                    def _on_resp(d, resp):
-                        try:
-                            if resp == "ok":
-                                self.library = [ee for ee in self.library if ee.get("path") != p]
-                                try:
-                                    if coverp and os.path.exists(coverp) and os.path.commonpath([os.path.abspath(COVERS_DIR)]) == os.path.commonpath([os.path.abspath(COVERS_DIR), os.path.abspath(coverp)]):
-                                        os.remove(coverp)
-                                except Exception:
-                                    pass
-                                save_library(self.library)
-                                self.show_library()
-                        finally:
-                            try: d.destroy()
-                            except Exception: pass
-                    dlg.connect("response", _on_resp)
-                    dlg.present()
-                except Exception:
-                    pass
-            rem_btn.connect("clicked", _remove_entry)
-
-            right_box.append(menu_btn); meta_row.append(right_box)
-            card.append(meta_row)
-
-            # NOTE: previously we decorated the loaded entry visually; removed per request.
-
-            gesture = Gtk.GestureClick.new()
-            def _on_click(_gesture, _n, _x, _y, p=path, resume_idx=idx):
-                if p and os.path.exists(p):
-                    try: self._save_progress_for_library()
-                    except Exception: pass
-                    try:
-                        self.cleanup()
-                    except Exception: pass
-                    try: self.toolbar.set_content(self._reader_content_box)
-                    except Exception: pass
-                    self.load_epub(p, resume=True, resume_index=resume_idx)
-            gesture.connect("released", _on_click)
-            card.add_controller(gesture)
-            card.add_css_class("clickable")
-            wrap.append(card)
-
-        scroll = Gtk.ScrolledWindow(); scroll.set_child(wrap); scroll.set_vexpand(True); scroll.set_hexpand(True)
-        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL); container.append(scroll)
-        self.toolbar.set_content(container); self.content_title_label.set_text("Library")
-#####################
 
     def _create_rounded_cover_texture(self, cover_path, width, height, radius=10):
         """Create a texture with rounded corners from an image file."""
@@ -1080,372 +1485,6 @@ class EPubViewer(Adw.ApplicationWindow):
         return False    
     
     # ---- Sidebar hide/show
-
-    def _setup_responsive_sidebar(self):
-        """Setup responsive behavior for sidebar when reading a book."""
-        try:
-            # Create breakpoint that triggers at 768px
-            self.reading_breakpoint = Adw.Breakpoint.new(
-                Adw.BreakpointCondition.parse("max-width: 768px")
-            )
-            # When breakpoint is active (narrow), collapse the sidebar
-            self.reading_breakpoint.add_setter(self.split, "collapsed", True)
-            self.add_breakpoint(self.reading_breakpoint)
-            self._responsive_enabled = False  # Track if we want responsive behavior
-        except Exception as e:
-            print(f"Breakpoint not available, using fallback: {e}")
-            self.reading_breakpoint = None
-            self._responsive_enabled = False
-            self.connect("notify::default-width", self._on_window_resize)
-
-    def _enable_responsive_sidebar(self):
-        """Enable responsive sidebar behavior (only when reading)."""
-        self._responsive_enabled = True
-
-    def _disable_responsive_sidebar(self):
-        """Disable responsive sidebar behavior (when in library)."""
-        self._responsive_enabled = False
-        try:
-            # Force sidebar to be hidden and not in collapsed/overlay mode
-            self.split.set_collapsed(False)
-            self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error disabling responsive sidebar: {e}")
-
-    def _on_window_resize(self, *args):
-        """Fallback method for responsive sidebar on older libadwaita."""
-        try:
-            # Only apply responsive behavior when enabled and book is loaded
-            if not self._responsive_enabled or not self.book or not self.book_path:
-                return
-            
-            # Get window width
-            width = self.get_width()
-            
-            # Collapse sidebar if window is narrow (< 768px)
-            should_collapse = width < 768
-            
-            # Only update if state changed
-            try:
-                current_collapsed = self.split.get_collapsed()
-                if current_collapsed != should_collapse:
-                    self.split.set_collapsed(should_collapse)
-            except AttributeError:
-                # Fallback if get_collapsed doesn't exist
-                self.split.set_show_sidebar(not should_collapse)
-        except Exception as e:
-            print(f"Error in window resize handler: {e}")
-
-    def _force_library_sidebar_state(self):
-        """Force sidebar to stay hidden in library view, overriding breakpoints."""
-        try:
-            if not self._responsive_enabled:  # Only when in library
-                self.split.set_collapsed(False)
-                self.split.set_show_sidebar(False)
-        except Exception:
-            pass
-        return False  # Don't repeat
-        
-    def _on_sidebar_toggle(self, btn):
-        try:
-            new = not self.split.get_show_sidebar()
-            try: self.split.set_show_sidebar(new)
-            except Exception: pass
-        except Exception:
-            pass
-
-    def _setup_responsive_sidebar(self):
-        """Setup responsive behavior for sidebar when reading a book."""
-        self._responsive_enabled = False
-        self._last_width = 0
-        # Monitor window size changes
-        self.connect("notify::default-width", self._on_window_size_changed)
-
-    def _on_window_size_changed(self, *args):
-        """Handle window size changes and control sidebar accordingly."""
-        try:
-            width = self.get_width()
-            
-            # Prevent unnecessary updates
-            if abs(width - self._last_width) < 10:
-                return
-            self._last_width = width
-            
-            if self._responsive_enabled and self.book and self.book_path:
-                # Reading mode: responsive sidebar based on width
-                if width < 768:
-                    # Narrow window: collapse sidebar to overlay
-                    try:
-                        if not self.split.get_collapsed():
-                            self.split.set_collapsed(True)
-                    except:
-                        self.split.set_show_sidebar(False)
-                else:
-                    # Wide window: expand sidebar
-                    try:
-                        if self.split.get_collapsed():
-                            self.split.set_collapsed(False)
-                            self.split.set_show_sidebar(True)
-                    except:
-                        self.split.set_show_sidebar(True)
-            else:
-                # Library mode: always hide sidebar regardless of width
-                try:
-                    self.split.set_collapsed(False)
-                    self.split.set_show_sidebar(False)
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"Error in window size handler: {e}")
-
-    def _enable_responsive_sidebar(self):
-        """Enable responsive sidebar behavior (only when reading)."""
-        self._responsive_enabled = True
-        # Trigger immediate check
-        GLib.idle_add(self._on_window_size_changed)
-
-    def _disable_responsive_sidebar(self):
-        """Disable responsive sidebar behavior (when in library)."""
-        self._responsive_enabled = False
-        try:
-            # Force sidebar hidden in library
-            self.split.set_collapsed(False)
-            self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error disabling responsive sidebar: {e}")
-##########################
-    def _setup_responsive_sidebar(self):
-        """Setup responsive behavior for sidebar when reading a book."""
-        self._responsive_enabled = False
-        self._last_width = 0
-        self._last_was_narrow = None  # Track previous state
-        # Monitor window size changes
-        self.connect("notify::default-width", self._on_window_size_changed)
-
-    def _on_window_size_changed(self, *args):
-        """Handle window size changes and control sidebar accordingly."""
-        try:
-            width = self.get_width()
-            
-            # Prevent unnecessary updates for small changes
-            if abs(width - self._last_width) < 10:
-                return
-            self._last_width = width
-            
-            is_narrow = width < 768
-            
-            # Only update if state actually changed
-            if is_narrow == self._last_was_narrow:
-                return
-            self._last_was_narrow = is_narrow
-            
-            if self._responsive_enabled and self.book and self.book_path:
-                # Reading mode: responsive sidebar based on width
-                print(f"Reading mode - Width: {width}, Narrow: {is_narrow}")  # Debug
-                if is_narrow:
-                    # Narrow window: collapse sidebar to overlay mode
-                    print("Setting collapsed=True")
-                    self.split.set_collapsed(True)
-                else:
-                    # Wide window: show sidebar side-by-side
-                    print("Setting collapsed=False, show_sidebar=True")
-                    self.split.set_collapsed(False)
-                    self.split.set_show_sidebar(True)
-            else:
-                # Library mode: always hide sidebar regardless of width
-                if self._last_was_narrow is not None:  # Only if we were tracking
-                    print("Library mode - hiding sidebar")
-                    self.split.set_collapsed(False)
-                    self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error in window size handler: {e}")
-            import traceback
-            traceback.print_exc()
-
-    def _enable_responsive_sidebar(self):
-        """Enable responsive sidebar behavior (only when reading)."""
-        print("Enabling responsive sidebar")
-        self._responsive_enabled = True
-        self._last_was_narrow = None  # Reset state tracking
-        # Apply current size immediately with a small delay
-        GLib.timeout_add(100, self._on_window_size_changed)
-
-    def _disable_responsive_sidebar(self):
-        """Disable responsive sidebar behavior (when in library)."""
-        print("Disabling responsive sidebar")
-        self._responsive_enabled = False
-        self._last_was_narrow = None  # Reset state tracking
-        try:
-            # Force sidebar hidden in library
-            self.split.set_collapsed(False)
-            self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error disabling responsive sidebar: {e}")
-
-######################
-    def _setup_responsive_sidebar(self):
-        """Setup responsive behavior for sidebar when reading a book."""
-        self._responsive_enabled = False
-        self._last_width = 0
-        self._last_was_narrow = None  # Track previous state
-        self._user_hid_sidebar = False  # Track if user manually hid sidebar
-        # Monitor window size changes
-        self.connect("notify::default-width", self._on_window_size_changed)
-
-    def _on_sidebar_toggle(self, btn):
-        try:
-            new = not self.split.get_show_sidebar()
-            self.split.set_show_sidebar(new)
-            
-            # Track user's manual action
-            if not new:  # User hid the sidebar
-                self._user_hid_sidebar = True
-            else:  # User showed the sidebar
-                self._user_hid_sidebar = False
-                
-        except Exception:
-            pass
-
-    def _on_window_size_changed(self, *args):
-        """Handle window size changes and control sidebar accordingly."""
-        try:
-            width = self.get_width()
-            
-            # Prevent unnecessary updates for small changes
-            if abs(width - self._last_width) < 10:
-                return
-            self._last_width = width
-            
-            is_narrow = width < 768
-            
-            # Only update if state actually changed
-            if is_narrow == self._last_was_narrow:
-                return
-            self._last_was_narrow = is_narrow
-            
-            if self._responsive_enabled and self.book and self.book_path:
-                # Reading mode: responsive sidebar based on width
-                if is_narrow:
-                    # Going narrow: save current sidebar state before collapsing
-                    try:
-                        # If sidebar is currently hidden, mark that user wants it hidden
-                        if not self.split.get_show_sidebar():
-                            self._user_hid_sidebar = True
-                    except:
-                        pass
-                    # Collapse sidebar to overlay mode
-                    self.split.set_collapsed(True)
-                else:
-                    # Going wide: exit collapsed mode
-                    self.split.set_collapsed(False)
-                    # Only auto-show sidebar if user hasn't explicitly hidden it
-                    if not self._user_hid_sidebar:
-                        self.split.set_show_sidebar(True)
-                    else:
-                        # Keep hidden per user's preference
-                        self.split.set_show_sidebar(False)
-            else:
-                # Library mode: always hide sidebar regardless of width
-                if self._last_was_narrow is not None:
-                    self.split.set_collapsed(False)
-                    self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error in window size handler: {e}")
-
-    def _enable_responsive_sidebar(self):
-        """Enable responsive sidebar behavior (only when reading)."""
-        self._responsive_enabled = True
-        self._last_was_narrow = None  # Reset state tracking
-        self._user_hid_sidebar = False  # Reset user preference when loading new book
-        # Apply current size immediately with a small delay
-        GLib.timeout_add(100, self._on_window_size_changed)
-
-    def _disable_responsive_sidebar(self):
-        """Disable responsive sidebar behavior (when in library)."""
-        self._responsive_enabled = False
-        self._last_was_narrow = None  # Reset state tracking
-        self._user_hid_sidebar = False  # Reset user preference
-        try:
-            # Force sidebar hidden in library
-            self.split.set_collapsed(False)
-            self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error disabling responsive sidebar: {e}")
-
-#######################
-    def _setup_responsive_sidebar(self):
-        """Setup responsive behavior for sidebar when reading a book."""
-        self._responsive_enabled = False
-        self._last_width = 0
-        self._last_was_narrow = None  # Track previous state
-        self._user_hid_sidebar = False  # Track if user manually hid sidebar
-        self._resize_timeout_id = None  # For debouncing
-        # Monitor window size changes
-        self.connect("notify::default-width", self._on_window_size_changed)
-
-    def _on_window_size_changed(self, *args):
-        """Handle window size changes and control sidebar accordingly."""
-        # Cancel previous timeout if exists
-        if self._resize_timeout_id:
-            GLib.source_remove(self._resize_timeout_id)
-        
-        # Debounce: wait 150ms before applying changes
-        self._resize_timeout_id = GLib.timeout_add(150, self._apply_responsive_sidebar)
-        
-    def _apply_responsive_sidebar(self):
-        """Actually apply the responsive sidebar changes after debounce."""
-        self._resize_timeout_id = None
-        
-        try:
-            width = self.get_width()
-            
-            # Prevent unnecessary updates for small changes
-            if abs(width - self._last_width) < 10:
-                return False
-            self._last_width = width
-            
-            is_narrow = width < 768
-            
-            # Only update if state actually changed
-            if is_narrow == self._last_was_narrow:
-                return False
-            
-            # Store previous state
-            was_narrow = self._last_was_narrow
-            self._last_was_narrow = is_narrow
-            
-            if self._responsive_enabled and self.book and self.book_path:
-                # Reading mode: responsive sidebar based on width
-                if is_narrow:
-                    # Going from wide to narrow: preserve current sidebar visibility
-                    if was_narrow is False:  # Only if we were previously wide
-                        try:
-                            # Check if sidebar is currently hidden
-                            if not self.split.get_show_sidebar():
-                                self._user_hid_sidebar = True
-                        except:
-                            pass
-                    # Collapse to overlay mode
-                    self.split.set_collapsed(True)
-                else:
-                    # Going from narrow to wide
-                    self.split.set_collapsed(False)
-                    # Apply user preference
-                    if not self._user_hid_sidebar:
-                        self.split.set_show_sidebar(True)
-                    else:
-                        self.split.set_show_sidebar(False)
-            else:
-                # Library mode: always hide sidebar
-                if self._last_was_narrow is not None:
-                    self.split.set_collapsed(False)
-                    self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error in apply responsive sidebar: {e}")
-        
-        return False  # Don't repeat timeout
-
-#############################
     def _setup_responsive_sidebar(self):
         """Setup responsive behavior for sidebar when reading a book."""
         self._responsive_enabled = False
@@ -1530,6 +1569,7 @@ class EPubViewer(Adw.ApplicationWindow):
             print(f"Error disabling responsive sidebar: {e}")
 
     # ---- TOC setup/bind (kept mostly) ----
+
     def _toc_on_setup(self, factory, list_item):
         wrapper = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0); hbox.set_hexpand(True)
@@ -1917,12 +1957,36 @@ class EPubViewer(Adw.ApplicationWindow):
                 pass
             # extract
             self.temp_dir = tempfile.mkdtemp()
+
+            # Initialize TTS with the new temp directory
+            if TTS_AVAILABLE and not self.tts:
+                try:
+                    self.tts = TTSEngine(
+                        webview_getter=lambda: self.webview,
+                        base_temp_dir=self.temp_dir
+                    )
+                    print("[info] TTS initialized for this book")
+                except Exception as e:
+                    print(f"[warn] Could not initialize TTS: {e}")
+                    self.tts = None
             extracted_paths = set()
             try:
                 with zipfile.ZipFile(path, "r") as z:
                     z.extractall(self.temp_dir)
             except Exception:
                 pass
+                    
+            # Reinitialize TTS with new temp directory
+            if TTS_AVAILABLE:
+                try:
+                    self.tts = TTSEngine(
+                        webview_getter=lambda: self.webview,
+                        base_temp_dir=self.temp_dir
+                    )
+                except Exception as e:
+                    print(f"[warn] Could not reinitialize TTS: {e}")
+                    self.tts = None
+                                    
             for item in self.book.get_items():
                 item_path = item.get_name()
                 if not item_path: continue
@@ -2380,6 +2444,13 @@ class EPubViewer(Adw.ApplicationWindow):
             print("Error dialog:", message)
 
     def cleanup(self):
+        # Stop TTS first
+        if self.tts:
+            try:
+                self.tts.stop()
+            except Exception as e:
+                print(f"Error stopping TTS: {e}")
+                
         if getattr(self, "temp_dir", None) and os.path.exists(self.temp_dir):
             try: shutil.rmtree(self.temp_dir)
             except Exception as e: print(f"Error cleaning up temp directory: {e}")
@@ -2416,6 +2487,156 @@ class EPubViewer(Adw.ApplicationWindow):
         # DON'T disable responsive sidebar here - it will be managed by load_epub/show_library
         # Only disable if we're truly going back to library (book_path will be None)
         # This is now handled in show_library() instead
+
+
+    # Add these methods to the EPubViewer class
+
+    def _update_tts_button_states(self):
+        """Periodically update TTS button states"""
+        if not self.tts or not TTS_AVAILABLE:
+            self.tts_play_btn.set_sensitive(False)
+            self.tts_pause_btn.set_sensitive(False)
+            self.tts_stop_btn.set_sensitive(False)
+            self.tts_prev_sentence_btn.set_sensitive(False)
+            self.tts_next_sentence_btn.set_sensitive(False)
+            return True
+        
+        is_playing = self.tts.is_playing()
+        is_paused = self.tts.is_paused()
+        has_content = bool(self.book and self.items)
+        
+        if not is_playing and not is_paused:
+            # Stopped
+            self.tts_play_btn.set_sensitive(has_content)
+            self.tts_pause_btn.set_sensitive(False)
+            self.tts_stop_btn.set_sensitive(False)
+            self.tts_prev_sentence_btn.set_sensitive(False)
+            self.tts_next_sentence_btn.set_sensitive(False)
+            self.tts_pause_btn.set_icon_name("media-playback-pause-symbolic")
+        elif is_playing and not is_paused:
+            # Playing
+            self.tts_play_btn.set_sensitive(False)
+            self.tts_pause_btn.set_sensitive(True)
+            self.tts_stop_btn.set_sensitive(True)
+            self.tts_prev_sentence_btn.set_sensitive(True)
+            self.tts_next_sentence_btn.set_sensitive(True)
+            self.tts_pause_btn.set_icon_name("media-playback-pause-symbolic")
+        elif is_paused:
+            # Paused
+            self.tts_play_btn.set_sensitive(False)
+            self.tts_pause_btn.set_sensitive(True)
+            self.tts_stop_btn.set_sensitive(True)
+            self.tts_prev_sentence_btn.set_sensitive(True)
+            self.tts_next_sentence_btn.set_sensitive(True)
+            self.tts_pause_btn.set_icon_name("media-playback-start-symbolic")
+        
+        return True
+
+    def _extract_page_text(self):
+        """Extract text from current page for TTS"""
+        if not self.book or not self.items or self.current_index >= len(self.items):
+            return []
+        
+        try:
+            item = self.items[self.current_index]
+            soup = BeautifulSoup(item.get_content(), "html.parser")
+            
+            # Remove script and style tags
+            for tag in soup.find_all(['script', 'style']):
+                tag.decompose()
+            
+            # Get text and split into sentences
+            text = soup.get_text(separator=' ', strip=True)
+            
+            if not self.tts:
+                return []
+            
+            sentences = self.tts.split_sentences(text)
+            
+            # Create sentence metadata
+            result = []
+            for i, sent in enumerate(sentences):
+                result.append({
+                    "text": sent,
+                    "sid": f"sent_{i}"
+                })
+            
+            return result
+        except Exception as e:
+            print(f"[error] Failed to extract text: {e}")
+            return []
+
+    def _on_tts_highlight(self, idx, meta):
+        """Highlight callback for TTS - visual feedback"""
+        if idx >= 0 and meta:
+            print(f"[TTS] Now reading: {meta.get('text', '')[:50]}...")
+        return False
+
+    def _on_tts_finished(self):
+        """Callback when TTS finishes"""
+        print("[TTS] Playback finished")
+        return False
+
+    def on_tts_play(self, *args):
+        """Start TTS playback"""
+        if not self.tts or not TTS_AVAILABLE:
+            return
+        
+        try:
+            # Extract sentences from current page
+            self._tts_sentences_cache = self._extract_page_text()
+            
+            if not self._tts_sentences_cache:
+                print("[warn] No text to read")
+                return
+            
+            print(f"[TTS] Starting playback of {len(self._tts_sentences_cache)} sentences")
+            
+            self.tts.speak_sentences_list(
+                self._tts_sentences_cache,
+                voice="af_sarah",
+                speed=1.0,
+                lang="en-us",
+                highlight_callback=self._on_tts_highlight,
+                finished_callback=self._on_tts_finished
+            )
+        except Exception as e:
+            print(f"[error] TTS play failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def on_tts_pause(self, *args):
+        """Pause/Resume TTS"""
+        if not self.tts:
+            return
+        
+        if self.tts.is_paused():
+            self.tts.resume()
+        else:
+            self.tts.pause()
+
+    def on_tts_stop(self, *args):
+        """Stop TTS playback"""
+        if not self.tts:
+            return
+        
+        self.tts.stop()
+
+    def on_tts_prev_sentence(self, *args):
+        """Go to previous sentence"""
+        if not self.tts:
+            return
+        
+        self.tts.prev_sentence()
+
+    def on_tts_next_sentence(self, *args):
+        """Go to next sentence"""
+        if not self.tts:
+            return
+        
+        self.tts.next_sentence()
+
+
 
     # ---- Library helpers ----
     def _update_library_entry(self):
@@ -2476,9 +2697,57 @@ class EPubViewer(Adw.ApplicationWindow):
         except Exception:
             pass
 
+        # TTS controls bar
+        tts_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        tts_bar.set_margin_top(6)
+        tts_bar.set_margin_bottom(6)
+        tts_bar.set_margin_start(6)
+        tts_bar.set_margin_end(6)
+        tts_bar.set_halign(Gtk.Align.CENTER)
+
+        self.tts_prev_sentence_btn = Gtk.Button(icon_name="media-skip-backward-symbolic")
+        self.tts_prev_sentence_btn.add_css_class("flat")
+        self.tts_prev_sentence_btn.set_tooltip_text("Previous sentence")
+        self.tts_prev_sentence_btn.set_sensitive(False)
+        self.tts_prev_sentence_btn.connect("clicked", self.on_tts_prev_sentence)
+        tts_bar.append(self.tts_prev_sentence_btn)
+
+        self.tts_play_btn = Gtk.Button(icon_name="media-playback-start-symbolic")
+        self.tts_play_btn.add_css_class("flat")
+        self.tts_play_btn.set_tooltip_text("Play TTS")
+        self.tts_play_btn.set_sensitive(False)
+        self.tts_play_btn.connect("clicked", self.on_tts_play)
+        tts_bar.append(self.tts_play_btn)
+
+        self.tts_pause_btn = Gtk.Button(icon_name="media-playback-pause-symbolic")
+        self.tts_pause_btn.add_css_class("flat")
+        self.tts_pause_btn.set_tooltip_text("Pause/Resume TTS")
+        self.tts_pause_btn.set_sensitive(False)
+        self.tts_pause_btn.connect("clicked", self.on_tts_pause)
+        tts_bar.append(self.tts_pause_btn)
+
+        self.tts_stop_btn = Gtk.Button(icon_name="media-playback-stop-symbolic")
+        self.tts_stop_btn.add_css_class("flat")
+        self.tts_stop_btn.set_tooltip_text("Stop TTS")
+        self.tts_stop_btn.set_sensitive(False)
+        self.tts_stop_btn.connect("clicked", self.on_tts_stop)
+        tts_bar.append(self.tts_stop_btn)
+
+        self.tts_next_sentence_btn = Gtk.Button(icon_name="media-skip-forward-symbolic")
+        self.tts_next_sentence_btn.add_css_class("flat")
+        self.tts_next_sentence_btn.set_tooltip_text("Next sentence")
+        self.tts_next_sentence_btn.set_sensitive(False)
+        self.tts_next_sentence_btn.connect("clicked", self.on_tts_next_sentence)
+        tts_bar.append(self.tts_next_sentence_btn)
+
+        content_box.append(tts_bar)
+
+        # Start periodic TTS button state updates
+        GLib.timeout_add(500, self._update_tts_button_states)
+
 class Application(Adw.Application):
     def __init__(self):
-        super().__init__(application_id="org.example.EpubViewer")
+        super().__init__(application_id="io.github.fastrizwaan.tts")
         self.create_action("quit", self.quit, ["<primary>q"])
     def do_activate(self):
         win = self.props.active_window

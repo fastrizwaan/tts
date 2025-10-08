@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # EPUB viewer with libadwaita + GTK4 ListView sidebar TOC (nested, clickable)
-# Library view (persistent), saves scaled covers, remembers progress, grid of recent books.
-# - Highlights search matches in library (Pango markup)
-# - Library always shows Open button and hides sidebar toggle
-# - Loaded EPUB hides Open button, shows sidebar toggle and sidebar; library search hidden while reading
-# - Search button packed before menu (menu at rightmost)
-# - Better relative-path support for ops/oebps lowercase prefixes
 import gi, os, tempfile, traceback, shutil, urllib.parse, glob, re, json, hashlib
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -118,7 +112,6 @@ Gtk.StyleContext.add_provider_for_display(
 )
 
 # --- NEW: Hover/active theme-aware providers ---
-# light-mode hover (subtle warm tint)
 _LIBRARY_HOVER_LIGHT = b"""
 .library-card:hover {
   box-shadow: 0 6px 16px rgba(0,0,0,0.15);
@@ -132,7 +125,6 @@ _LIBRARY_HOVER_LIGHT = b"""
 }
 """
 
-# dark-mode hover (slightly stronger contrast)
 _LIBRARY_HOVER_DARK = b"""
 .library-card:hover {
   box-shadow: 0 6px 20px rgba(0,0,0,0.5);
@@ -151,7 +143,6 @@ _hover_light_provider.load_from_data(_LIBRARY_HOVER_LIGHT)
 _hover_dark_provider = Gtk.CssProvider()
 _hover_dark_provider.load_from_data(_LIBRARY_HOVER_DARK)
 
-# theme injection for content (existing)
 THEME_INJECTION_CSS = """
 @media (prefers-color-scheme: dark) {
     body { background-color:#242424; color:#e3e3e3; }
@@ -171,7 +162,6 @@ def _update_gtk_dark_provider(settings, pspec=None):
             Gtk.StyleContext.add_provider_for_display(
                 Gdk.Display.get_default(), _dark_provider,
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
-            # swap hover providers: add dark, remove light
             try:
                 Gtk.StyleContext.add_provider_for_display(
                     Gdk.Display.get_default(), _hover_dark_provider,
@@ -186,7 +176,6 @@ def _update_gtk_dark_provider(settings, pspec=None):
         else:
             Gtk.StyleContext.remove_provider_for_display(
                 Gdk.Display.get_default(), _dark_provider)
-            # swap hover providers: add light, remove dark
             try:
                 Gtk.StyleContext.add_provider_for_display(
                     Gdk.Display.get_default(), _hover_light_provider,
@@ -221,7 +210,6 @@ class TocItem(GObject.Object):
                 self.children.append(c)
 
 def highlight_markup(text: str, query: str) -> str:
-    """Return Pango markup with query substrings highlighted. Case-insensitive."""
     if not query:
         return GLib.markup_escape_text(text or "")
     q = re.escape(query)
@@ -243,7 +231,6 @@ class EPubViewer(Adw.ApplicationWindow):
         self.set_default_size(1000, 800)
         self.set_title(APP_NAME)
 
-
         # state
         self.book = None
         self.items = []
@@ -256,6 +243,12 @@ class EPubViewer(Adw.ApplicationWindow):
         self.href_map = {}
         self.last_cover_path = None
         self.book_path = None
+
+        # NEW: column settings
+        self.column_mode_use_width = False   # False => use column-count; True => use column-width
+        self.column_count = 1                # 1..10
+        self.column_width_px = 200           # 100..500
+        self._column_gap = 32                # px gap between columns
 
         # library
         self.library = load_library()
@@ -280,7 +273,7 @@ class EPubViewer(Adw.ApplicationWindow):
         header.add_css_class("flat")
 
         # library button in sidebar header (kept for parity)
-        self.library_btn = Gtk.Button(icon_name="view-grid-symbolic")
+        self.library_btn = Gtk.Button(icon_name="show-library-symbolic")
         self.library_btn.set_tooltip_text("Show Library")
         self.library_btn.add_css_class("flat")
         self.library_btn.connect("clicked", self.on_library_clicked)
@@ -311,7 +304,6 @@ class EPubViewer(Adw.ApplicationWindow):
 
         text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         text_box.set_valign(Gtk.Align.CENTER)
-        # allow the text box to expand so stop button sits on right
         text_box.set_hexpand(True)
         self.book_title = Gtk.Label(label="")
         self.book_title.add_css_class("book-title")
@@ -400,13 +392,33 @@ class EPubViewer(Adw.ApplicationWindow):
         self.content_title_label.set_ellipsize(Pango.EllipsizeMode.END); self.content_title_label.set_max_width_chars(48)
         self.content_header.set_title_widget(self.content_title_label)
 
+        # --- NEW: Columns menu button (replaces spinner+dropdown). Hidden by default; shown in reading mode only. ---
+        self.columns_menu_button = Gtk.MenuButton()
+        self.columns_menu_button.set_icon_name("columns-symbolic")
+        self.columns_menu_button.add_css_class("flat")
+        # build Gio.Menu model with two submenus
+        menu = Gio.Menu()
+
+        columns_menu = Gio.Menu()
+        for i in range(1, 11):
+            columns_menu.append(f"{i} Column{'s' if i>1 else ''}", f"app.set-columns({i})")
+        menu.append_submenu("Columns (fixed)", columns_menu)
+
+        width_menu = Gio.Menu()
+        for w in (50,100,150,200,300,350,400,450,500):
+            width_menu.append(f"{w}px width", f"app.set-column-width({w})")
+        menu.append_submenu("Use column width", width_menu)
+        self.columns_menu_button.set_menu_model(menu)
+        self.columns_menu_button.set_visible(False)
+        self.content_header.pack_end(self.columns_menu_button)
+        # --- end columns menu ---
+
         # search (packed before menu)
         self.library_search_revealer = Gtk.Revealer(reveal_child=False)
         search_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         search_bar.set_margin_start(6); search_bar.set_margin_end(6); search_bar.set_margin_top(6); search_bar.set_margin_bottom(6)
         self.library_search_entry = Gtk.SearchEntry()
         self.library_search_entry.set_placeholder_text("Search library (title, author, filename)")
-        # store handler id for controlled updates
         self._lib_search_handler_id = self.library_search_entry.connect("search-changed", lambda e: self._on_library_search_changed(e.get_text()))
         search_bar.append(self.library_search_entry)
         self.library_search_revealer.set_child(search_bar)
@@ -496,12 +508,53 @@ class EPubViewer(Adw.ApplicationWindow):
         self.search_toggle_btn.set_visible(True)
         self.show_library()
 
+    # ---- new window methods invoked by app actions ----
+    def set_columns(self, n):
+        try:
+            n = int(n)
+        except Exception:
+            return
+        self.column_mode_use_width = False
+        self.column_count = max(1, min(10, n))
+        try:
+            self.display_page()
+        except Exception:
+            pass
+
+    def set_column_width(self, w):
+        try:
+            w = int(w)
+        except Exception:
+            return
+        self.column_mode_use_width = True
+        self.column_width_px = max(50, min(500, w))
+        try:
+            self.display_page()
+        except Exception:
+            pass
+
+    # ---- column control handlers (kept for compatibility but widgets replaced) ----
+    def _on_column_control_changed(self):
+        try:
+            # kept in case code elsewhere calls this, but our UI now uses app actions
+            try:
+                self.column_count = max(1, min(10, int(getattr(self, "column_count", 1))))
+            except Exception:
+                self.column_count = 1
+            # column_mode_use_width and column_width_px are controlled by app actions now
+            try:
+                if getattr(self, "book") and getattr(self, "items") and self.items:
+                    self.display_page()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     # ---- search helpers ----
     def _toggle_library_search(self, *_):
         reveal = not self.library_search_revealer.get_reveal_child()
         self.library_search_revealer.set_reveal_child(reveal)
         if not reveal:
-            # block handler to avoid recursive show_library
             try:
                 if self._lib_search_handler_id:
                     self.library_search_entry.handler_block(self._lib_search_handler_id)
@@ -518,11 +571,9 @@ class EPubViewer(Adw.ApplicationWindow):
             self.library_search_entry.grab_focus()
 
     def _safe_set_search_text(self, text: str):
-        """Set search entry text safely: don't clobber while user is typing; restore caret if we must set."""
         try:
             if text is None:
                 text = ""
-            # don't overwrite while user is actively typing/focused
             if getattr(self, "library_search_entry", None) and self.library_search_entry.get_has_focus():
                 return
             cur = ""
@@ -532,10 +583,8 @@ class EPubViewer(Adw.ApplicationWindow):
                 cur = ""
             if cur == text:
                 return
-            # set and place caret at end
             try:
                 self.library_search_entry.set_text(text)
-                # place caret at end
                 pos = len(text)
                 try: self.library_search_entry.set_position(pos)
                 except Exception: pass
@@ -545,27 +594,18 @@ class EPubViewer(Adw.ApplicationWindow):
             pass
 
     def _on_library_search_changed(self, arg):
-        """Handle search changes. Accepts either the SearchEntry (signal) or a plain str."""
         try:
             if isinstance(arg, str):
                 text = arg
             else:
-                # arg may be the SearchEntry widget
                 text = arg.get_text() if hasattr(arg, "get_text") else str(arg or "")
             self.library_search_text = (text or "").strip()
-            # update view
             self.show_library()
         except Exception:
             pass
 
-
     # ---- Library ordering / loaded entry helpers ----
     def _get_library_entries_for_display(self):
-        """
-        Return library entries ordered for display:
-        - Saved list is kept as chronological (oldest..newest). We display newest first (LIFO).
-        - If an EPUB is currently loaded, its entry is shown first.
-        """
         entries = list(reversed(self.library))
         if not entries:
             return entries
@@ -593,18 +633,19 @@ class EPubViewer(Adw.ApplicationWindow):
 
     # ---- Library UI ----
     def on_library_clicked(self, *_):
-        # if reading, keep book in memory and show library with loaded book prioritized
-        if getattr(self, "book", None):
-            try:
-                self.content_sidebar_toggle.set_visible(False)
-                self.split.set_show_sidebar(False)
-                self.split.set_collapsed(False)
-            except Exception:
-                pass
-        self.show_library()
+        try:
+            if getattr(self, "book", None):
+                try:
+                    self.content_sidebar_toggle.set_visible(False)
+                    self.split.set_show_sidebar(False)
+                    self.split.set_collapsed(False)
+                except Exception:
+                    pass
+            self.show_library()
+        except Exception:
+            pass
 
     def _stop_reading(self, path=None):
-        """Stop reading the currently highlighted book: save, cleanup and return to library."""
         try:
             if path and getattr(self, "book_path", None) and os.path.abspath(path) != os.path.abspath(self.book_path):
                 return
@@ -625,201 +666,22 @@ class EPubViewer(Adw.ApplicationWindow):
         except Exception:
             pass
 
-    def show_library(self):
-        self._disable_responsive_sidebar()
-        # Override any breakpoint effects by explicitly managing split state
-        GLib.idle_add(self._force_library_sidebar_state)
-        wrap = Adw.WrapBox()
-        wrap.set_align(Gtk.Align.FILL); wrap.set_pack_direction(Gtk.Orientation.HORIZONTAL)
-        wrap.set_child_spacing(10); wrap.set_line_spacing(10)
-        wrap.add_css_class("library-grid")
-        wrap.set_margin_start(0); wrap.set_margin_end(0); wrap.set_margin_top(0); wrap.set_margin_bottom(0)
-
-        try:
-            self.split.set_show_sidebar(False)
-            # When showing library, sidebar should always be hidden
-            # Force it to stay hidden regardless of window size
-            self.split.set_collapsed(False)  # Not in overlay mode
-            self.split.set_show_sidebar(False)
-            self.split.set_collapsed(False)
-        except Exception: pass
-        try:
-            self.content_sidebar_toggle.set_visible(False)
-            
-        except Exception: pass
-
-        try:
-            self.open_btn.set_visible(True)
-        except Exception: pass
-
-        try:
-            self.search_toggle_btn.set_visible(True)
-            self.library_search_revealer.set_reveal_child(bool(self.library_search_text))
-            try:
-                if self._lib_search_handler_id:
-                    self.library_search_entry.handler_block(self._lib_search_handler_id)
-                self._safe_set_search_text(self.library_search_text)
-
-            finally:
-                try:
-                    if self._lib_search_handler_id:
-                        self.library_search_entry.handler_unblock(self._lib_search_handler_id)
-                except Exception:
-                    pass
-        except Exception: pass
-
-        query = (self.library_search_text or "").strip().lower()
-        entries = self._get_library_entries_for_display()
-        if query:
-            entries = [e for e in entries if query in (e.get("title") or "").lower() or query in (e.get("author") or "").lower() or query in (os.path.basename(e.get("path","")).lower())]
-
-        if not entries:
-            lbl = Gtk.Label(label="No books in library\nOpen a book to add it here.")
-            lbl.set_justify(Gtk.Justification.CENTER); lbl.set_margin_top(40)
-            self.toolbar.set_content(lbl); self.content_title_label.set_text("Library")
-            return
-
-        for entry in entries:
-            title = entry.get("title") or os.path.basename(entry.get("path",""))
-            author = entry.get("author") or ""
-            cover = entry.get("cover")
-            path = entry.get("path")
-            idx = entry.get("index", 0)
-            progress = entry.get("progress", 0.0)
-
-            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            card.add_css_class("library-card")
-            card.set_size_request(160, 160); card.set_hexpand(False); card.set_vexpand(False)
-
-            img = Gtk.Image(); img.set_size_request(160, 160)
-            if cover and os.path.exists(cover):
-                try:
-                    pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(cover, 180, 200, True)
-                    tex = Gdk.Texture.new_for_pixbuf(pix); img.set_from_paintable(tex)
-                except Exception:
-                    pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 180, 200); pb.fill(0xddddddff)
-                    img.set_from_paintable(Gdk.Texture.new_for_pixbuf(pb))
-            else:
-                pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 180, 200); pb.fill(0xddddddff)
-                img.set_from_paintable(Gdk.Texture.new_for_pixbuf(pb))
-            img.add_css_class("cover"); img.set_halign(Gtk.Align.CENTER)
-            card.append(img)
-
-            t = Gtk.Label()
-            t.add_css_class("title"); t.set_ellipsize(Pango.EllipsizeMode.END)
-            t.set_wrap(True); t.set_max_width_chars(16); t.set_lines(2)
-            t.set_halign(Gtk.Align.CENTER); t.set_justify(Gtk.Justification.CENTER)
-            t.set_markup(highlight_markup(title, self.library_search_text))
-            card.append(t)
-
-            meta_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-            meta_row.set_hexpand(True); meta_row.set_valign(Gtk.Align.CENTER)
-            meta_row.set_margin_top(0)
-            prog_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL); prog_box.set_halign(Gtk.Align.START)
-            prog_lbl = Gtk.Label(); prog_lbl.add_css_class("meta"); prog_lbl.set_valign(Gtk.Align.CENTER)
-            prog_lbl.set_label(f"{int(progress*100)}%")
-            prog_box.append(prog_lbl); meta_row.append(prog_box)
-
-            author_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL); author_box.set_hexpand(True); author_box.set_halign(Gtk.Align.CENTER)
-            a = Gtk.Label(); a.add_css_class("author"); a.set_ellipsize(Pango.EllipsizeMode.END); a.set_max_width_chars(18); author_box.set_margin_top(0)
-            a.set_halign(Gtk.Align.CENTER); a.set_justify(Gtk.Justification.CENTER)
-            a.set_markup(highlight_markup(author, self.library_search_text))
-            author_box.append(a); meta_row.append(author_box)
-
-            right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL); right_box.set_halign(Gtk.Align.END)
-            menu_btn = Gtk.MenuButton(icon_name="view-more-symbolic"); menu_btn.add_css_class("flat")
-            pop = Gtk.Popover(); pop.set_has_arrow(False)
-            pop_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-            pop_box.set_margin_top(6); pop_box.set_margin_bottom(6); pop_box.set_margin_start(6); pop_box.set_margin_end(6)
-            open_folder_btn = Gtk.Button(label="Open folder"); open_folder_btn.add_css_class("flat")
-            rem_btn = Gtk.Button(label="Remove ebook"); rem_btn.add_css_class("flat")
-            pop_box.append(open_folder_btn); pop_box.append(rem_btn)
-            pop.set_child(pop_box); menu_btn.set_popover(pop)
-
-            open_folder_btn.connect("clicked", lambda b, p=path: self._open_parent_folder(p))
-            def _remove_entry(btn, p=path, coverp=cover):
-                try:
-                    dlg = Adw.MessageDialog.new(self, "Remove", f"Remove «{os.path.basename(p)}» from library?")
-                    dlg.add_response("cancel", "Cancel"); dlg.add_response("ok", "Remove")
-                    def _on_resp(d, resp):
-                        try:
-                            if resp == "ok":
-                                self.library = [ee for ee in self.library if ee.get("path") != p]
-                                try:
-                                    if coverp and os.path.exists(coverp) and os.path.commonpath([os.path.abspath(COVERS_DIR)]) == os.path.commonpath([os.path.abspath(COVERS_DIR), os.path.abspath(coverp)]):
-                                        os.remove(coverp)
-                                except Exception:
-                                    pass
-                                save_library(self.library)
-                                self.show_library()
-                        finally:
-                            try: d.destroy()
-                            except Exception: pass
-                    dlg.connect("response", _on_resp)
-                    dlg.present()
-                except Exception:
-                    pass
-            rem_btn.connect("clicked", _remove_entry)
-
-            right_box.append(menu_btn); meta_row.append(right_box)
-            card.append(meta_row)
-
-            # NOTE: previously we decorated the loaded entry visually; removed per request.
-
-            gesture = Gtk.GestureClick.new()
-            def _on_click(_gesture, _n, _x, _y, p=path, resume_idx=idx):
-                if p and os.path.exists(p):
-                    try: self._save_progress_for_library()
-                    except Exception: pass
-                    try:
-                        self.cleanup()
-                    except Exception: pass
-                    try: self.toolbar.set_content(self._reader_content_box)
-                    except Exception: pass
-                    self.load_epub(p, resume=True, resume_index=resume_idx)
-            gesture.connect("released", _on_click)
-            card.add_controller(gesture)
-            card.add_css_class("clickable")
-            wrap.append(card)
-
-        scroll = Gtk.ScrolledWindow(); scroll.set_child(wrap); scroll.set_vexpand(True); scroll.set_hexpand(True)
-        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL); container.append(scroll)
-        self.toolbar.set_content(container); self.content_title_label.set_text("Library")
-#####################
-
     def _create_rounded_cover_texture(self, cover_path, width, height, radius=10):
-        """Create a texture with rounded corners from an image file."""
         try:
-            # Load original image without scaling
             original_pixbuf = GdkPixbuf.Pixbuf.new_from_file(cover_path)
-            
-            # Scale to exact dimensions (stretch to fill, don't preserve aspect ratio)
             pixbuf = original_pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
-            
-            # Create a new surface and context for the rounded corners
             surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
             context = cairo.Context(surface)
-            
-            # Draw rounded rectangle
             context.arc(radius, radius, radius, 3.14159, 3 * 3.14159 / 2)
             context.arc(width - radius, radius, radius, 3 * 3.14159 / 2, 0)
             context.arc(width - radius, height - radius, radius, 0, 3.14159 / 2)
             context.arc(radius, height - radius, radius, 3.14159 / 2, 3.14159)
             context.close_path()
-            
-            # Create pattern from pixbuf and set as source
             Gdk.cairo_set_source_pixbuf(context, pixbuf, 0, 0)
             context.clip()
             context.paint()
-            
-            # Get the surface data as bytes
             surface_bytes = surface.get_data()
-            
-            # Create GBytes from the surface data
             gbytes = GLib.Bytes.new(surface_bytes)
-            
-            # Create texture from the bytes
             texture = Gdk.MemoryTexture.new(
                 width, height,
                 Gdk.MemoryFormat.B8G8R8A8,
@@ -831,11 +693,8 @@ class EPubViewer(Adw.ApplicationWindow):
             print(f"Error creating rounded texture: {e}")
             return None
 
-            
     def show_library(self):
-        # Disable responsive sidebar behavior first
         self._disable_responsive_sidebar()
-        
         try:
             self.split.set_show_sidebar(False)
         except Exception: pass
@@ -860,6 +719,12 @@ class EPubViewer(Adw.ApplicationWindow):
                     pass
         except Exception: pass
 
+        # hide columns menu in library mode
+        try:
+            self.columns_menu_button.set_visible(False)
+        except Exception:
+            pass
+
         query = (self.library_search_text or "").strip().lower()
         entries = self._get_library_entries_for_display()
         if query:
@@ -871,7 +736,6 @@ class EPubViewer(Adw.ApplicationWindow):
             self.toolbar.set_content(lbl); self.content_title_label.set_text("Library")
             return
 
-        # Use FlowBox instead of WrapBox for better alignment
         flowbox = Gtk.FlowBox()
         flowbox.set_valign(Gtk.Align.START)
         flowbox.set_max_children_per_line(30)
@@ -907,12 +771,10 @@ class EPubViewer(Adw.ApplicationWindow):
                 if texture:
                     img.set_paintable(texture)
                 else:
-                    # Fallback to placeholder
                     pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 160, 200)
                     pb.fill(0xddddddff)
                     img.set_paintable(Gdk.Texture.new_for_pixbuf(pb))
             else:
-                # Placeholder
                 pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 160, 200)
                 pb.fill(0xddddddff)
                 img.set_paintable(Gdk.Texture.new_for_pixbuf(pb))
@@ -925,16 +787,16 @@ class EPubViewer(Adw.ApplicationWindow):
             t.add_css_class("title"); t.set_ellipsize(Pango.EllipsizeMode.END)
             t.set_wrap(True); t.set_max_width_chars(16); t.set_lines(2)
             t.set_halign(Gtk.Align.CENTER); t.set_justify(Gtk.Justification.CENTER)
-            t.set_margin_top(4)  # Add small top margin
-            t.set_margin_bottom(0)  # Reduce bottom margin
+            t.set_margin_top(4)
+            t.set_margin_bottom(0)
             t.set_markup(highlight_markup(title, self.library_search_text))
             card.append(t)
 
-            meta_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)  # Reduced from 6
+            meta_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
             meta_row.set_hexpand(True)
             meta_row.set_valign(Gtk.Align.CENTER)
-            meta_row.set_margin_top(0)  # No top margin
-            meta_row.set_margin_bottom(0)  # Small bottom margin
+            meta_row.set_margin_top(0)
+            meta_row.set_margin_bottom(0)
 
             prog_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
             prog_box.set_halign(Gtk.Align.START)
@@ -1018,436 +880,43 @@ class EPubViewer(Adw.ApplicationWindow):
         self.toolbar.set_content(container); self.content_title_label.set_text("Library")
 
     # ---- UI helpers ----
-    
-    
-    # --- library card snapping
     def _setup_window_size_constraints(self):
-        """Setup window resize to snap to card-aligned widths in library view."""
         self._is_snapping = False
         self._snap_timeout_id = None
         self.connect("notify::default-width", self._on_window_width_changed)
 
     def _on_window_width_changed(self, *args):
-        """Snap window width to card-aligned sizes when in library view."""
-        # Only snap in library mode, not when reading
         if self._responsive_enabled and self.book and self.book_path:
             return
-        
-        # Debounce to avoid constant snapping during resize
         if self._snap_timeout_id:
             GLib.source_remove(self._snap_timeout_id)
-        
         self._snap_timeout_id = GLib.timeout_add(200, self._snap_window_to_cards)
 
     def _snap_window_to_cards(self):
-        """Calculate and snap to ideal window width based on card layout."""
         self._snap_timeout_id = None
-        
         if self._is_snapping:
             return False
-        
         try:
-            # Card dimensions (from your CSS)
-            card_width = 160  # .library-card size-request
-            card_spacing = 10  # wrap.set_child_spacing
+            card_width = 160
+            card_spacing = 10
             min_cards = 2
             max_cards = 8
-            
-            # Get current window width
             current_width = self.get_width()
-            
-            # Calculate how many cards can fit
-            # Account for margins and padding
-            content_padding = 24  # margin-start/end from wrap
+            content_padding = 24
             available_width = current_width - content_padding
-            
-            # Calculate cards per row
             cards_per_row = max(min_cards, int((available_width + card_spacing) / (card_width + card_spacing)))
             cards_per_row = min(cards_per_row, max_cards)
-            
-            # Calculate ideal width for this number of cards
             ideal_content_width = (cards_per_row * card_width) + ((cards_per_row - 1) * card_spacing)
             ideal_window_width = ideal_content_width + content_padding
-            
-            # Only snap if difference is significant (> 20px)
             if abs(current_width - ideal_window_width) > 20:
                 self._is_snapping = True
                 self.set_default_size(ideal_window_width, self.get_height())
                 GLib.timeout_add(100, lambda: setattr(self, '_is_snapping', False))
         except Exception as e:
             print(f"Error snapping window: {e}")
-        
         return False    
     
-    # ---- Sidebar hide/show
-
     def _setup_responsive_sidebar(self):
-        """Setup responsive behavior for sidebar when reading a book."""
-        try:
-            # Create breakpoint that triggers at 768px
-            self.reading_breakpoint = Adw.Breakpoint.new(
-                Adw.BreakpointCondition.parse("max-width: 768px")
-            )
-            # When breakpoint is active (narrow), collapse the sidebar
-            self.reading_breakpoint.add_setter(self.split, "collapsed", True)
-            self.add_breakpoint(self.reading_breakpoint)
-            self._responsive_enabled = False  # Track if we want responsive behavior
-        except Exception as e:
-            print(f"Breakpoint not available, using fallback: {e}")
-            self.reading_breakpoint = None
-            self._responsive_enabled = False
-            self.connect("notify::default-width", self._on_window_resize)
-
-    def _enable_responsive_sidebar(self):
-        """Enable responsive sidebar behavior (only when reading)."""
-        self._responsive_enabled = True
-
-    def _disable_responsive_sidebar(self):
-        """Disable responsive sidebar behavior (when in library)."""
-        self._responsive_enabled = False
-        try:
-            # Force sidebar to be hidden and not in collapsed/overlay mode
-            self.split.set_collapsed(False)
-            self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error disabling responsive sidebar: {e}")
-
-    def _on_window_resize(self, *args):
-        """Fallback method for responsive sidebar on older libadwaita."""
-        try:
-            # Only apply responsive behavior when enabled and book is loaded
-            if not self._responsive_enabled or not self.book or not self.book_path:
-                return
-            
-            # Get window width
-            width = self.get_width()
-            
-            # Collapse sidebar if window is narrow (< 768px)
-            should_collapse = width < 768
-            
-            # Only update if state changed
-            try:
-                current_collapsed = self.split.get_collapsed()
-                if current_collapsed != should_collapse:
-                    self.split.set_collapsed(should_collapse)
-            except AttributeError:
-                # Fallback if get_collapsed doesn't exist
-                self.split.set_show_sidebar(not should_collapse)
-        except Exception as e:
-            print(f"Error in window resize handler: {e}")
-
-    def _force_library_sidebar_state(self):
-        """Force sidebar to stay hidden in library view, overriding breakpoints."""
-        try:
-            if not self._responsive_enabled:  # Only when in library
-                self.split.set_collapsed(False)
-                self.split.set_show_sidebar(False)
-        except Exception:
-            pass
-        return False  # Don't repeat
-        
-    def _on_sidebar_toggle(self, btn):
-        try:
-            new = not self.split.get_show_sidebar()
-            try: self.split.set_show_sidebar(new)
-            except Exception: pass
-        except Exception:
-            pass
-
-    def _setup_responsive_sidebar(self):
-        """Setup responsive behavior for sidebar when reading a book."""
-        self._responsive_enabled = False
-        self._last_width = 0
-        # Monitor window size changes
-        self.connect("notify::default-width", self._on_window_size_changed)
-
-    def _on_window_size_changed(self, *args):
-        """Handle window size changes and control sidebar accordingly."""
-        try:
-            width = self.get_width()
-            
-            # Prevent unnecessary updates
-            if abs(width - self._last_width) < 10:
-                return
-            self._last_width = width
-            
-            if self._responsive_enabled and self.book and self.book_path:
-                # Reading mode: responsive sidebar based on width
-                if width < 768:
-                    # Narrow window: collapse sidebar to overlay
-                    try:
-                        if not self.split.get_collapsed():
-                            self.split.set_collapsed(True)
-                    except:
-                        self.split.set_show_sidebar(False)
-                else:
-                    # Wide window: expand sidebar
-                    try:
-                        if self.split.get_collapsed():
-                            self.split.set_collapsed(False)
-                            self.split.set_show_sidebar(True)
-                    except:
-                        self.split.set_show_sidebar(True)
-            else:
-                # Library mode: always hide sidebar regardless of width
-                try:
-                    self.split.set_collapsed(False)
-                    self.split.set_show_sidebar(False)
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"Error in window size handler: {e}")
-
-    def _enable_responsive_sidebar(self):
-        """Enable responsive sidebar behavior (only when reading)."""
-        self._responsive_enabled = True
-        # Trigger immediate check
-        GLib.idle_add(self._on_window_size_changed)
-
-    def _disable_responsive_sidebar(self):
-        """Disable responsive sidebar behavior (when in library)."""
-        self._responsive_enabled = False
-        try:
-            # Force sidebar hidden in library
-            self.split.set_collapsed(False)
-            self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error disabling responsive sidebar: {e}")
-##########################
-    def _setup_responsive_sidebar(self):
-        """Setup responsive behavior for sidebar when reading a book."""
-        self._responsive_enabled = False
-        self._last_width = 0
-        self._last_was_narrow = None  # Track previous state
-        # Monitor window size changes
-        self.connect("notify::default-width", self._on_window_size_changed)
-
-    def _on_window_size_changed(self, *args):
-        """Handle window size changes and control sidebar accordingly."""
-        try:
-            width = self.get_width()
-            
-            # Prevent unnecessary updates for small changes
-            if abs(width - self._last_width) < 10:
-                return
-            self._last_width = width
-            
-            is_narrow = width < 768
-            
-            # Only update if state actually changed
-            if is_narrow == self._last_was_narrow:
-                return
-            self._last_was_narrow = is_narrow
-            
-            if self._responsive_enabled and self.book and self.book_path:
-                # Reading mode: responsive sidebar based on width
-                print(f"Reading mode - Width: {width}, Narrow: {is_narrow}")  # Debug
-                if is_narrow:
-                    # Narrow window: collapse sidebar to overlay mode
-                    print("Setting collapsed=True")
-                    self.split.set_collapsed(True)
-                else:
-                    # Wide window: show sidebar side-by-side
-                    print("Setting collapsed=False, show_sidebar=True")
-                    self.split.set_collapsed(False)
-                    self.split.set_show_sidebar(True)
-            else:
-                # Library mode: always hide sidebar regardless of width
-                if self._last_was_narrow is not None:  # Only if we were tracking
-                    print("Library mode - hiding sidebar")
-                    self.split.set_collapsed(False)
-                    self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error in window size handler: {e}")
-            import traceback
-            traceback.print_exc()
-
-    def _enable_responsive_sidebar(self):
-        """Enable responsive sidebar behavior (only when reading)."""
-        print("Enabling responsive sidebar")
-        self._responsive_enabled = True
-        self._last_was_narrow = None  # Reset state tracking
-        # Apply current size immediately with a small delay
-        GLib.timeout_add(100, self._on_window_size_changed)
-
-    def _disable_responsive_sidebar(self):
-        """Disable responsive sidebar behavior (when in library)."""
-        print("Disabling responsive sidebar")
-        self._responsive_enabled = False
-        self._last_was_narrow = None  # Reset state tracking
-        try:
-            # Force sidebar hidden in library
-            self.split.set_collapsed(False)
-            self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error disabling responsive sidebar: {e}")
-
-######################
-    def _setup_responsive_sidebar(self):
-        """Setup responsive behavior for sidebar when reading a book."""
-        self._responsive_enabled = False
-        self._last_width = 0
-        self._last_was_narrow = None  # Track previous state
-        self._user_hid_sidebar = False  # Track if user manually hid sidebar
-        # Monitor window size changes
-        self.connect("notify::default-width", self._on_window_size_changed)
-
-    def _on_sidebar_toggle(self, btn):
-        try:
-            new = not self.split.get_show_sidebar()
-            self.split.set_show_sidebar(new)
-            
-            # Track user's manual action
-            if not new:  # User hid the sidebar
-                self._user_hid_sidebar = True
-            else:  # User showed the sidebar
-                self._user_hid_sidebar = False
-                
-        except Exception:
-            pass
-
-    def _on_window_size_changed(self, *args):
-        """Handle window size changes and control sidebar accordingly."""
-        try:
-            width = self.get_width()
-            
-            # Prevent unnecessary updates for small changes
-            if abs(width - self._last_width) < 10:
-                return
-            self._last_width = width
-            
-            is_narrow = width < 768
-            
-            # Only update if state actually changed
-            if is_narrow == self._last_was_narrow:
-                return
-            self._last_was_narrow = is_narrow
-            
-            if self._responsive_enabled and self.book and self.book_path:
-                # Reading mode: responsive sidebar based on width
-                if is_narrow:
-                    # Going narrow: save current sidebar state before collapsing
-                    try:
-                        # If sidebar is currently hidden, mark that user wants it hidden
-                        if not self.split.get_show_sidebar():
-                            self._user_hid_sidebar = True
-                    except:
-                        pass
-                    # Collapse sidebar to overlay mode
-                    self.split.set_collapsed(True)
-                else:
-                    # Going wide: exit collapsed mode
-                    self.split.set_collapsed(False)
-                    # Only auto-show sidebar if user hasn't explicitly hidden it
-                    if not self._user_hid_sidebar:
-                        self.split.set_show_sidebar(True)
-                    else:
-                        # Keep hidden per user's preference
-                        self.split.set_show_sidebar(False)
-            else:
-                # Library mode: always hide sidebar regardless of width
-                if self._last_was_narrow is not None:
-                    self.split.set_collapsed(False)
-                    self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error in window size handler: {e}")
-
-    def _enable_responsive_sidebar(self):
-        """Enable responsive sidebar behavior (only when reading)."""
-        self._responsive_enabled = True
-        self._last_was_narrow = None  # Reset state tracking
-        self._user_hid_sidebar = False  # Reset user preference when loading new book
-        # Apply current size immediately with a small delay
-        GLib.timeout_add(100, self._on_window_size_changed)
-
-    def _disable_responsive_sidebar(self):
-        """Disable responsive sidebar behavior (when in library)."""
-        self._responsive_enabled = False
-        self._last_was_narrow = None  # Reset state tracking
-        self._user_hid_sidebar = False  # Reset user preference
-        try:
-            # Force sidebar hidden in library
-            self.split.set_collapsed(False)
-            self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error disabling responsive sidebar: {e}")
-
-#######################
-    def _setup_responsive_sidebar(self):
-        """Setup responsive behavior for sidebar when reading a book."""
-        self._responsive_enabled = False
-        self._last_width = 0
-        self._last_was_narrow = None  # Track previous state
-        self._user_hid_sidebar = False  # Track if user manually hid sidebar
-        self._resize_timeout_id = None  # For debouncing
-        # Monitor window size changes
-        self.connect("notify::default-width", self._on_window_size_changed)
-
-    def _on_window_size_changed(self, *args):
-        """Handle window size changes and control sidebar accordingly."""
-        # Cancel previous timeout if exists
-        if self._resize_timeout_id:
-            GLib.source_remove(self._resize_timeout_id)
-        
-        # Debounce: wait 150ms before applying changes
-        self._resize_timeout_id = GLib.timeout_add(150, self._apply_responsive_sidebar)
-        
-    def _apply_responsive_sidebar(self):
-        """Actually apply the responsive sidebar changes after debounce."""
-        self._resize_timeout_id = None
-        
-        try:
-            width = self.get_width()
-            
-            # Prevent unnecessary updates for small changes
-            if abs(width - self._last_width) < 10:
-                return False
-            self._last_width = width
-            
-            is_narrow = width < 768
-            
-            # Only update if state actually changed
-            if is_narrow == self._last_was_narrow:
-                return False
-            
-            # Store previous state
-            was_narrow = self._last_was_narrow
-            self._last_was_narrow = is_narrow
-            
-            if self._responsive_enabled and self.book and self.book_path:
-                # Reading mode: responsive sidebar based on width
-                if is_narrow:
-                    # Going from wide to narrow: preserve current sidebar visibility
-                    if was_narrow is False:  # Only if we were previously wide
-                        try:
-                            # Check if sidebar is currently hidden
-                            if not self.split.get_show_sidebar():
-                                self._user_hid_sidebar = True
-                        except:
-                            pass
-                    # Collapse to overlay mode
-                    self.split.set_collapsed(True)
-                else:
-                    # Going from narrow to wide
-                    self.split.set_collapsed(False)
-                    # Apply user preference
-                    if not self._user_hid_sidebar:
-                        self.split.set_show_sidebar(True)
-                    else:
-                        self.split.set_show_sidebar(False)
-            else:
-                # Library mode: always hide sidebar
-                if self._last_was_narrow is not None:
-                    self.split.set_collapsed(False)
-                    self.split.set_show_sidebar(False)
-        except Exception as e:
-            print(f"Error in apply responsive sidebar: {e}")
-        
-        return False  # Don't repeat timeout
-
-#############################
-    def _setup_responsive_sidebar(self):
-        """Setup responsive behavior for sidebar when reading a book."""
         self._responsive_enabled = False
         self._last_width = 0
         self._last_was_narrow = None
@@ -1458,68 +927,46 @@ class EPubViewer(Adw.ApplicationWindow):
         try:
             new = not self.split.get_show_sidebar()
             self.split.set_show_sidebar(new)
-            
-            # If user manually hides sidebar, disable responsive behavior entirely
             if not new:
                 self._user_hid_sidebar = True
-                print(f"User hid sidebar - disabling responsive behavior")
             else:
-                # User manually showed sidebar - re-enable responsive behavior
                 self._user_hid_sidebar = False
-                print(f"User showed sidebar - enabling responsive behavior")
-                
         except Exception:
             pass
 
     def _on_window_size_changed(self, *args):
-        """Handle window size changes and control sidebar accordingly."""
         try:
-            # If user has manually hidden sidebar, do nothing
             if self._user_hid_sidebar:
                 return
-            
             width = self.get_width()
-            
-            # Prevent unnecessary updates for small changes
             if abs(width - self._last_width) < 10:
                 return
             self._last_width = width
-            
             is_narrow = width < 768
-            
-            # Only update if state actually changed
             if is_narrow == self._last_was_narrow:
                 return
-            
             self._last_was_narrow = is_narrow
-            
             if self._responsive_enabled and self.book and self.book_path:
-                # Reading mode: responsive sidebar based on width
                 if is_narrow:
-                    # Going narrow: collapse to overlay
                     self.split.set_collapsed(True)
                 else:
-                    # Going wide: show sidebar side-by-side
                     self.split.set_collapsed(False)
                     self.split.set_show_sidebar(True)
             else:
-                # Library mode: always hide sidebar
                 if self._last_was_narrow is not None:
                     self.split.set_collapsed(False)
                     self.split.set_show_sidebar(False)
         except Exception as e:
             print(f"Error in window size handler: {e}")
-
+            
+            
     def _enable_responsive_sidebar(self):
-        """Enable responsive sidebar behavior (only when reading)."""
         self._responsive_enabled = True
         self._last_was_narrow = None
-        self._user_hid_sidebar = False  # Reset when loading new book
-        # Apply current size immediately
+        self._user_hid_sidebar = False
         self._on_window_size_changed()
 
     def _disable_responsive_sidebar(self):
-        """Disable responsive sidebar behavior (when in library)."""
         self._responsive_enabled = False
         self._last_was_narrow = None
         self._user_hid_sidebar = False
@@ -1529,7 +976,7 @@ class EPubViewer(Adw.ApplicationWindow):
         except Exception as e:
             print(f"Error disabling responsive sidebar: {e}")
 
-    # ---- TOC setup/bind (kept mostly) ----
+    # ---- TOC setup/bind ----
     def _toc_on_setup(self, factory, list_item):
         wrapper = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0); hbox.set_hexpand(True)
@@ -1695,7 +1142,7 @@ class EPubViewer(Adw.ApplicationWindow):
         except Exception:
             pass
 
-    # ---- canonical href registration (added lowercase ops/oebps variants) ----
+    # ---- canonical href registration ----
     def _register_href_variants(self, node: TocItem):
         if not node or not getattr(node, "href", None):
             return
@@ -1744,19 +1191,220 @@ class EPubViewer(Adw.ApplicationWindow):
 
     # ---- helper: wrapper that injects CSS & base ----
     def _wrap_html(self, raw_html, base_uri):
+        """
+        Wrap EPUB HTML so:
+          - multi-column mode keeps columns inside viewport (no vertical scrolling),
+          - single-column mode allows vertical scrolling,
+          - mouse wheel scroll moves one column when columns > 1,
+          - PageUp/PageDown move one column,
+          - snaps to column boundaries on load/resize.
+        """
         page_css = (self.css_content or "") + "\n" + THEME_INJECTION_CSS
+
+        try:
+            if self.column_mode_use_width:
+                col_decl = "column-width: {}px; -webkit-column-width: {}px;".format(self.column_width_px, self.column_width_px)
+            else:
+                col_decl = "column-count: {}; -webkit-column-count: {};".format(self.column_count, self.column_count)
+
+            gap_decl = "column-gap: {}px; -webkit-column-gap: {}px;".format(self._column_gap, self._column_gap)
+            fill_decl = "column-fill: auto; -webkit-column-fill: auto;"
+
+            col_rules = (
+                "/* Reset nested column rules from EPUB CSS to avoid N×N behavior */\n"
+                ".ebook-content * {\n"
+                "  -webkit-column-count: unset !important;\n"
+                "  column-count: unset !important;\n"
+                "  -webkit-column-width: unset !important;\n"
+                "  column-width: unset !important;\n"
+                "  -webkit-column-gap: unset !important;\n"
+                "  column-gap: unset !important;\n"
+                "  -webkit-column-fill: unset !important;\n"
+                "  column-fill: unset !important;\n"
+                "}\n"
+                "html, body { height: 100%; min-height: 100%; margin: 0; padding: 0; overflow-x: hidden; }\n"
+                ".ebook-content {\n"
+            ) + "  " + col_decl + " " + gap_decl + " " + fill_decl + "\n" + (
+                "  height: 100vh !important;     /* lock to viewport height for multi-column */\n"
+                "  min-height: 0 !important;\n"
+                "  overflow-y: hidden !important; /* prevent vertical scroll when multiple columns */\n"
+                "  box-sizing: border-box !important;\n"
+                "  padding: 12px; /* gentle padding so text doesn't stick to edges */\n"
+                "}\n"
+                "/* Single-column mode: allow normal vertical flow and scrolling */\n"
+                ".single-column .ebook-content {\n"
+                "  height: auto !important;\n"
+                "  overflow-y: auto !important;\n"
+                "  -webkit-column-width: unset !important;\n"
+                "  column-width: unset !important;\n"
+                "  -webkit-column-count: unset !important;\n"
+                "  column-count: unset !important;\n"
+                "}\n"
+                ".ebook-content img, .ebook-content svg { max-width: 100%; height: auto; }\n"
+            )
+
+            page_css = col_rules + page_css
+        except Exception:
+            pass
+
+        js_template = """
+        <script>
+        (function() {
+          const GAP = __GAP__;
+          function getComputedNumberStyle(el, propNames) {
+            const cs = window.getComputedStyle(el);
+            for (let p of propNames) {
+              const v = cs.getPropertyValue(p);
+              if (v && v.trim()) return v.trim();
+            }
+            return '';
+          }
+          function effectiveColumns(el) {
+            try {
+              let cc = parseInt(getComputedNumberStyle(el, ['column-count','-webkit-column-count']) || 0, 10);
+              if (!isNaN(cc) && cc > 0 && cc !== Infinity) return cc;
+              let cwRaw = getComputedNumberStyle(el, ['column-width','-webkit-column-width']);
+              let cw = parseFloat(cwRaw);
+              if (!isNaN(cw) && cw > 0) {
+                let available = Math.max(1, el.clientWidth);
+                let approx = Math.floor(available / (cw + (GAP||0)));
+                return Math.max(1, approx);
+              }
+              return 1;
+            } catch(e) { return 1; }
+          }
+
+          function columnStep(el) {
+            const cs = window.getComputedStyle(el);
+            const cwRaw = cs.getPropertyValue('column-width') || cs.getPropertyValue('-webkit-column-width') || '';
+            const cw = parseFloat(cwRaw) || (el.clientWidth);
+            const gapRaw = cs.getPropertyValue('column-gap') || cs.getPropertyValue('-webkit-column-gap') || (GAP + 'px');
+            const gap = parseFloat(gapRaw) || GAP;
+            const cols = effectiveColumns(el);
+            let step = cw;
+            if (!cwRaw || cwRaw === '' || cw === el.clientWidth) {
+              step = Math.max(1, Math.floor((el.clientWidth - Math.max(0, (cols-1)*gap)) / cols));
+            }
+            return step + gap;
+          }
+
+          function snapToNearestColumn() {
+            const cont = document.querySelector('.ebook-content');
+            if (!cont) return;
+            const step = columnStep(cont);
+            const cur = window.scrollX || window.pageXOffset || document.documentElement.scrollLeft || 0;
+            const target = Math.round(cur / step) * step;
+            window.scrollTo({ left: target, top: 0, behavior: 'smooth' });
+          }
+
+          function goByColumn(delta) {
+            const cont = document.querySelector('.ebook-content');
+            if (!cont) return;
+            const step = columnStep(cont);
+            const cur = window.scrollX || window.pageXOffset || document.documentElement.scrollLeft || 0;
+            const target = Math.max(0, cur + (delta>0 ? step : -step));
+            window.scrollTo({ left: target, top: 0, behavior: 'smooth' });
+          }
+
+          function onWheel(e) {
+            const cont = document.querySelector('.ebook-content');
+            if (!cont) return;
+            const cols = effectiveColumns(cont);
+            if (cols <= 1) return;
+            if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+              e.preventDefault();
+              const dir = e.deltaY > 0 ? 1 : -1;
+              goByColumn(dir);
+            } else {
+              if (Math.abs(e.deltaX) > 0) {
+                e.preventDefault();
+                const dir = e.deltaX > 0 ? 1 : -1;
+                goByColumn(dir);
+              }
+            }
+          }
+
+          function onKey(e) {
+            const cont = document.querySelector('.ebook-content');
+            if (!cont) return;
+            const cols = effectiveColumns(cont);
+            if (cols <= 1) return;
+            if (e.code === 'PageDown') {
+              e.preventDefault(); goByColumn(1);
+            } else if (e.code === 'PageUp') {
+              e.preventDefault(); goByColumn(-1);
+            } else if (e.code === 'Home') {
+              e.preventDefault(); window.scrollTo({ left: 0, top: 0, behavior: 'smooth' });
+            } else if (e.code === 'End') {
+              e.preventDefault();
+              const step = columnStep(cont);
+              const max = document.documentElement.scrollWidth - window.innerWidth;
+              window.scrollTo({ left: max, top: 0, behavior: 'smooth' });
+            }
+          }
+
+          let rTO = null;
+          function onResize() {
+            if (rTO) clearTimeout(rTO);
+            rTO = setTimeout(function() {
+              updateMode();
+              snapToNearestColumn();
+              rTO = null;
+            }, 120);
+          }
+
+          function updateMode() {
+            const c = document.querySelector('.ebook-content');
+            if (!c) return;
+            const cols = effectiveColumns(c);
+            if (cols <= 1) {
+              document.documentElement.classList.add('single-column');
+              document.body.classList.add('single-column');
+              window.scrollTo({ left: 0, top: 0 });
+            } else {
+              document.documentElement.classList.remove('single-column');
+              document.body.classList.remove('single-column');
+              snapToNearestColumn();
+            }
+          }
+
+          document.addEventListener('DOMContentLoaded', function() {
+            try {
+              updateMode();
+              window.addEventListener('wheel', onWheel, { passive: false, capture: false });
+              window.addEventListener('keydown', onKey, false);
+              window.addEventListener('resize', onResize);
+              setTimeout(updateMode, 250);
+              setTimeout(snapToNearestColumn, 450);
+            } catch(e) { console.error('column scripts error', e); }
+          });
+        })();
+        </script>
+        """
+
+        js_detect_columns = js_template.replace("__GAP__", str(self._column_gap))
+
         link_intercept_script = """
         <script> (function(){ function updateDarkMode(){ if(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches){document.documentElement.classList.add('dark-mode');document.body.classList.add('dark-mode');}else{document.documentElement.classList.remove('dark-mode');document.body.classList.remove('dark-mode');}} updateDarkMode(); if(window.matchMedia){window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateDarkMode);} function interceptLinks(){document.addEventListener('click', function(e){var target=e.target; while(target && target.tagName!=='A'){target=target.parentElement;if(!target||target===document.body) break;} if(target && target.tagName==='A' && target.href){var href=target.href; e.preventDefault(); e.stopPropagation(); try{window.location.href=href;}catch(err){console.error('[js] navigation error:', err);} return false;} }, true);} if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded', interceptLinks);} else {interceptLinks();}})(); </script>
         """
+
         base_tag = ""
         try:
             if base_uri:
-                base_tag = f'<base href="{base_uri}"/>'
+                base_tag = '<base href="{}"/>'.format(base_uri)
         except Exception:
             base_tag = ""
-        head = f"""<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><meta name="color-scheme" content="light dark"/>{base_tag}<style>{page_css}</style>{link_intercept_script}"""
-        wrapped = f"<!DOCTYPE html><html><head>{head}</head><body>{raw_html}</body></html>"
+
+        head = (
+            '<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>'
+            '<meta name="color-scheme" content="light dark"/>' + base_tag +
+            '<style>' + page_css + '</style>' +
+            link_intercept_script + js_detect_columns
+        )
+
+        wrapped = "<!DOCTYPE html><html><head>{}</head><body><div class=\"ebook-content\">{}</div></body></html>".format(head, raw_html)
         return wrapped
+
 
     # ---- file dialog ----
     def open_file(self, *_):
@@ -1789,10 +1437,14 @@ class EPubViewer(Adw.ApplicationWindow):
             self.content_sidebar_toggle.set_sensitive(True)
             self._sidebar_img.set_from_icon_name("sidebar-show-symbolic")
             self.content_sidebar_toggle.set_tooltip_text("Show/Hide sidebar")
-            # hide library-specific controls while reading
             try:
                 self.open_btn.set_visible(False)
                 self.search_toggle_btn.set_visible(False)
+            except Exception:
+                pass
+            # show columns menu in reading mode
+            try:
+                self.columns_menu_button.set_visible(True)
             except Exception:
                 pass
         except Exception:
@@ -1800,7 +1452,6 @@ class EPubViewer(Adw.ApplicationWindow):
 
     # ---- cover detection (kept) ----
     def _find_cover_via_opf(self, extracted_paths, image_names, image_basenames):
-        # Use case-insensitive map for matching extracted paths
         if not self.temp_dir:
             return None, None
         lc_map = {p.lower(): p for p in (extracted_paths or [])}
@@ -1852,7 +1503,6 @@ class EPubViewer(Adw.ApplicationWindow):
                 if os.path.exists(candidate_abs): return candidate_abs, None
                 if os.path.exists(candidate_abs2): return candidate_abs2, None
                 for v in variants:
-                    # case-insensitive check using lc_map
                     found = lc_map.get(v.lower())
                     if found:
                         abs_p = os.path.abspath(os.path.join(self.temp_dir, found)); return abs_p, None
@@ -1908,14 +1558,11 @@ class EPubViewer(Adw.ApplicationWindow):
                 self.items = docs
             if not self.items:
                 self.show_error("No document items found in EPUB"); return
-            # Adding this to ensure breakpoint is active for reading mode:
             try:
                 if self.reading_breakpoint and not self.reading_breakpoint.get_condition():
-                    # Re-enable breakpoint for reading
-                    pass  # Already added in __init__, but ensure it's active
+                    pass
             except Exception:
                 pass
-            # extract
             self.temp_dir = tempfile.mkdtemp()
             extracted_paths = set()
             try:
@@ -1937,7 +1584,6 @@ class EPubViewer(Adw.ApplicationWindow):
                 except OSError:
                     continue
 
-            # create case-insensitive map for lookups used by cover detection and link resolution
             self._extracted_paths_map = {p.lower(): p for p in extracted_paths}
 
             image_items = list(self.book.get_items_of_type(ebooklib.ITEM_IMAGE))
@@ -1951,7 +1597,6 @@ class EPubViewer(Adw.ApplicationWindow):
             self.item_map = {it.get_name(): it for it in self.items}
             self.extract_css()
 
-            # metadata
             title = APP_NAME; author = ""
             try:
                 meta = self.book.get_metadata("DC", "title");
@@ -1963,7 +1608,6 @@ class EPubViewer(Adw.ApplicationWindow):
             self.book_title.set_text(title); self.book_author.set_text(author)
             self.content_title_label.set_text(title); self.set_title(title or APP_NAME)
 
-            # cover detection + display small sidebar cover
             try:
                 cover_path_to_use = None; cover_item_obj = None
                 cpath, citem = self._find_cover_via_opf(extracted_paths, image_names, image_basenames)
@@ -1993,7 +1637,6 @@ class EPubViewer(Adw.ApplicationWindow):
                                 if not src: continue
                                 src = src.split("#", 1)[0]; src = urllib.parse.unquote(src)
                                 candidate_rel = os.path.normpath(os.path.join(doc_dir, src)).replace("\\", "/")
-                                # try case-insensitive match using extracted_paths map
                                 found = None
                                 if candidate_rel.lower() in self._extracted_paths_map:
                                     found = self._extracted_paths_map[candidate_rel.lower()]
@@ -2054,7 +1697,6 @@ class EPubViewer(Adw.ApplicationWindow):
             except Exception:
                 pass
 
-            # populate TOC and auto-show sidebar if TOC exists
             self._populate_toc_tree()
             try:
                 if getattr(self, "toc_root_store", None) and self.toc_root_store.get_n_items() > 0:
@@ -2083,7 +1725,6 @@ class EPubViewer(Adw.ApplicationWindow):
         if normalized.startswith("..") or os.path.isabs(normalized): return None
         if ".." in normalized.split(os.sep): return None
         return normalized
-
 
     def _populate_toc_tree(self):
         def href_to_index(href):
@@ -2141,8 +1782,7 @@ class EPubViewer(Adw.ApplicationWindow):
                         text_tag = np.find("text"); content_tag = np.find("content")
                         title = text_tag.get_text(strip=True) if text_tag else ""
                         href = content_tag["src"] if content_tag and content_tag.has_attr("src") else ""
-                        node = add_node(title or os.path.basename(href), href
- or "", parent_store)
+                        node = add_node(title or os.path.basename(href), href or "", parent_store)
                         walk_navpoints(np, node.children)
                 navmap = soup.find("navMap")
                 if navmap:
@@ -2479,7 +2119,46 @@ class EPubViewer(Adw.ApplicationWindow):
 class Application(Adw.Application):
     def __init__(self):
         super().__init__(application_id="org.example.EpubViewer")
+        # simple quit
         self.create_action("quit", self.quit, ["<primary>q"])
+
+        # create parameterized actions that call into the active window
+        def _action_wrapper_win(method_name, variant):
+            win = self.props.active_window
+            if not win:
+                wins = self.get_windows() if hasattr(self, "get_windows") else []
+                win = wins[0] if wins else None
+            if not win:
+                return
+            try:
+                # variant is a GLib.Variant when provided
+                if variant is None:
+                    getattr(win, method_name)()
+                else:
+                    # if variant is integer-like, extract
+                    val = None
+                    try:
+                        # works for int parameters
+                        val = int(variant.unpack())
+                    except Exception:
+                        try:
+                            val = variant.unpack()
+                        except Exception:
+                            val = variant
+                    getattr(win, method_name)(val)
+            except Exception:
+                pass
+
+        # set-columns (int)
+        act = Gio.SimpleAction.new("set-columns", GLib.VariantType.new("i"))
+        act.connect("activate", lambda a, v: _action_wrapper_win("set_columns", v))
+        self.add_action(act)
+
+        # set-column-width (int)
+        act2 = Gio.SimpleAction.new("set-column-width", GLib.VariantType.new("i"))
+        act2.connect("activate", lambda a, v: _action_wrapper_win("set_column_width", v))
+        self.add_action(act2)
+
     def do_activate(self):
         win = self.props.active_window
         if not win: win = EPubViewer(self)
@@ -2495,4 +2174,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
