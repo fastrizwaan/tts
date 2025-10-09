@@ -1011,6 +1011,56 @@ class EPubViewer(Adw.ApplicationWindow):
 
             soup = BeautifulSoup(cleaned_html, "html.parser")
 
+            # ----- NORMALIZE DROPCAP / single-letter inline elements -----
+            # Merge <span class="dropcap">I</span> + following text into one text node
+            try:
+                def is_drop_like(tag):
+                    if not getattr(tag, "name", None):
+                        return False
+                    # class contains 'drop' / 'dropcap' etc
+                    if tag.has_attr("class"):
+                        for c in tag.get("class", []):
+                            try:
+                                if "drop" in c.lower():
+                                    return True
+                            except Exception:
+                                continue
+                    # inline style like float:left often used for dropcaps
+                    if tag.has_attr("style") and "float:left" in (tag["style"] or "").replace(" ", "").lower():
+                        return True
+                    return False
+
+                # Handle inline dropcap elements first (span, a, i, b, etc.)
+                for tag in list(soup.find_all(is_drop_like)):
+                    # only act when tag is small (single letter or very short)
+                    try:
+                        txt = tag.get_text(strip=True) or ""
+                        if not txt:
+                            tag.decompose()
+                            continue
+                        if len(txt) <= 3:
+                            nxt = tag.next_sibling
+                            if isinstance(nxt, NavigableString):
+                                # attach without extra space (trim leading space of next)
+                                new = txt + re.sub(r'^\s+', '', str(nxt))
+                                nxt.replace_with(new)
+                                tag.decompose()
+                            else:
+                                # no direct text sibling: replace tag with its text (unwrap)
+                                tag.replace_with(txt)
+                        else:
+                            # longer element that happens to have 'drop' class: unwrap to keep text continuity
+                            tag.replace_with(txt)
+                    except Exception:
+                        try:
+                            tag.replace_with(tag.get_text(separator=' ', strip=True) or "")
+                        except Exception:
+                            try: tag.decompose()
+                            except Exception: pass
+            except Exception:
+                pass
+            # ----- end dropcap normalization -----
+
             # Block-level tags that should create sentence boundaries
             block_tags = {'h1','h2','h3','h4','h5','h6','p','div','li',
                           'blockquote','td','th','section','article','header',
@@ -1074,6 +1124,7 @@ class EPubViewer(Adw.ApplicationWindow):
         except Exception as e:
             print(f"Error collecting sentences: {e}")
             return []
+
 
 
     def _split_text_into_sentences(self, text):
