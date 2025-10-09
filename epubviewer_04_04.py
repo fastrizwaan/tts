@@ -1130,10 +1130,9 @@ class EPubViewer(Adw.ApplicationWindow):
 
     def _ensure_sentence_wrapping_and_start(self, sentences):
         """
-        Inject sentence wrappers into the webview DOM using Range APIs so inline markup
-        (including <br/>, <i>, entities, etc.) is preserved. Falls back to text-node
-        manipulations only if Range surround fails.
-        Starts TTS after wrappers applied.
+        Wrap sentences into the webview DOM. Uses a single global text concat + cursor
+        so repeated short strings (e.g. "Why?") match in the reading order rather than
+        jumping to a later identical occurrence.
         """
         try:
             if not getattr(self, "webview", None):
@@ -1147,7 +1146,6 @@ class EPubViewer(Adw.ApplicationWindow):
             import json, traceback
             from bs4 import BeautifulSoup
 
-            # build snippets from cleaned HTML so snippet mapping equals displayed DOM
             snippets = []
             try:
                 raw_html = ""
@@ -1194,7 +1192,6 @@ class EPubViewer(Adw.ApplicationWindow):
 
             snippets_json = json.dumps(snippets)
 
-            # JS: use Range to surround matching text (preserves <br>, inline tags, entities)
             js = """
             (function(){
               try {
@@ -1208,13 +1205,12 @@ class EPubViewer(Adw.ApplicationWindow):
                   document.head.appendChild(st);
                 }
 
-                // unwrap previous wraps (restore text nodes/elements)
+                // unwrap previous wraps
                 (function(){
                   try {
                     var olds = cont.querySelectorAll('.tts-sentence');
                     olds.forEach(function(e){
                       var parent = e.parentNode;
-                      // move children out then remove element
                       while(e.firstChild) parent.insertBefore(e.firstChild, e);
                       parent.removeChild(e);
                     });
@@ -1223,15 +1219,11 @@ class EPubViewer(Adw.ApplicationWindow):
 
                 var data = %s;
 
-                function walkTextNodes(root){
+                // build global text concat + mapping once
+                function buildGlobalMapping(root){
                   var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
                   var nodes = [], n = walker.nextNode();
                   while(n){ nodes.push(n); n = walker.nextNode(); }
-                  return nodes;
-                }
-
-                function findSequenceIndices(root, needle){
-                  var nodes = walkTextNodes(root);
                   var concat = '', mapping = [];
                   for(var i=0;i<nodes.length;i++){
                     var txt = nodes[i].nodeValue || '';
@@ -1239,14 +1231,24 @@ class EPubViewer(Adw.ApplicationWindow):
                     concat += txt;
                     mapping.push({node: nodes[i], start: start, end: concat.length});
                   }
-                  var idx = concat.indexOf(needle);
-                  if(idx === -1){
-                    // normalized whitespace fallback
+                  return {concat: concat, mapping: mapping};
+                }
+
+                var global = buildGlobalMapping(cont);
+                var concat = global.concat;
+                var mapping = global.mapping;
+                var lastPos = 0;
+
+                function findInGlobal(needle, startPos){
+                  if(!needle) return null;
+                  var idx = concat.indexOf(needle, startPos);
+                  if(idx === -1) {
+                    // normalized fallback
                     var normConcat = concat.replace(/\\s+/g,' ').trim();
                     var normNeedle = needle.replace(/\\s+/g,' ').trim();
                     var nidx = normConcat.indexOf(normNeedle);
                     if(nidx !== -1){
-                      // try find by first word roughly
+                      // try to map norm position to raw concat by searching first word
                       var first = normNeedle.split(' ')[0];
                       var r = new RegExp(first.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&'));
                       var m = r.exec(concat);
@@ -1254,17 +1256,30 @@ class EPubViewer(Adw.ApplicationWindow):
                     }
                   }
                   if(idx === -1) return null;
+                  // find startNode/endNode
                   var startNode=null,endNode=null,startOffset=0,endOffset=0;
                   for(var i=0;i<mapping.length;i++){
                     if(mapping[i].start <= idx && mapping[i].end > idx){
                       startNode = mapping[i].node; startOffset = idx - mapping[i].start;
                     }
                     if(mapping[i].start < idx + needle.length && mapping[i].end >= idx + needle.length){
-                      endNode = mapping[i].node; endOffset = idx + needle.length - mapping[i].start; break;
+                      endNode = mapping[i].node; endOffset = idx + needle.length - mapping[i].start;
+                      break;
                     }
                   }
                   if(!startNode || !endNode) return null;
-                  return {startNode:startNode, startOffset:startOffset, endNode:endNode, endOffset:endOffset};
+                  return {startNode:startNode, startOffset:startOffset, endNode:endNode, endOffset:endOffset, index: idx};
+                }
+
+                function isDescendant(candidate, node){
+                  try {
+                    var p=node;
+                    while(p){
+                      if(p === candidate) return true;
+                      p = p.parentNode;
+                    }
+                    return false;
+                  } catch(e){ return false; }
                 }
 
                 function surroundRange(root, startNode, startOffset, endNode, endOffset, sid){
@@ -1279,83 +1294,140 @@ class EPubViewer(Adw.ApplicationWindow):
                       range.surroundContents(span);
                       return true;
                     } catch(e){
-                      // surroundContents can fail if range splits non-text nodes; fallback to extractContents
                       try {
                         var frag = range.extractContents();
                         span.appendChild(frag);
                         range.insertNode(span);
                         return true;
                       } catch(err){
-                        console.log('[TTS-DBG] surround/extract failed', err);
                         return false;
                       }
                     }
                   } catch(e){
-                    console.log('[TTS-DBG] surroundRange error', e);
                     return false;
                   }
                 }
 
-                function wrapUsingSnippet(snippet, text, sid){
-                  if(!snippet) return false;
-                  // find an element whose outerHTML contains snippet (smallest)
-                  var els = Array.from(cont.querySelectorAll('*')).filter(function(el){
-                    try { return el.outerHTML && el.outerHTML.indexOf(snippet) !== -1; } catch(e){ return false; }
-                  }).sort(function(a,b){ return a.outerHTML.length - b.outerHTML.length; });
-                  if(!els.length) return false;
-                  var target = els[0];
-                  var idx = target.innerText.indexOf(text);
-                  if(idx >= 0){
-                    // try to map by searching within target
-                    var res = findSequenceIndices(target, text);
-                    if(res) return surroundRange(target, res.startNode, res.startOffset, res.endNode, res.endOffset, sid);
-                  }
-                  // fallback: try mapping within snippet plain text -> html positions
-                  var snippetPlain = snippet.replace(/<[^>]+>/g,'').replace(/&nbsp;/g,' ');
-                  var rel = snippetPlain.indexOf(text);
-                  if(rel === -1){
-                    // try normalized
-                    rel = snippetPlain.replace(/\\s+/g,' ').trim().indexOf(text.replace(/\\s+/g,' ').trim());
-                    if(rel === -1) return false;
-                  }
-                  // best-effort: search for first matching chunk in target's text nodes
-                  var res2 = findSequenceIndices(target, text);
-                  if(res2) return surroundRange(target, res2.startNode, res2.startOffset, res2.endNode, res2.endOffset, sid);
-                  return false;
-                }
-
                 var applied = 0;
+
                 data.forEach(function(entry){
                   try {
                     var sid = entry.sid;
                     var text = (entry.text||'').toString().trim();
                     var snippet = entry.snippet || null;
                     var ok = false;
-                    if(snippet && text){
-                      ok = wrapUsingSnippet(snippet, text, sid);
-                    }
-                    if(!ok && text){
-                      var res = findSequenceIndices(cont, text);
-                      if(res) ok = surroundRange(cont, res.startNode, res.startOffset, res.endNode, res.endOffset, sid);
-                    }
-                    if(!ok && text){
-                      // last-resort: simple string replace on HTML (keeps tags outside replacement)
-                      var h = cont.innerHTML;
-                      var pos = h.indexOf(text);
-                      if(pos !== -1){
-                        cont.innerHTML = h.slice(0,pos) + '<span class=\"tts-sentence\" data-sid=\"' + sid + '\">' + text + '</span>' + h.slice(pos+text.length);
+                    if(!text) return;
+
+                    // 1) Try a global ordered match starting at lastPos
+                    var found = findInGlobal(text, lastPos);
+                    if(found){
+                      if(surroundRange(cont, found.startNode, found.startOffset, found.endNode, found.endOffset, sid)){
                         ok = true;
+                        lastPos = found.index + text.length;
+                        applied++;
+                        // update global mapping since DOM changed: rebuild and continue
+                        global = buildGlobalMapping(cont);
+                        concat = global.concat; mapping = global.mapping;
+                        return;
+                      }
+                    }
+
+                    // 2) If global failed, try snippet-local candidates but ensure mapped node is descendant
+                    if(snippet){
+                      var els = Array.from(cont.querySelectorAll('*')).filter(function(el){
+                        try { return el.outerHTML && el.outerHTML.indexOf(snippet) !== -1; } catch(e){ return false; }
+                      }).sort(function(a,b){ return a.outerHTML.length - b.outerHTML.length; });
+
+                      for(var ci=0; ci<els.length && !ok; ci++){
+                        var cand = els[ci];
+                        // try find text occurrence in global concat at or after lastPos whose node is descendant of cand
+                        var searchIdx = concat.indexOf(text, lastPos);
+                        while(searchIdx !== -1){
+                          // map searchIdx -> node
+                          var mapped = null;
+                          for(var mi=0; mi<mapping.length; mi++){
+                            if(mapping[mi].start <= searchIdx && mapping[mi].end > searchIdx){
+                              // compute mapping for full length
+                              var endPos = searchIdx + text.length;
+                              // ensure endPos maps inside mapping array
+                              for(var mj=mi; mj<mapping.length; mj++){
+                                if(mapping[mj].end >= endPos){
+                                  mapped = {
+                                    startNode: mapping[mi].node,
+                                    startOffset: searchIdx - mapping[mi].start,
+                                    endNode: mapping[mj].node,
+                                    endOffset: endPos - mapping[mj].start,
+                                    index: searchIdx
+                                  };
+                                  break;
+                                }
+                              }
+                              break;
+                            }
+                          }
+                          if(mapped){
+                            // ensure startNode or its ancestor is inside candidate element
+                            if(isDescendant(cand, mapped.startNode) || isDescendant(cand, mapped.endNode)){
+                              if(surroundRange(cont, mapped.startNode, mapped.startOffset, mapped.endNode, mapped.endOffset, sid)){
+                                ok = true;
+                                lastPos = mapped.index + text.length;
+                                applied++;
+                                // rebuild mapping after DOM change
+                                global = buildGlobalMapping(cont);
+                                concat = global.concat; mapping = global.mapping;
+                                break;
+                              }
+                            }
+                          }
+                          // try next occurrence of text in concat
+                          searchIdx = concat.indexOf(text, searchIdx+1);
+                        }
+                      }
+                    }
+
+                    if(!ok){
+                      // 3) try multi-node sequence mapping inside cont with normalized fallback
+                      var seq = findInGlobal(text, lastPos);
+                      if(seq){
+                        if(surroundRange(cont, seq.startNode, seq.startOffset, seq.endNode, seq.endOffset, sid)){
+                          ok = true;
+                          lastPos = seq.index + text.length;
+                          applied++;
+                          global = buildGlobalMapping(cont);
+                          concat = global.concat; mapping = global.mapping;
+                        }
+                      }
+                    }
+
+                    if(!ok){
+                      // 4) last-resort: replace first occurrence in innerHTML at/after lastPos by scanning innerHTML slice
+                      var h = cont.innerHTML;
+                      // search in HTML string but attempt to limit to area near lastPos by slicing
+                      var startSearchHtml = Math.max(0, lastPos - 200);
+                      var slice = h.slice(startSearchHtml);
+                      var pos = slice.indexOf(text);
+                      if(pos !== -1){
+                        var realPos = startSearchHtml + pos;
+                        cont.innerHTML = h.slice(0, realPos) + '<span class="tts-sentence" data-sid="' + sid + '">' + text + '</span>' + h.slice(realPos + text.length);
+                        ok = true;
+                        lastPos += text.length;
+                        applied++;
+                        global = buildGlobalMapping(cont);
+                        concat = global.concat; mapping = global.mapping;
                       } else {
                         // relaxed ellipsis mapping
                         var alt = text.replace(/\\u2026/g,'...').replace(/…/g,'...');
                         var aidx = h.indexOf(alt);
                         if(aidx !== -1){
-                          cont.innerHTML = h.slice(0,aidx) + '<span class=\"tts-sentence\" data-sid=\"' + sid + '\">' + alt + '</span>' + h.slice(aidx+alt.length);
+                          cont.innerHTML = h.slice(0,aidx) + '<span class="tts-sentence" data-sid="' + sid + '">' + alt + '</span>' + h.slice(aidx+alt.length);
                           ok = true;
+                          applied++;
+                          global = buildGlobalMapping(cont);
+                          concat = global.concat; mapping = global.mapping;
                         }
                       }
                     }
-                    if(ok) applied++;
+
                   } catch(e){
                     console.log('[TTS-DBG] per-entry error', e);
                   }
@@ -1380,8 +1452,8 @@ class EPubViewer(Adw.ApplicationWindow):
                 print("[TTS] html-snippet wrapper injection error:", e)
                 traceback.print_exc()
 
-            # give DOM a short moment then start TTS
-            GLib.timeout_add(350, lambda: (self.tts.speak_sentences_list(
+            # start TTS after short delay so wrappers apply in order
+            GLib.timeout_add(250, lambda: (self.tts.speak_sentences_list(
                 sentences,
                 highlight_callback=self._on_tts_highlight,
                 finished_callback=self._on_tts_finished
