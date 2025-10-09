@@ -1512,7 +1512,7 @@ class EPubViewer(Adw.ApplicationWindow):
 
 
     def _on_tts_highlight(self, idx, meta):
-        """Highlight the sentence being spoken + debug-print fragment text vs synth text."""
+        """Highlight the sentence being spoken. Fast data-sid path + robust word-sequence fallback."""
         if not self.webview:
             return
 
@@ -1527,19 +1527,19 @@ class EPubViewer(Adw.ApplicationWindow):
             if sid is None:
                 sid = idx
 
-            # Print synthesizing sentence in Python log (truncate to keep output readable)
+            # debug synth text
             synth_text = ""
             try:
                 if isinstance(meta, dict):
-                    synth_text = (meta.get("text") or "")[:600]
+                    synth_text = (meta.get("text") or "")[:1200]
                 else:
-                    synth_text = str(meta or "")[:600]
+                    synth_text = str(meta or "")[:1200]
             except Exception:
                 synth_text = ""
             print(f"[TTS-debug] synth sid={sid!r} text={synth_text!r}")
 
-            # If clearing highlight
-            if sid is None or sid < 0:
+            # clear highlight
+            if sid is None or (isinstance(sid, int) and sid < 0):
                 js_clear = """(function(){
                   document.querySelectorAll('.tts-highlight').forEach(e => e.classList.remove('tts-highlight'));
                   console.log('[TTS-Debug] clear highlights');
@@ -1547,28 +1547,105 @@ class EPubViewer(Adw.ApplicationWindow):
                 try:
                     self.webview.evaluate_javascript(js_clear, -1, None, None, None, None, None)
                 except Exception:
-                    try: self.webview.run_javascript(js_clear, None, None, None)
-                    except Exception: pass
+                    try:
+                        self.webview.run_javascript(js_clear, None, None, None)
+                    except Exception:
+                        pass
                 return
 
-            # Highlight & also log the combined fragment text for this sid so you can compare
+            import json
+            safe_text = synth_text or ""
+
+            # JS: try data-sid, else fallback to robust word-sequence search & wrap
             js = f"""(function(){{
               try {{
-                // clear previous
                 document.querySelectorAll('.tts-highlight').forEach(e => e.classList.remove('tts-highlight'));
-                var fr = Array.from(document.querySelectorAll('[data-sid="{sid}"]'));
-                if(!fr || fr.length === 0) {{
-                  console.log('[TTS-Debug] No fragments for sid={sid}');
-                }} else {{
-                  // build concatenated normalized text
-                  var txt = fr.map(function(e){{ return (e.textContent||'').replace(/\\s+/g,' ').trim(); }}).join(' ');
-                  console.log('[TTS-Debug] sid={sid} fragments=\"' + txt + '\"');
-                  // apply highlight class and scroll first into view
+                var sid = "{sid}";
+                var fr = Array.from(document.querySelectorAll('[data-sid=\"{sid}\"]'));
+                if(fr && fr.length) {{
                   fr.forEach(function(e,i){{ e.classList.add('tts-highlight'); if(i===0) e.scrollIntoView({{behavior:'smooth', block:'center'}}); }});
+                  return;
                 }}
-              }} catch(err) {{
-                console.log('[TTS-Debug] highlight error', err);
-              }}
+
+                var text = {json.dumps(safe_text)};
+                if(!text) {{
+                  console.log('[TTS-Debug] no synth text for fallback sid=' + sid);
+                  return;
+                }}
+                var needle = text.replace(/\\s+/g,' ').trim();
+                if(!needle) return;
+
+                function escapeRe(s) {{ return s.replace(/[.*+?^${{}}()|[\\]\\\\]/g,'\\\\$&'); }}
+
+                // build plain concat of all text nodes and mapping to nodes
+                var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                var nodes = [], n = walker.nextNode();
+                while(n){{ nodes.push(n); n = walker.nextNode(); }}
+                var concat = '', mapping = [];
+                for(var i=0;i<nodes.length;i++){{ var t = nodes[i].nodeValue || ''; var start = concat.length; concat += t; mapping.push({{node: nodes[i], start: start, end: concat.length}}); }}
+
+                // try direct substring first
+                var idx = concat.indexOf(needle);
+                var matchLen = needle.length;
+                if(idx === -1) {{
+                  // build word-sequence regex from needle to match across tags/punct
+                  var words = needle.match(/\\w+/g);
+                  if(words && words.length) {{
+                    var re = new RegExp(words.map(escapeRe).join('\\\\W+'), 'i');
+                    var m = re.exec(concat);
+                    if(m) {{ idx = m.index; matchLen = m[0].length; }}
+                  }}
+                }}
+
+                if(idx === -1) {{
+                  // try normalized concat (collapse whitespace) search
+                  var normConcat = concat.replace(/\\s+/g,' ').trim();
+                  var normNeedle = needle.replace(/\\s+/g,' ').trim();
+                  var nidx = normConcat.toLowerCase().indexOf(normNeedle.toLowerCase());
+                  if(nidx !== -1) {{
+                    // map norm position to approx raw concat by finding first word
+                    var first = normNeedle.split(' ')[0];
+                    var r = new RegExp(escapeRe(first),'i');
+                    var m = r.exec(concat);
+                    if(m) idx = m.index;
+                  }}
+                }}
+
+                if(idx === -1) {{
+                  console.log('[TTS-Debug] fallback not found for sid=' + sid + ' needle=\"' + needle.slice(0,120) + '\"');
+                  return;
+                }}
+
+                // map idx..idx+matchLen to startNode/endNode
+                var startNode=null,endNode=null,startOffset=0,endOffset=0;
+                var endPos = idx + matchLen;
+                for(var i=0;i<mapping.length;i++){{ 
+                  if(mapping[i].start <= idx && mapping[i].end > idx){{ startNode = mapping[i].node; startOffset = idx - mapping[i].start; }} 
+                  if(mapping[i].start < endPos && mapping[i].end >= endPos){{ endNode = mapping[i].node; endOffset = endPos - mapping[i].start; break; }} 
+                }}
+                if(!startNode || !endNode) {{
+                  console.log('[TTS-Debug] mapping failed for sid=' + sid);
+                  return;
+                }}
+
+                try {{
+                  var range = document.createRange();
+                  range.setStart(startNode, Math.max(0,startOffset));
+                  range.setEnd(endNode, Math.max(0,endOffset));
+                  var span = document.createElement('span');
+                  span.className = 'tts-sentence tts-highlight';
+                  span.dataset.sid = sid;
+                  try {{ range.surroundContents(span); }} catch(e) {{
+                    var frag = range.extractContents();
+                    span.appendChild(frag);
+                    range.insertNode(span);
+                  }}
+                  span.scrollIntoView({{behavior:'smooth', block:'center'}});
+                  console.log('[TTS-Debug] fallback wrapped sid=' + sid);
+                }} catch(e) {{
+                  console.log('[TTS-Debug] wrap error', e);
+                }}
+              }} catch(err) {{ console.log('[TTS-Debug] highlight error', err); }}
             }})();"""
 
             try:
@@ -1581,7 +1658,6 @@ class EPubViewer(Adw.ApplicationWindow):
 
         except Exception as e:
             print(f"[TTS] Highlight callback error: {e}")
-
 
 
     def _on_tts_finished(self):
