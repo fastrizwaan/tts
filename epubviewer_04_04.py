@@ -9,7 +9,8 @@ import cairo
 
 import ebooklib
 from ebooklib import epub
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag, ProcessingInstruction, element, Comment
+import re
 
 import zipfile, pathlib
 import threading, time, tempfile as _tempfile
@@ -924,7 +925,10 @@ class EPubViewer(Adw.ApplicationWindow):
             self.WebKit = WebKit
             self.webview = WebKit.WebView()
             self.scrolled.set_child(self.webview)
-            try: self.webview.connect("decide-policy", self.on_decide_policy)
+            try: 
+                self.webview.connect("decide-policy", self.on_decide_policy)
+                self.webview.connect("console-message", self._on_webconsole_message)
+
             except Exception: pass
         except Exception:
             self.WebKit = None
@@ -989,12 +993,23 @@ class EPubViewer(Adw.ApplicationWindow):
 
     def _collect_sentences_for_current_item(self):
         """Return list of {'sid': idx, 'text': sentence} for the current item.
-        Extracts sentences respecting HTML block structure."""
+        Extracts sentences from the sanitized/cleaned HTML so TTS and highlighting match."""
         if not self.book or not self.items or self.current_index >= len(self.items):
             return []
         item = self.items[self.current_index]
         try:
-            soup = BeautifulSoup(item.get_content(), "html.parser")
+            raw = ""
+            try:
+                raw = item.get_content() or ""
+            except Exception:
+                raw = ""
+            # use the same sanitizer so sentence extraction matches displayed DOM
+            try:
+                cleaned_html = self.generic_clean_html(raw)
+            except Exception:
+                cleaned_html = raw
+
+            soup = BeautifulSoup(cleaned_html, "html.parser")
 
             # Block-level tags that should create sentence boundaries
             block_tags = {'h1','h2','h3','h4','h5','h6','p','div','li',
@@ -1029,7 +1044,7 @@ class EPubViewer(Adw.ApplicationWindow):
                         block_sentences = self._split_text_into_sentences(block_text)
                         sentences.extend(block_sentences)
 
-                    # Recurse into nested block elements only (they will contribute their own blocks)
+                    # Recurse into nested block elements only
                     for child in element.children:
                         if isinstance(child, Tag) and child.name in block_tags:
                             extract_sentences_from_element(child)
@@ -1039,7 +1054,6 @@ class EPubViewer(Adw.ApplicationWindow):
                         if isinstance(child, Tag):
                             extract_sentences_from_element(child)
                         elif isinstance(child, NavigableString):
-                            # In rare cases where body contains loose text outside blocks
                             txt = str(child).strip()
                             if txt:
                                 block_sentences = self._split_text_into_sentences(txt)
@@ -1060,6 +1074,7 @@ class EPubViewer(Adw.ApplicationWindow):
         except Exception as e:
             print(f"Error collecting sentences: {e}")
             return []
+
 
     def _split_text_into_sentences(self, text):
         """Split text into sentences using regex."""
@@ -1114,179 +1129,268 @@ class EPubViewer(Adw.ApplicationWindow):
 
 
     def _ensure_sentence_wrapping_and_start(self, sentences):
-        """Wrap sentences using HTML-snippet matching (falls back to simple text-node wrapping)."""
-        if not self.webview:
-            self.tts.speak_sentences_list(
-                sentences,
-                highlight_callback=self._on_tts_highlight,
-                finished_callback=self._on_tts_finished
-            )
-            return False
-
-        import json, traceback
-        from bs4 import BeautifulSoup, Tag, NavigableString
-
-        # Build snippet list from current item's raw HTML if available
-        snippets = []
+        """
+        Inject sentence wrappers into the webview DOM using Range APIs so inline markup
+        (including <br/>, <i>, entities, etc.) is preserved. Falls back to text-node
+        manipulations only if Range surround fails.
+        Starts TTS after wrappers applied.
+        """
         try:
-            raw_html = ""
+            if not getattr(self, "webview", None):
+                self.tts.speak_sentences_list(
+                    sentences,
+                    highlight_callback=self._on_tts_highlight,
+                    finished_callback=self._on_tts_finished
+                )
+                return False
+
+            import json, traceback
+            from bs4 import BeautifulSoup
+
+            # build snippets from cleaned HTML so snippet mapping equals displayed DOM
+            snippets = []
             try:
-                item = self.items[self.current_index]
-                raw_html = item.get_content() or ""
-            except Exception:
                 raw_html = ""
-            soup = BeautifulSoup(raw_html, "html.parser")
-            # prefer block-level tags that contain the sentence
-            block_tags = ['p','div','li','section','article','blockquote','td','th','h1','h2','h3','h4','h5','h6']
-            for s_idx, s in enumerate(sentences):
-                st = s["text"] if isinstance(s, dict) else str(s)
-                st_norm = " ".join(st.split())
-                found_html = None
-                # find the deepest element whose text contains the sentence
-                if soup and st_norm:
-                    candidates = []
-                    for tag in soup.find_all(block_tags):
-                        try:
-                            txt = " ".join(tag.get_text(" ", strip=True).split())
-                            if txt and st_norm in txt:
-                                candidates.append((len(txt), tag))
-                        except Exception:
-                            pass
-                    if candidates:
-                        # pick smallest containing block (deeper / more local)
-                        candidates.sort(key=lambda x: x[0])
-                        tag = candidates[0][1]
-                        try:
-                            found_html = str(tag)
-                        except Exception:
-                            found_html = None
-                if not found_html:
-                    # fallback: use sentence text only
+                try:
+                    item = self.items[self.current_index]
+                    raw_html = item.get_content() or ""
+                except Exception:
+                    raw_html = ""
+                try:
+                    cleaned_raw_html = self.generic_clean_html(raw_html)
+                except Exception:
+                    cleaned_raw_html = raw_html
+                soup = BeautifulSoup(cleaned_raw_html, "html.parser")
+
+                block_tags = ['p','div','li','section','article','blockquote',
+                              'td','th','h1','h2','h3','h4','h5','h6']
+
+                for s_idx, s in enumerate(sentences):
+                    st = s["text"] if isinstance(s, dict) else str(s)
+                    st_norm = " ".join(st.split())
                     found_html = None
-                snippets.append({
-                    "sid": s_idx,
-                    "text": st,
-                    "snippet": found_html
-                })
-        except Exception as e:
-            print("[TTS] build-snippets error:", e)
-            traceback.print_exc()
-            # fallback: empty snippets with text only
-            for i, s in enumerate(sentences):
-                snippets.append({"sid": i, "text": s.get("text") if isinstance(s, dict) else str(s), "snippet": None})
+                    if soup and st_norm:
+                        candidates = []
+                        for tag in soup.find_all(block_tags):
+                            try:
+                                txt = " ".join(tag.get_text(" ", strip=True).split())
+                                if txt and st_norm in txt:
+                                    candidates.append((len(txt), tag))
+                            except Exception:
+                                continue
+                        if candidates:
+                            candidates.sort(key=lambda x: x[0])
+                            tag = candidates[0][1]
+                            try:
+                                found_html = str(tag)
+                            except Exception:
+                                found_html = None
+                    snippets.append({"sid": s_idx, "text": st, "snippet": found_html})
+            except Exception as e:
+                print("[TTS] build-snippets error:", e)
+                traceback.print_exc()
+                for i, s in enumerate(sentences):
+                    snippets.append({"sid": i, "text": s.get("text") if isinstance(s, dict) else str(s), "snippet": None})
 
-        snippets_json = json.dumps(snippets)
+            snippets_json = json.dumps(snippets)
 
-        # JS: try to replace snippet occurrence for each sentence by wrapping the sentence text inside it.
-        # If a snippet is null or replacement fails, fallback to plain text-node wrap for that sentence.
-        js = """
-        (function(){
-          try {
-            var cont = document.querySelector('.ebook-content') || document.body;
-            if(!cont) return;
-            if(!document.querySelector('style[data-tts-style]')) {
-              var st = document.createElement('style');
-              st.dataset.ttsStyle = '1';
-              st.textContent = '.tts-highlight{background:rgba(0,255,0,0.25);border-radius:4px;} .tts-sentence{display:inline;}';
-              document.head.appendChild(st);
-            }
-            // Unwrap any existing .tts-sentence first (conservative)
-            (function(){ try {
-              var olds = cont.querySelectorAll('.tts-sentence');
-              olds.forEach(function(e){ var p = e.parentNode; while(e.firstChild) p.insertBefore(e.firstChild, e); e.remove(); });
-            } catch(e) { console.log('[TTS] pre-unwrap error', e); } })();
-
-            var data = %s;
-            var html = cont.innerHTML;
-            var applied = 0;
-            data.forEach(function(entry){
+            # JS: use Range to surround matching text (preserves <br>, inline tags, entities)
+            js = """
+            (function(){
               try {
-                var sid = entry.sid;
-                var text = entry.text || '';
-                var snippet = entry.snippet || null;
-                var ok = false;
-                if(snippet) {
-                  // try to find the snippet in the container HTML
-                  var idx = html.indexOf(snippet);
-                  if(idx !== -1) {
-                    // within the snippet string, find the first plain occurrence of the sentence text
-                    var relPos = snippet.indexOf(text);
-                    if(relPos !== -1) {
-                      // build wrapped snippet (escape replacement once)
-                      var before = snippet.slice(0, relPos);
-                      var inside = snippet.slice(relPos, relPos + text.length);
-                      var after = snippet.slice(relPos + text.length);
-                      var wrapped = before + '<span class="tts-sentence" data-sid="' + sid + '">' + inside + '</span>' + after;
-                      // replace only first occurrence of snippet in html
-                      html = html.slice(0, idx) + wrapped + html.slice(idx + snippet.length);
-                      ok = true;
-                    } else {
-                      // sentence text not a plain substring inside snippet; try normalized match (collapse spaces)
-                      var normSnippet = snippet.replace(/\\s+/g,' ').replace(/&nbsp;/g,' ').trim();
-                      var normText = text.replace(/\\s+/g,' ').replace(/&nbsp;/g,' ').trim();
-                      var nidx = normSnippet.indexOf(normText);
-                      if(nidx !== -1) {
-                        // best-effort: find approximate slice by searching for first word
-                        var firstWord = normText.split(' ')[0];
-                        var rx = new RegExp(firstWord.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&'));
-                        var m = rx.exec(snippet);
-                        if(m) {
-                          var start = m.index;
-                          var end = Math.min(start + normText.length, snippet.length);
-                          var inside2 = snippet.slice(start, end);
-                          var wrapped2 = snippet.slice(0,start) + '<span class="tts-sentence" data-sid="' + sid + '">' + inside2 + '</span>' + snippet.slice(end);
-                          html = html.slice(0, idx) + wrapped2 + html.slice(idx + snippet.length);
+                var cont = document.querySelector('.ebook-content') || document.body;
+                if(!cont) { console.log('[TTS-DBG] no content container'); return; }
+
+                if(!document.querySelector('style[data-tts-style]')) {
+                  var st = document.createElement('style');
+                  st.dataset.ttsStyle = '1';
+                  st.textContent = '.tts-highlight{background:rgba(0,200,0,0.14);border-radius:4px;} .tts-sentence{display:inline;}';
+                  document.head.appendChild(st);
+                }
+
+                // unwrap previous wraps (restore text nodes/elements)
+                (function(){
+                  try {
+                    var olds = cont.querySelectorAll('.tts-sentence');
+                    olds.forEach(function(e){
+                      var parent = e.parentNode;
+                      // move children out then remove element
+                      while(e.firstChild) parent.insertBefore(e.firstChild, e);
+                      parent.removeChild(e);
+                    });
+                  } catch(e){ console.log('[TTS-DBG] pre-unwrap error', e); }
+                })();
+
+                var data = %s;
+
+                function walkTextNodes(root){
+                  var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+                  var nodes = [], n = walker.nextNode();
+                  while(n){ nodes.push(n); n = walker.nextNode(); }
+                  return nodes;
+                }
+
+                function findSequenceIndices(root, needle){
+                  var nodes = walkTextNodes(root);
+                  var concat = '', mapping = [];
+                  for(var i=0;i<nodes.length;i++){
+                    var txt = nodes[i].nodeValue || '';
+                    var start = concat.length;
+                    concat += txt;
+                    mapping.push({node: nodes[i], start: start, end: concat.length});
+                  }
+                  var idx = concat.indexOf(needle);
+                  if(idx === -1){
+                    // normalized whitespace fallback
+                    var normConcat = concat.replace(/\\s+/g,' ').trim();
+                    var normNeedle = needle.replace(/\\s+/g,' ').trim();
+                    var nidx = normConcat.indexOf(normNeedle);
+                    if(nidx !== -1){
+                      // try find by first word roughly
+                      var first = normNeedle.split(' ')[0];
+                      var r = new RegExp(first.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&'));
+                      var m = r.exec(concat);
+                      if(m) idx = m.index;
+                    }
+                  }
+                  if(idx === -1) return null;
+                  var startNode=null,endNode=null,startOffset=0,endOffset=0;
+                  for(var i=0;i<mapping.length;i++){
+                    if(mapping[i].start <= idx && mapping[i].end > idx){
+                      startNode = mapping[i].node; startOffset = idx - mapping[i].start;
+                    }
+                    if(mapping[i].start < idx + needle.length && mapping[i].end >= idx + needle.length){
+                      endNode = mapping[i].node; endOffset = idx + needle.length - mapping[i].start; break;
+                    }
+                  }
+                  if(!startNode || !endNode) return null;
+                  return {startNode:startNode, startOffset:startOffset, endNode:endNode, endOffset:endOffset};
+                }
+
+                function surroundRange(root, startNode, startOffset, endNode, endOffset, sid){
+                  try {
+                    var range = document.createRange();
+                    range.setStart(startNode, startOffset);
+                    range.setEnd(endNode, endOffset);
+                    var span = document.createElement('span');
+                    span.className = 'tts-sentence';
+                    span.dataset.sid = sid;
+                    try {
+                      range.surroundContents(span);
+                      return true;
+                    } catch(e){
+                      // surroundContents can fail if range splits non-text nodes; fallback to extractContents
+                      try {
+                        var frag = range.extractContents();
+                        span.appendChild(frag);
+                        range.insertNode(span);
+                        return true;
+                      } catch(err){
+                        console.log('[TTS-DBG] surround/extract failed', err);
+                        return false;
+                      }
+                    }
+                  } catch(e){
+                    console.log('[TTS-DBG] surroundRange error', e);
+                    return false;
+                  }
+                }
+
+                function wrapUsingSnippet(snippet, text, sid){
+                  if(!snippet) return false;
+                  // find an element whose outerHTML contains snippet (smallest)
+                  var els = Array.from(cont.querySelectorAll('*')).filter(function(el){
+                    try { return el.outerHTML && el.outerHTML.indexOf(snippet) !== -1; } catch(e){ return false; }
+                  }).sort(function(a,b){ return a.outerHTML.length - b.outerHTML.length; });
+                  if(!els.length) return false;
+                  var target = els[0];
+                  var idx = target.innerText.indexOf(text);
+                  if(idx >= 0){
+                    // try to map by searching within target
+                    var res = findSequenceIndices(target, text);
+                    if(res) return surroundRange(target, res.startNode, res.startOffset, res.endNode, res.endOffset, sid);
+                  }
+                  // fallback: try mapping within snippet plain text -> html positions
+                  var snippetPlain = snippet.replace(/<[^>]+>/g,'').replace(/&nbsp;/g,' ');
+                  var rel = snippetPlain.indexOf(text);
+                  if(rel === -1){
+                    // try normalized
+                    rel = snippetPlain.replace(/\\s+/g,' ').trim().indexOf(text.replace(/\\s+/g,' ').trim());
+                    if(rel === -1) return false;
+                  }
+                  // best-effort: search for first matching chunk in target's text nodes
+                  var res2 = findSequenceIndices(target, text);
+                  if(res2) return surroundRange(target, res2.startNode, res2.startOffset, res2.endNode, res2.endOffset, sid);
+                  return false;
+                }
+
+                var applied = 0;
+                data.forEach(function(entry){
+                  try {
+                    var sid = entry.sid;
+                    var text = (entry.text||'').toString().trim();
+                    var snippet = entry.snippet || null;
+                    var ok = false;
+                    if(snippet && text){
+                      ok = wrapUsingSnippet(snippet, text, sid);
+                    }
+                    if(!ok && text){
+                      var res = findSequenceIndices(cont, text);
+                      if(res) ok = surroundRange(cont, res.startNode, res.startOffset, res.endNode, res.endOffset, sid);
+                    }
+                    if(!ok && text){
+                      // last-resort: simple string replace on HTML (keeps tags outside replacement)
+                      var h = cont.innerHTML;
+                      var pos = h.indexOf(text);
+                      if(pos !== -1){
+                        cont.innerHTML = h.slice(0,pos) + '<span class=\"tts-sentence\" data-sid=\"' + sid + '\">' + text + '</span>' + h.slice(pos+text.length);
+                        ok = true;
+                      } else {
+                        // relaxed ellipsis mapping
+                        var alt = text.replace(/\\u2026/g,'...').replace(/…/g,'...');
+                        var aidx = h.indexOf(alt);
+                        if(aidx !== -1){
+                          cont.innerHTML = h.slice(0,aidx) + '<span class=\"tts-sentence\" data-sid=\"' + sid + '\">' + alt + '</span>' + h.slice(aidx+alt.length);
                           ok = true;
                         }
                       }
                     }
+                    if(ok) applied++;
+                  } catch(e){
+                    console.log('[TTS-DBG] per-entry error', e);
                   }
-                }
-                if(!ok) {
-                  // fallback: simple first-textnode replacement: replace first plain text occurrence in the container
-                  var safeText = text.trim();
-                  if(safeText) {
-                    // naive replace of first occurrence in HTML string of the exact text (may break tags if spans occur inside)
-                    var eidx = html.indexOf(safeText);
-                    if(eidx !== -1) {
-                      html = html.slice(0, eidx) + '<span class="tts-sentence" data-sid="' + sid + '">' + safeText + '</span>' + html.slice(eidx + safeText.length);
-                      ok = true;
-                    }
-                  }
-                }
-                if(ok) applied++;
-              } catch(e) {
-                console.log('[TTS] snippet apply error', e);
+                });
+
+                console.log('[TTS-DBG] applied wraps=', applied);
+              } catch(e){
+                console.log('[TTS-DBG] wrapper fatal error', e);
               }
-            });
-            // set new html once
-            cont.innerHTML = html;
-            console.log('[TTS] html-snippet wrapping applied', applied);
-          } catch(e) {
-            console.log('[TTS] html-snippet wrapper error', e);
-          }
-        })();
-        """ % snippets_json
+            })();
+            """ % snippets_json
 
-        try:
             try:
-                self.webview.evaluate_javascript(js, -1, None, None, None, None, None)
-            except Exception:
                 try:
-                    self.webview.run_javascript(js, None, None, None)
+                    self.webview.evaluate_javascript(js, -1, None, None, None, None, None)
                 except Exception:
-                    pass
-        except Exception as e:
-            print("[TTS] html-snippet wrapper injection error:", e)
-            traceback.print_exc()
+                    try:
+                        self.webview.run_javascript(js, None, None, None)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print("[TTS] html-snippet wrapper injection error:", e)
+                traceback.print_exc()
 
-        # start TTS after brief delay
-        GLib.timeout_add(350, lambda: (self.tts.speak_sentences_list(
-            sentences,
-            highlight_callback=self._on_tts_highlight,
-            finished_callback=self._on_tts_finished
-        ), False)[1])
-        return False
+            # give DOM a short moment then start TTS
+            GLib.timeout_add(350, lambda: (self.tts.speak_sentences_list(
+                sentences,
+                highlight_callback=self._on_tts_highlight,
+                finished_callback=self._on_tts_finished
+            ), False)[1])
+
+            return False
+        except Exception as e:
+            print("[TTS] _ensure_sentence_wrapping_and_start fatal:", e)
+            return False
 
 
     def _on_tts_highlight(self, idx, meta):
@@ -2454,6 +2558,7 @@ class EPubViewer(Adw.ApplicationWindow):
                 pass
             self.temp_dir = tempfile.mkdtemp()
             extracted_paths = set()
+            print(f"extracted_paths = {self.temp_dir}")
             try:
                 with zipfile.ZipFile(path, "r") as z:
                     z.extractall(self.temp_dir)
@@ -2821,41 +2926,342 @@ class EPubViewer(Adw.ApplicationWindow):
                 print(f"Error loading HTML file {file_path}: {e}"); return False
         return False
 
-    def display_page(self, fragment=None):
-        if not self.book or not self.items or self.current_index >= len(self.items): return
-        if not self.css_content: self.extract_css()
-        item = self.items[self.current_index]
-        if not item or not hasattr(item, 'get_content'): return
+    def display_page(self, index=None, fragment=None):
+        """
+        Show item at self.current_index (or `index` if provided).
+        Clean only the BODY/content fragment (so injected <style>/<head> from _wrap_html
+        is preserved), then wrap and load into the WebView. Fallback to textview if no webview.
+        """
         try:
-            soup = BeautifulSoup(item.get_content(), "html.parser")
-            for tag in soup.find_all(['style', 'link']): tag.decompose()
+            if index is not None:
+                self.current_index = index
+
+            if not getattr(self, "items", None) or self.current_index is None:
+                return False
+
+            if self.current_index < 0 or self.current_index >= len(self.items):
+                return False
+
+            item = self.items[self.current_index]
+
+            # get raw item content
+            try:
+                raw = item.get_content() or ""
+            except Exception:
+                raw = ""
+
+            # parse and strip dangerous embeds but keep style/link tags
+            soup = BeautifulSoup(raw, "html.parser")
+            for tag in soup.find_all(['script', 'noscript', 'iframe', 'object', 'embed']):
+                tag.decompose()
+
             body = soup.find("body")
             if body:
-                body_attrs = ' '.join([f'{k}="{v}"' if isinstance(v, str) else f'{k}="{" ".join(v)}"' for k, v in body.attrs.items()])
-                if body_attrs:
-                    content = f'<div {body_attrs}>{"".join(str(child) for child in body.children)}</div>'
+                # preserve body attributes if any
+                if body.attrs:
+                    attr_str = " ".join(f'{k}="{v}"' for k, v in body.attrs.items())
+                    content = f'<div {attr_str}>{"".join(str(child) for child in body.children)}</div>'
                 else:
                     content = "".join(str(child) for child in body.children)
             else:
                 content = str(soup)
-            base_uri = f"file://{os.path.join(self.temp_dir or '', os.path.dirname(item.get_name()))}/"
-            wrapped_html = self._wrap_html(content, base_uri)
-            if self.webview:
-                self.webview.load_html(wrapped_html, base_uri)
-                if fragment: GLib.timeout_add(100, lambda: self._scroll_to_fragment(fragment))
-            else:
-                buf = self.textview.get_buffer(); buf.set_text(soup.get_text())
-            total = len(self.items)
-            self.progress.set_fraction((self.current_index + 1) / total)
-            self.progress.set_text(f"{self.current_index + 1}/{total}")
+
+            # base URI for relative resources
             try:
-                for ti in list(self.href_map.values()):
-                    if isinstance(ti, TocItem) and isinstance(ti.index, int) and ti.index == self.current_index:
-                        self._set_toc_selected(ti); break
-            except Exception: pass
-            self._save_progress_for_library()
+                base_path = os.path.join(self.temp_dir or "", os.path.dirname(item.get_name() or ""))
+                base_uri = f"file://{base_path}/"
+            except Exception:
+                base_uri = None
+
+            # sanitize only the content fragment (not the final wrapped HTML)
+            try:
+                cleaned_content = self.generic_clean_html(content)
+            except Exception:
+                cleaned_content = content
+
+            # wrap (this injects CSS/HEAD safely)
+            try:
+                wrapped_html = self._wrap_html(cleaned_content, base_uri)
+            except Exception:
+                # fallback: wrap minimally if _wrap_html fails
+                wrapped_html = f"<!doctype html><html><head></head><body>{cleaned_content}</body></html>"
+
+            # load into webview if present
+            if getattr(self, "webview", None):
+                try:
+                    if base_uri:
+                        self.webview.load_html(wrapped_html, base_uri)
+                    else:
+                        # if base_uri isn't available, pass empty string
+                        self.webview.load_html(wrapped_html, "")
+                    if fragment:
+                        GLib.timeout_add(100, lambda: self._scroll_to_fragment(fragment))
+                except Exception as e:
+                    print("Failed to load webview:", e)
+                    # fallback to plain text view
+                    if getattr(self, "textview", None):
+                        buf = self.textview.get_buffer()
+                        buf.set_text(BeautifulSoup(cleaned_content, "html.parser").get_text())
+            else:
+                # no webview: put plain text into textview
+                if getattr(self, "textview", None):
+                    buf = self.textview.get_buffer()
+                    buf.set_text(BeautifulSoup(cleaned_content, "html.parser").get_text())
+
+            return True
         except Exception as e:
-            print(f"Error displaying page: {e}"); self.show_error(f"Error displaying page: {e}")
+            print("display_page error:", e)
+            return False
+
+
+
+    def generic_clean_html(self, html: str,
+                           allowed_tags=None,
+                           allowed_attrs=None,
+                           remove_processing_instructions=True,
+                           strip_comments=True) -> str:
+        """
+        Generic sanitizer for EPUB XHTML before parsing/rendering/TTS.
+        - conservative allowlist, unwraps disallowed tags (keeps children).
+        - strips disallowed attributes.
+        - removes processing instructions, xml decls, comments, tiny punctuation-only nodes.
+        """
+        if not isinstance(html, str):
+            try:
+                html = html.decode("utf-8", errors="replace")
+            except Exception:
+                html = str(html)
+
+        # 1) quick removals by regex (pre-parse)
+        if remove_processing_instructions:
+            html = re.sub(r'<\?[^>]*\?>', '', html, flags=re.IGNORECASE)
+        html = re.sub(r'dp\s*n="[^"]*"\s*folio="[^"]*"\s*\?*', '', html, flags=re.IGNORECASE)
+        html = re.sub(r'(?m)^[\s\?]{1,8}\n?', '', html)   # remove isolated punctuation-only lines
+        html = html.replace('??', '')
+
+        # 2) parse for structured cleaning
+        soup = BeautifulSoup(html, "lxml")
+
+        # remove ProcessingInstruction nodes if parser exposed them
+        for pi in list(soup.find_all(string=lambda s: isinstance(s, ProcessingInstruction))):
+            pi.extract()
+
+        # remove comments if requested
+        if strip_comments:
+            for c in list(soup.find_all(string=lambda s: isinstance(s, Comment))):
+                c.extract()
+
+        # --- IMPORTANT: fully remove script-like and embed tags so their text doesn't appear ---
+        for bad in soup.find_all(['script', 'noscript', 'iframe', 'object']):
+            bad.decompose()
+
+        # defaults: conservative allowlist (add tags you need)
+        if allowed_tags is None:
+            allowed_tags = {
+                'html','head','body','meta','base','style','link',
+                'div','p','span','br','hr',
+                'h1','h2','h3','h4','h5','h6',
+                'a','img','ul','ol','li','strong','b','em','i','u','sup','sub',
+                'blockquote','pre','code','table','thead','tbody','tr','td','th'
+            }
+        if allowed_attrs is None:
+            allowed_attrs = {
+                'a': ['href', 'title', 'id', 'class', 'data-tts-id', 'data-sid'],
+                'img': ['src', 'alt', 'title', 'width', 'height', 'class'],
+                'link': ['rel', 'href', 'type', 'media', 'as', 'crossorigin'],
+                '*': ['id', 'class', 'style', 'title', 'data-*']
+            }
+
+        # helper to check allowed attrs (supports data-* wildcard)
+        def attr_allowed(tag, attr):
+            if tag in allowed_attrs:
+                allowed = allowed_attrs[tag]
+            else:
+                allowed = allowed_attrs.get('*', [])
+            if attr.startswith('data-'):
+                return any(a.endswith('*') or a == 'data-*' for a in allowed)
+            return attr in allowed
+
+        # remove disallowed tags (unwrap) and strip disallowed attributes
+        for el in list(soup.find_all()):
+            name = getattr(el, 'name', None)
+            if not name:
+                continue
+            name = name.lower()
+            if name not in allowed_tags:
+                # unwrap the tag (keep children)
+                try:
+                    el.unwrap()
+                except Exception:
+                    try:
+                        el.decompose()
+                    except Exception:
+                        pass
+                continue
+            # clean attributes
+            if getattr(el, 'attrs', None):
+                for k in list(el.attrs.keys()):
+                    if not attr_allowed(name, k):
+                        try:
+                            del el.attrs[k]
+                        except KeyError:
+                            pass
+
+        # remove tiny nodes that are only punctuation-artifacts and normalize whitespace
+        for t in list(soup.find_all(string=True)):
+            s = str(t)
+            # remove nodes that are purely a few question marks / whitespace (artifact)
+            if re.fullmatch(r'\s*[\?]{1,4}\s*', s):
+                t.extract()
+                continue
+            # normalize whitespace in text nodes (collapse runs)
+            new = re.sub(r'\s+', ' ', s)
+            if new != s:
+                t.replace_with(new)
+
+        return str(soup)
+
+
+        # helper to check allowed attrs (supports data-* wildcard)
+        def attr_allowed(tag, attr):
+            if tag in allowed_attrs:
+                allowed = allowed_attrs[tag]
+            else:
+                allowed = allowed_attrs.get('*', [])
+            if attr.startswith('data-'):
+                return any(a.endswith('*') or a == 'data-*' for a in allowed)
+            return attr in allowed
+
+        # remove disallowed tags (unwrap) and strip disallowed attributes
+        for el in list(soup.find_all()):
+            name = getattr(el, 'name', None)
+            if not name:
+                continue
+            name = name.lower()
+            if name not in allowed_tags:
+                # unwrap the tag (keep children)
+                try:
+                    el.unwrap()
+                except Exception:
+                    try:
+                        el.decompose()
+                    except Exception:
+                        pass
+                continue
+            # clean attributes
+            if getattr(el, 'attrs', None):
+                for k in list(el.attrs.keys()):
+                    if not attr_allowed(name, k):
+                        try:
+                            del el.attrs[k]
+                        except KeyError:
+                            pass
+
+        # remove tiny nodes that are only punctuation-artifacts and normalize whitespace
+        for t in list(soup.find_all(string=True)):
+            s = str(t)
+            # remove nodes that are purely a few question marks / whitespace (artifact)
+            if re.fullmatch(r'\s*[\?]{1,4}\s*', s):
+                t.extract()
+                continue
+            # normalize whitespace in text nodes (collapse runs)
+            new = re.sub(r'\s+', ' ', s)
+            if new != s:
+                t.replace_with(new)
+
+        return str(soup)
+
+
+        # helper to check allowed attrs (supports data-* wildcard)
+        def attr_allowed(tag, attr):
+            if tag in allowed_attrs:
+                allowed = allowed_attrs[tag]
+            else:
+                allowed = allowed_attrs.get('*', [])
+            if attr.startswith('data-'):
+                return any(a.endswith('*') or a == 'data-*' for a in allowed)
+            return attr in allowed
+
+        # remove disallowed tags (unwrap) and strip disallowed attributes
+        for el in list(soup.find_all()):
+            name = getattr(el, 'name', None)
+            if not name:
+                continue
+            name = name.lower()
+            if name not in allowed_tags:
+                # unwrap the tag (keep children)
+                try:
+                    el.unwrap()
+                except Exception:
+                    try:
+                        el.decompose()
+                    except Exception:
+                        pass
+                continue
+            # clean attributes
+            if getattr(el, 'attrs', None):
+                for k in list(el.attrs.keys()):
+                    if not attr_allowed(name, k):
+                        try:
+                            del el.attrs[k]
+                        except KeyError:
+                            pass
+
+        # remove tiny nodes that are only punctuation-artifacts and normalize whitespace
+        for t in list(soup.find_all(string=True)):
+            s = str(t)
+            # remove nodes that are purely a few question marks / whitespace (artifact)
+            if re.fullmatch(r'\s*[\?]{1,4}\s*', s):
+                t.extract()
+                continue
+            # normalize whitespace in text nodes (collapse runs)
+            new = re.sub(r'\s+', ' ', s)
+            if new != s:
+                t.replace_with(new)
+
+        return str(soup)
+
+
+        # helper: check attr allowed
+        def attr_allowed(tag, attr):
+            if tag in allowed_attrs:
+                allowed = allowed_attrs[tag]
+            else:
+                allowed = allowed_attrs.get('*', [])
+            # allow data-* wildcard
+            if attr.startswith('data-'):
+                return any(a.endswith('*') or a == 'data-*' for a in allowed)
+            return attr in allowed
+
+        # remove disallowed tags and attributes (but keep their children for benign tags)
+        for el in list(soup.find_all()):
+            name = el.name.lower() if getattr(el, 'name', None) else None
+            if not name:
+                continue
+            if name not in allowed_tags:
+                # unwrap: replace tag with its children text / nodes
+                el.unwrap()
+                continue
+            # clean attributes
+            if el.attrs:
+                # iterate copy of keys
+                for k in list(el.attrs.keys()):
+                    if not attr_allowed(name, k):
+                        del el.attrs[k]
+
+        # 3) remove tiny nodes that are just punctuation left over (e.g., '? ?' or '??')
+        for t in list(soup.find_all(string=True)):
+            s = str(t)
+            if re.fullmatch(r'\s*[\?]{1,4}\s*', s):
+                t.extract()
+            else:
+                # normalize whitespace in text nodes
+                new = re.sub(r'\s+', ' ', s)
+                if new != s:
+                    t.replace_with(new)
+
+        return str(soup)
+
 
     def _scroll_to_fragment(self, fragment):
         if self.webview and fragment:
