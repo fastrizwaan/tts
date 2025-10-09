@@ -342,16 +342,16 @@ class TTSEngine:
             print("on_gst_message error:", e)
 
     def split_sentences(self, text):
-        sentences = re.split(r'([.!?]+(?:\s+|$))', text)
-        result = []
-        for i in range(0, len(sentences)-1, 2):
-            sentence = sentences[i] + (sentences[i+1] if i+1 < len(sentences) else '')
-            sentence = sentence.strip()
-            if sentence:
-                result.append(sentence)
-        if len(sentences) % 2 == 1 and sentences[-1].strip():
-            result.append(sentences[-1].strip())
-        return result
+        if not text or not text.strip():
+            return []
+
+        abbreviations = r"(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Mt|vs|etc|Fig|fig|Eq|eq|Dept|No|pp|Rev|Lt|Col|Gen|Sgt|Capt|Sen|Rep|Gov|Pres|Ave|Rd|Blvd|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\."
+        protected = re.sub(abbreviations, lambda m: m.group(0).replace('.', '∯'), text)
+
+        parts = re.split(r'(?<=[.!?])\s+(?=[A-Z0-9"\'])', protected)
+
+        return [p.replace('∯', '.').strip() for p in parts if p.strip()]
+
 
     def synthesize_sentence(self, sentence, voice, speed, lang):
         if not self.kokoro:
@@ -1128,25 +1128,20 @@ class EPubViewer(Adw.ApplicationWindow):
 
 
     def _split_text_into_sentences(self, text):
-        """Split text into sentences using regex."""
+        """Improved sentence splitter ignoring common abbreviations like 'Mr.', 'Dr.' etc."""
         if not text or not text.strip():
             return []
-        
-        # Use regex to split on sentence boundaries
-        sentences = re.split(r'([.!?]+(?:\s+|$))', text)
-        result = []
-        
-        for i in range(0, len(sentences)-1, 2):
-            sentence = sentences[i] + (sentences[i+1] if i+1 < len(sentences) else '')
-            sentence = sentence.strip()
-            if sentence:
-                result.append(sentence)
-        
-        # Handle last odd element
-        if len(sentences) % 2 == 1 and sentences[-1].strip():
-            result.append(sentences[-1].strip())
-        
-        return result
+
+        # Common abbreviations not to end a sentence
+        abbreviations = r"(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Mt|vs|etc|Fig|fig|Eq|eq|Dept|No|pp|Rev|Lt|Col|Gen|Sgt|Capt|Sen|Rep|Gov|Pres|Ave|Rd|Blvd|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\."
+        protected = re.sub(abbreviations, lambda m: m.group(0).replace('.', '∯'), text)
+
+        # Split at real sentence boundaries (., ?, !)
+        parts = re.split(r'(?<=[.!?])\s+(?=[A-Z0-9"\'])', protected)
+
+        sentences = [p.replace('∯', '.').strip() for p in parts if p.strip()]
+        return sentences
+
 
     def _tts_play(self):
         """Start TTS playback from current chapter (safe wrapper + debug)."""
