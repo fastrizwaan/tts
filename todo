@@ -1,0 +1,10 @@
+redesign with:
+
+0. USE basic adw splitbar, need to fix the sidebar
+0.1 use LIBRARY class?
+1. TTSENGINE
+2. ebooklib
+3. snapping from 15_8
+4. loading/toc/tts from 04_04.py
+5. margins etc from 04_08.py
+
