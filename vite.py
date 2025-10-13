@@ -7808,7 +7808,63 @@ class ChromeTab(Gtk.Box):
                 if self.tab_bar and self in self.tab_bar.tabs:
                     tab_index = self.tab_bar.tabs.index(self)
                     # Use GLib.idle_add to close the tab after drag completes
-                    GLib.idle_add(window.close_tab_after_drag, tab_index)
+                GLib.idle_add(window.close_tab_after_drag, tab_index)
+        
+        # If drag was NOT successful (dropped on nothing), check if dropped outside window
+        elif not self.drag_success:
+            # Find the window that owns this tab
+            window = None
+            if self.tab_bar:
+                parent = self.tab_bar.get_parent()
+                while parent:
+                    if isinstance(parent, Adw.ApplicationWindow):
+                        window = parent
+                        break
+                    parent = parent.get_parent()
+            
+            if window:
+                # Get pointer position relative to window
+                # We need the seat and pointer
+                seat = Gdk.Display.get_default().get_default_seat()
+                pointer = seat.get_pointer()
+                
+                # Get window surface and coordinates
+                surface = window.get_surface()
+
+
+        # Re-check logic:
+        # We can use `window.get_pointer()`? No, removed in GTK4.
+        # We can use `surface.get_device_position(device)`.
+        
+        if window:
+                # Get window surface and coordinates
+                surface = window.get_surface()
+                if surface and pointer:
+                    # Check if outside
+                    # On Wayland, get_device_position returns False if pointer is not over surface
+                    found, x, y, mask = surface.get_device_position(pointer)
+                    
+                    is_outside = False
+                    if not found:
+                        is_outside = True
+                    else:
+                        # Even if found, check bounds (in case of grab)
+                        width = window.get_width()
+                        height = window.get_height()
+                        if x < 0 or y < 0 or x > width or y > height:
+                            is_outside = True
+                    
+                    if is_outside:
+                        # It is outside!
+                        # Trigger move to new window
+                        if self.tab_bar and self in self.tab_bar.tabs:
+                            idx = self.tab_bar.tabs.index(self)
+                            # IMPORTANT: idle_add expects False to stop. activate_action returns True!
+                            # So we must wrap it to return False explicitly.
+                            def trigger_move():
+                                window.activate_action('win.tab_move_new_window', GLib.Variant.new_string(str(idx)))
+                                return False
+                            GLib.idle_add(trigger_move)
 
 
 
@@ -8128,6 +8184,9 @@ class ChromeTabBar(Adw.WrapBox):
             # So we append then reorder.
             self.add_tab(dragged_tab)
             
+            # Mark drag as successful so source doesn't try to close it again
+            dragged_tab.drag_success = True
+            
             # Reorder to drop position
             # Note: add_tab puts it at the end, so index is len-1
             current_index = len(self.tabs) - 1
@@ -8208,7 +8267,10 @@ class ChromeTabBar(Adw.WrapBox):
         if current_position != drop_position:
             self.reorder_tab(dragged_tab, drop_position)
         
-        # Hide the drop indicator
+        # Mark drag as successful
+        dragged_tab.drag_success = True
+        
+        # Hide indicator
         self._hide_drop_indicator()
         
         return True
