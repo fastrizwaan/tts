@@ -102,6 +102,9 @@ class EPUBWindow(Adw.ApplicationWindow):
         key_controller.connect("key-pressed", self.on_key_pressed)
         self.add_controller(key_controller)
 
+    def on_scroll_position_changed(self, adjustment):
+        self.update_page_info()
+        self._refresh_buttons_based_on_adjustment()
     # --------------------------------------------------------
     # UI: Toolbar / Controls
     # --------------------------------------------------------
@@ -215,7 +218,8 @@ class EPUBWindow(Adw.ApplicationWindow):
         self.scrolled_window.set_hexpand(True)
 
         # For single-column (vertical) mode, we watch V adjustment
-        self.scrolled_window.get_vadjustment().connect("value-changed", self.update_nav_buttons)
+        self.scrolled_window.get_vadjustment().connect("value-changed", self.on_scroll_position_changed)
+        self.scrolled_window.get_hadjustment().connect("value-changed", self.on_scroll_position_changed)
 
         self.content_box.append(self.scrolled_window)
 
@@ -359,18 +363,44 @@ class EPUBWindow(Adw.ApplicationWindow):
     # --------------------------------------------------------
     def on_webview_load_changed(self, _webview, event):
         if event == WebKit.LoadEvent.FINISHED:
-            self.apply_layout()
-            GLib.timeout_add(100, self.reset_scroll_position)
+            # Reconnect scroll handler
+            if self.scrolled_window:
+                self.h_adjustment = self.scrolled_window.get_hadjustment()
+                if self.h_adjustment:
+                    try:
+                        self.h_adjustment.disconnect_by_func(self.on_scroll_position_changed)
+                    except Exception:
+                        pass
+                    self.h_adjustment.connect("value-changed", self.on_scroll_position_changed)
+            # Apply layout and update navigation
+            GLib.timeout_add(100, self._after_load_update)
 
-    def reset_scroll_position(self):
-        # Vertical scroll reset (for single-column)
-        self.scrolled_window.get_vadjustment().set_value(0)
-        # Horizontal scroll reset (for columns)
-        self.webview.evaluate_javascript(
-            "document.scrollingElement && document.scrollingElement.scrollTo({left:0,behavior:'auto'});",
-            -1, None, None, None
-        )
-        self.update_nav_buttons()
+    def _after_load_update(self):
+        self.apply_layout()
+        self.reset_scroll_position()
+        GLib.timeout_add(100, self.update_nav_buttons)
+        return False
+        # Always reset to the beginning (left/top)
+        is_column_mode = (self.app.columns > 1) or (not self.app.use_fixed_columns)
+        
+        if is_column_mode:
+            # Reset horizontal scroll for column mode
+            js = """
+            (function() {
+                var elem = document.scrollingElement || document.body;
+                if (elem) {
+                    elem.scrollLeft = 0;
+                }
+            })();
+            """
+            self.webview.evaluate_javascript(js, -1, None, None, None)
+        
+        # Reset vertical scroll
+        v_adj = self.scrolled_window.get_vadjustment()
+        if v_adj:
+            v_adj.set_value(0)
+        
+        GLib.timeout_add(100, self.update_nav_buttons)
         return False
 
     # --------------------------------------------------------
@@ -391,6 +421,7 @@ class EPUBWindow(Adw.ApplicationWindow):
 
         if is_column_mode:
             if use_fixed:
+                # Fixed column count: calculate exact width needed
                 col_style = f"column-count: {columns} !important;"
             else:
                 col_style = f"column-width: {col_width}px !important;"
@@ -400,7 +431,8 @@ class EPUBWindow(Adw.ApplicationWindow):
                     margin: 0 !important;
                     padding: 0 !important;
                     height: 100vh !important;
-                    width: 100% !important;
+                    width: 100vw !important;
+                    overflow: hidden !important;
                 }}
                 body {{
                     margin: 0 !important;
@@ -410,20 +442,22 @@ class EPUBWindow(Adw.ApplicationWindow):
                     font-size: {font_size}px !important;
                     line-height: {line_height} !important;
                     height: calc(100vh - {margin * 2}px) !important;
+                    width: 100vw !important;
 
                     {col_style}
                     column-gap: {column_gap}px !important;
                     column-fill: auto !important;
 
-                    overflow-x: scroll !important;
+                    overflow-x: auto !important;
                     overflow-y: hidden !important;
 
                     scroll-snap-type: x mandatory !important;
-                    scroll-padding-left: 0 !important;
-                    scroll-padding-right: 0 !important;
+                    scroll-padding: 0 !important;
                 }}
-                body > * {{
-                    scroll-snap-align: start !important;
+                body::after {{
+                    content: '';
+                    display: block;
+                    scroll-snap-align: end !important;
                 }}
                 /* Apply user font + size universally */
                 * {{
@@ -619,11 +653,20 @@ class EPUBWindow(Adw.ApplicationWindow):
                 const vw = window.innerWidth;
                 const cur = body.scrollLeft;
                 const maxScroll = Math.max(0, body.scrollWidth - vw);
-                let curPage = Math.round(cur / vw);
+                
+                // Calculate column width including gap
+                const cols = {self.app.columns if self.app.use_fixed_columns else 'Math.floor((vw - {self.app.margin * 2}) / ({self.app.column_width} + {self.app.column_gap}))'};
+                const gap = {self.app.column_gap};
+                const contentWidth = vw - {self.app.margin * 2};
+                const colWidth = (contentWidth + gap) / cols;
+                
+                // Snap to nearest column boundary
+                let curPage = Math.round(cur / colWidth);
                 let targetPage = curPage + ({direction});
-                let target = Math.max(0, Math.min(targetPage * vw, maxScroll));
+                let target = Math.max(0, Math.min(targetPage * colWidth, maxScroll));
+                
                 body.scrollTo({{ left: target, behavior: 'smooth' }});
-                return JSON.stringify({{cur, target, maxScroll, vw}});
+                return JSON.stringify({{cur, target, maxScroll, vw, colWidth}});
             }})();
             """
 
@@ -736,25 +779,30 @@ class EPUBWindow(Adw.ApplicationWindow):
             it = self.app.book.get_item_with_id(item_id)
             if it:
                 self.load_href(it.get_name())
-                GLib.timeout_add(200, self.scroll_to_end_of_page)
 
     def scroll_to_end_of_page(self):
         # In column mode, jump to last horizontal page; else go to bottom vertically
         if (self.app.columns > 1) or (not self.app.use_fixed_columns):
-            js = """
-            (function() {
+            js = f"""
+            (function() {{
                 const body = document.scrollingElement || document.body;
                 const vw = window.innerWidth;
+                const cols = {self.app.columns if self.app.use_fixed_columns else 'Math.floor((vw - {self.app.margin * 2}) / ({self.app.column_width} + {self.app.column_gap}))'};
+                const gap = {self.app.column_gap};
+                const contentWidth = vw - {self.app.margin * 2};
+                const colWidth = (contentWidth + gap) / cols;
                 const maxScroll = Math.max(0, body.scrollWidth - vw);
-                const lastPage = Math.floor(maxScroll / vw) * vw;
-                body.scrollTo({ left: lastPage, behavior: 'auto' });
-            })();
+                
+                // Calculate last full column page
+                const lastPage = Math.floor(maxScroll / colWidth) * colWidth;
+                body.scrollTo({{ left: lastPage, behavior: 'auto' }});
+            }})();
             """
             self.webview.evaluate_javascript(js, -1, None, None, None)
         else:
             v = self.scrolled_window.get_vadjustment()
             v.set_value(v.get_upper() - v.get_page_size())
-        self.update_nav_buttons()
+        GLib.timeout_add(100, self.update_nav_buttons)
         return False
 
     # --------------------------------------------------------
@@ -808,4 +856,3 @@ class EPUBWindow(Adw.ApplicationWindow):
 if __name__ == "__main__":
     app = EPUBViewer()
     app.run(sys.argv)
-
