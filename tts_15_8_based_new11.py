@@ -1794,7 +1794,246 @@ class EpubViewer(Adw.ApplicationWindow):
         if not self.tts:
             return
         self.tts.stop()
+###################
+    def _on_sidebar_toggle_complete(self):
+        """Recalculate and update columns after sidebar toggle"""
+        self.sidebar_toggle_timeout_id = None
+        if self.current_book and self.chapters:
+            # First, get the first visible element to use as anchor
+            js_code = """
+            (function() {
+                var viewportLeft = window.pageXOffset || document.documentElement.scrollLeft;
+                var viewportTop = window.pageYOffset || document.documentElement.scrollTop;
+                var viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+                var viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+                
+                // Find first visible span with tts-id
+                var spans = document.querySelectorAll('[data-tts-id]');
+                var anchorId = null;
+                
+                for (var i = 0; i < spans.length; i++) {
+                    var rect = spans[i].getBoundingClientRect();
+                    // Check if element is visible in viewport
+                    if (rect.left >= 0 && rect.left < viewportWidth &&
+                        rect.top >= 0 && rect.top < viewportHeight) {
+                        anchorId = spans[i].getAttribute('data-tts-id');
+                        break;
+                    }
+                }
+                
+                return {
+                    scrollLeft: viewportLeft,
+                    scrollTop: viewportTop,
+                    anchorId: anchorId
+                };
+            })();
+            """
+            self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_sidebar_anchor_found, None)
+        return False
 
+    def _on_sidebar_anchor_found(self, webview, result, user_data):
+        """Store anchor element before reflow"""
+        try:
+            # Try to get the result - format varies by WebKit version
+            js_result = webview.evaluate_javascript_finish(result)
+            # We'll rely on the anchorId being in the DOM after reflow
+            self._sidebar_reflow_anchor = True  # Just flag that we need to restore
+        except Exception as e:
+            print(f"Error getting anchor: {e}")
+            self._sidebar_reflow_anchor = False
+        
+        # Now recalculate and reflow
+        self.calculate_column_dimensions()
+        self._update_column_css_and_restore()
+
+    def _update_column_css_and_restore(self):
+        """Update CSS with scroll restoration"""
+        if self.is_single_column_mode():
+            js_code = """
+            (function() {
+                var body = document.body;
+                if (body) {
+                    body.style.columnCount = '1';
+                    body.style.columnWidth = 'auto';
+                    body.style.columnGap = '0';
+                    body.style.height = 'auto';
+                    body.style.overflowX = 'hidden';
+                    body.style.overflowY = 'auto';
+                }
+            })();
+            """
+        else:
+            if self.column_mode == 'fixed':
+                js_code = f"""
+                (function() {{
+                    var body = document.body;
+                    if (body) {{
+                        body.style.columnCount = '{self.fixed_column_count}';
+                        body.style.columnWidth = 'auto';
+                        body.style.columnGap = '{self.column_gap}px';
+                        body.style.columnFill = 'balance';
+                        body.style.height = 'calc(100vh - {self.column_padding * 2}px)';
+                        body.style.overflowX = 'auto';
+                        body.style.overflowY = 'hidden';
+                    }}
+                }})();
+                """
+            else:
+                js_code = f"""
+                (function() {{
+                    var body = document.body;
+                    if (body) {{
+                        body.style.columnCount = 'auto';
+                        body.style.columnWidth = '{self.actual_column_width}px';
+                        body.style.columnGap = '{self.column_gap}px';
+                        body.style.columnFill = 'balance';
+                        body.style.height = 'calc(100vh - {self.column_padding * 2}px)';
+                        body.style.overflowX = 'auto';
+                        body.style.overflowY = 'hidden';
+                    }}
+                }})();
+                """
+        
+        self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_css_updated_restore_position, None)
+
+    def _on_css_updated_restore_position(self, webview, result, user_data):
+        """After CSS update, restore scroll to anchor element"""
+        # Give browser time to reflow columns
+        GLib.timeout_add(200, self._restore_position_to_anchor)
+
+    def _restore_position_to_anchor(self):
+        """Scroll to the anchor element that was visible before reflow"""
+        if not self._sidebar_reflow_anchor:
+            self._finalize_sidebar_toggle()
+            return False
+        
+        # Find the first visible tts-id element and scroll to it
+        js_code = """
+        (function() {
+            // Find first visible span with tts-id
+            var spans = document.querySelectorAll('[data-tts-id]');
+            if (spans.length === 0) return;
+            
+            // Find the first one that's somewhat in view or just past view
+            var viewportLeft = window.pageXOffset || document.documentElement.scrollLeft;
+            var viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+            
+            var targetSpan = null;
+            var minDistance = Infinity;
+            
+            for (var i = 0; i < spans.length; i++) {
+                var rect = spans[i].getBoundingClientRect();
+                var absLeft = viewportLeft + rect.left;
+                var distance = Math.abs(absLeft - viewportLeft);
+                
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    targetSpan = spans[i];
+                }
+            }
+            
+            if (targetSpan) {
+                var rect = targetSpan.getBoundingClientRect();
+                var elementLeft = viewportLeft + rect.left;
+                
+                // Snap to column containing this element
+                window.scrollTo({ left: Math.max(0, elementLeft - 20), behavior: 'auto' });
+            }
+        })();
+        """
+        
+        self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_position_restored, None)
+        return False
+
+    def _on_position_restored(self, webview, result, user_data):
+        """Finalize after position restoration"""
+        self._sidebar_reflow_anchor = False
+        GLib.timeout_add(50, self._finalize_sidebar_toggle)
+
+    def _finalize_sidebar_toggle(self):
+        """Final updates after sidebar toggle"""
+        self.update_navigation()
+        if self.tts:
+            try:
+                self.tts.reapply_highlight_after_reload()
+            except Exception:
+                pass
+        return False
+
+    def on_window_resize(self, *args):
+        self.calculate_column_dimensions()
+        if self.current_book and self.chapters:
+            if hasattr(self, 'resize_timeout_id') and self.resize_timeout_id:
+                GLib.source_remove(self.resize_timeout_id)
+            # Just reflow, don't reload
+            self.resize_timeout_id = GLib.timeout_add(250, self._delayed_resize_reflow)
+
+    def _delayed_resize_reflow(self):
+        """Reflow columns without reloading content"""
+        self.resize_timeout_id = None
+        if self.current_book and self.chapters:
+            self.calculate_column_dimensions()
+            self._update_column_css()
+            GLib.timeout_add(100, self.update_navigation)
+        return False
+
+    def _update_column_css(self):
+        """Update column CSS dynamically without reloading the page"""
+        if self.is_single_column_mode():
+            js_code = """
+            (function() {
+                var body = document.body;
+                if (body) {
+                    body.style.columnCount = '1';
+                    body.style.columnWidth = 'auto';
+                    body.style.columnGap = '0';
+                    body.style.height = 'auto';
+                    body.style.overflowX = 'hidden';
+                    body.style.overflowY = 'auto';
+                }
+            })();
+            """
+        else:
+            if self.column_mode == 'fixed':
+                js_code = f"""
+                (function() {{
+                    var body = document.body;
+                    if (body) {{
+                        body.style.columnCount = '{self.fixed_column_count}';
+                        body.style.columnWidth = 'auto';
+                        body.style.columnGap = '{self.column_gap}px';
+                        body.style.columnFill = 'balance';
+                        body.style.height = 'calc(100vh - {self.column_padding * 2}px)';
+                        body.style.overflowX = 'auto';
+                        body.style.overflowY = 'hidden';
+                    }}
+                }})();
+                """
+            else:
+                js_code = f"""
+                (function() {{
+                    var body = document.body;
+                    if (body) {{
+                        body.style.columnCount = 'auto';
+                        body.style.columnWidth = '{self.actual_column_width}px';
+                        body.style.columnGap = '{self.column_gap}px';
+                        body.style.columnFill = 'balance';
+                        body.style.height = 'calc(100vh - {self.column_padding * 2}px)';
+                        body.style.overflowX = 'auto';
+                        body.style.overflowY = 'hidden';
+                    }}
+                }})();
+                """
+        
+        self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_css_update_complete, None)
+
+    def _on_css_update_complete(self, webview, result, user_data):
+        """After CSS update, reapply TTS highlight if needed"""
+        try:
+            if self.tts:
+                GLib.timeout_add(100, lambda: self.tts.reapply_highlight_after_reload() or False)
+        except Exception:
+            pass
 # -----------------------
 # App class & main
 # -----------------------
