@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-# Complete EPUB viewer with robust TTS integrated
-# - Synthesizes sentences (including from headings and many tags)
-# - Stable sentence IDs (sha1 of text) so highlighting survives reloads/resizes
-# - Per-sentence synth in a child process so Stop can terminate synthesis
-# - Plays via paplay; pause/resume via SIGSTOP/SIGCONT
-# - Minimal changes to your original navigation/scrolling/snapping logic
 import os, json, tempfile, shutil, re, urllib.parse, signal, sys, math, threading, queue, subprocess, uuid, time, pathlib, hashlib, multiprocessing
 os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
 import gi
@@ -16,11 +10,6 @@ gi.require_version('PangoCairo', '1.0')
 from gi.repository import Gtk, Adw, WebKit, Gio, GLib, Pango
 
 from ebooklib import epub
-import soundfile as sf
-try:
-    from kokoro_onnx import Kokoro
-except Exception:
-    Kokoro = None
 
 Adw.init()
 
@@ -33,407 +22,6 @@ def stable_id_for_text(text):
     """Short stable id for a sentence (sha1 hex truncated)."""
     h = hashlib.sha1(text.encode('utf-8')).hexdigest()
     return h[:12]
-
-# This helper runs inside a subprocess to synthesize a single sentence via Kokoro.
-# It is top-level so it can be pickled by multiprocessing.
-def synth_single_process(model_path, voices_path, text, outpath, voice, speed, lang):
-    try:
-        from kokoro_onnx import Kokoro
-    except Exception as e:
-        print("synth_single_process: Kokoro import failed:", e, file=sys.stderr)
-        return 2
-    try:
-        print(f"[TTS] Synthesizing: {repr(text)}")
-
-        kokoro = Kokoro(model_path, voices_path)
-        samples, sample_rate = kokoro.create(text, voice=voice, speed=speed, lang=lang)
-        sf.write(outpath, samples, sample_rate)
-
-        duration = len(samples) / float(sample_rate) if samples is not None else 0
-        print(f"[TTS] Synthesized -> {outpath} (dur={duration:.2f}s)")
-
-        return 0
-    except Exception as e:
-        print("synth_single_process error:", e, file=sys.stderr)
-        return 3
-
-
-# --- TTS Manager ---
-class TTSManager:
-    """
-    Manages synthesis + playback.
-    - synth_queue: (sid, text)
-    - spawn per-sentence subprocess (synth_single_process) so Stop can kill it
-    - play_queue: (sid, wavpath) consumed by player thread which uses paplay
-    """
-    def __init__(self, webview_getter, base_temp_dir,
-                 kokoro_model_path=None, voices_bin_path=None,
-                 voice="af_sarah", speed=1.0, lang="en-us"):
-        self.get_webview = webview_getter
-        self.base_temp_dir = base_temp_dir
-        self.tts_dir = os.path.join(self.base_temp_dir, "tts")
-        os.makedirs(self.tts_dir, exist_ok=True)
-
-        self.kokoro_model_path = kokoro_model_path or os.environ.get("KOKORO_ONNX_PATH", "/app/share/kokoro-models/kokoro-v1.0.onnx")
-        self.voices_bin_path = voices_bin_path or os.environ.get("KOKORO_VOICES_PATH", "/app/share/kokoro-models/voices-v1.0.bin")
-        self.voice = voice
-        self.speed = speed
-        self.lang = lang
-
-        self.synth_queue = queue.Queue()
-        self.play_queue = queue.Queue()
-
-        self._synth_thread = None
-        self._player_thread = None
-
-        self._stop_event = threading.Event()
-        self._paused = threading.Event()  # when set => paused
-
-        self._current_play_proc = None
-        self._current_synth_proc = None  # multiprocessing.Process for current synth
-        self._threads_running = False
-
-        self.current_chapter_id = None
-        self.current_highlight_id = None
-
-        self._user_set_columns = False
-        self._initial_layout_done = False
-
-        
-        # File cache management - keep track of played files
-        self.played_files = []  # List of (sid, filepath) in play order
-        self.max_cache_files = 5  # Keep last 5 played files
-        self.current_playing_file = None
-
-    def start(self, chapter_id, sentences):
-        # If starting a new chapter, stop previous
-        if self.current_chapter_id != chapter_id:
-            self.stop()
-        self.current_chapter_id = chapter_id
-        # Ensure TTS directory exists before starting synthesis
-        os.makedirs(self.tts_dir, exist_ok=True)
-        self._stop_event.clear()
-        for sid, text in sentences:
-            # ensure non-empty
-            if text and text.strip():
-                self.synth_queue.put((sid, text))
-        if not self._threads_running:
-            self._threads_running = True
-            self._synth_thread = threading.Thread(target=self._synth_worker, name="tts-synth", daemon=True)
-            self._synth_thread.start()
-            self._player_thread = threading.Thread(target=self._player_worker, name="tts-player", daemon=True)
-            self._player_thread.start()
-
-    def pause(self):
-        if self._paused.is_set():
-            return
-        self._paused.set()
-        proc = self._current_play_proc
-        if proc and proc.poll() is None:
-            try:
-                proc.send_signal(signal.SIGSTOP)
-            except Exception:
-                pass
-
-    def resume(self):
-        if not self._paused.is_set():
-            return
-        self._paused.clear()
-        proc = self._current_play_proc
-        if proc and proc.poll() is None:
-            try:
-                proc.send_signal(signal.SIGCONT)
-            except Exception:
-                pass
-
-    def stop(self):
-        # clear flags
-        self._stop_event.set()
-        # clear synth queue
-        try:
-            while not self.synth_queue.empty():
-                self.synth_queue.get_nowait()
-        except Exception:
-            pass
-        # clear play queue and delete queued wavs
-        try:
-            while not self.play_queue.empty():
-                sid, f = self.play_queue.get_nowait()
-                try:
-                    if os.path.exists(f):
-                        os.remove(f)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        # kill current synth subprocess (if running)
-        if self._current_synth_proc:
-            try:
-                self._current_synth_proc.terminate()
-                self._current_synth_proc.join(timeout=0.5)
-                if self._current_synth_proc.is_alive():
-                    self._current_synth_proc.kill()
-                    self._current_synth_proc.join(timeout=0.2)
-            except Exception:
-                pass
-            self._current_synth_proc = None
-        # kill current playback
-        if self._current_play_proc:
-            try:
-                self._current_play_proc.kill()
-            except Exception:
-                pass
-            self._current_play_proc = None
-        # clear highlight in UI
-        self._run_js_clear_highlight()
-        # mark stopped so threads exit
-        self._threads_running = False
-        # wait for threads to actually finish before cleaning up files
-        if self._synth_thread and self._synth_thread.is_alive():
-            try:
-                self._synth_thread.join(timeout=1.0)
-            except Exception:
-                pass
-        if self._player_thread and self._player_thread.is_alive():
-            try:
-                self._player_thread.join(timeout=1.0)
-            except Exception:
-                pass
-        # Clean up all cached files and any remaining TTS files
-        self._clean_cache_files()
-        try:
-            if os.path.exists(self.tts_dir):
-                for fn in os.listdir(self.tts_dir):
-                    if fn.endswith('.wav'):  # Clean up any remaining TTS wav files
-                        fp = os.path.join(self.tts_dir, fn)
-                        try:
-                            os.remove(fp)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        self._paused.clear()
-        self.current_chapter_id = None
-        self.current_highlight_id = None
-
-    def _synth_worker(self):
-        # worker thread: for each sentence, spawn a subprocess to synthesize,
-        # allowing stop() to terminate it immediately.
-        while not self._stop_event.is_set():
-            try:
-                sid, text = self.synth_queue.get(timeout=0.2)
-            except queue.Empty:
-                # idle
-                if self._stop_event.is_set():
-                    break
-                else:
-                    continue
-            # prepare path
-            outname = f"{sid}_{uuid.uuid4().hex[:8]}.wav"
-            outpath = os.path.join(self.tts_dir, outname)
-            # spawn a multiprocessing.Process to run synth_single_process
-            proc = multiprocessing.Process(target=synth_single_process, args=(self.kokoro_model_path, self.voices_bin_path, text, outpath, self.voice, self.speed, self.lang))
-            proc.start()
-            self._current_synth_proc = proc
-            # wait loop, but respond to stop
-            while True:
-                if self._stop_event.is_set():
-                    try:
-                        proc.terminate()
-                    except Exception:
-                        pass
-                    proc.join(timeout=0.2)
-                    break
-                if not proc.is_alive():
-                    proc.join(timeout=0.2)
-                    break
-                time.sleep(0.05)
-            self._current_synth_proc = None
-            # if file created, enqueue for playback
-            if os.path.exists(outpath) and not self._stop_event.is_set():
-                self.play_queue.put((sid, outpath))
-            else:
-                # cleanup if file missing
-                try:
-                    if os.path.exists(outpath):
-                        os.remove(outpath)
-                except Exception:
-                    pass
-        # thread exit
-        return
-
-    def _manage_file_cache(self, new_file_path, sid):
-        """Manage the rolling cache of TTS files - keep current + last 5"""
-        # Add new file to played files list
-        self.played_files.append((sid, new_file_path))
-        
-        # If we exceed the cache limit, remove oldest files
-        while len(self.played_files) > self.max_cache_files:
-            old_sid, old_path = self.played_files.pop(0)  # Remove oldest
-            try:
-                if os.path.exists(old_path) and old_path != self.current_playing_file:
-                    os.remove(old_path)
-            except Exception:
-                pass
-
-    def _clean_cache_files(self):
-        """Clean up all cached TTS files"""
-        for sid, filepath in self.played_files:
-            try:
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-            except Exception:
-                pass
-        self.played_files.clear()
-        self.current_playing_file = None
-
-    def _player_worker(self):
-        while not self._stop_event.is_set() or not self.play_queue.empty():
-            if self._paused.is_set():
-                time.sleep(0.05)
-                continue
-            try:
-                sid, wavpath = self.play_queue.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            
-            # Set current playing file
-            self.current_playing_file = wavpath
-            
-            # highlight in UI
-            self.current_highlight_id = sid
-            self._run_js_highlight(sid)
-            # play via paplay
-            try:
-                proc = subprocess.Popen(["paplay", wavpath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                self._current_play_proc = proc
-                if self._paused.is_set():
-                    try:
-                        proc.send_signal(signal.SIGSTOP)
-                    except Exception:
-                        pass
-                while True:
-                    if self._stop_event.is_set():
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
-                        break
-                    if self._paused.is_set():
-                        time.sleep(0.05)
-                        continue
-                    ret = proc.poll()
-                    if ret is not None:
-                        break
-                    time.sleep(0.05)
-            except Exception as e:
-                print("player error:", e)
-            finally:
-                # un-highlight after played (if not paused)
-                if not self._paused.is_set():
-                    self._run_js_unhighlight(sid)
-                    self.current_highlight_id = None
-                
-                # Add to cache and manage file cleanup AFTER playing
-                if not self._stop_event.is_set():
-                    self._manage_file_cache(wavpath, sid)
-                else:
-                    # If stopped, delete the file immediately
-                    try:
-                        if os.path.exists(wavpath):
-                            os.remove(wavpath)
-                    except Exception:
-                        pass
-                
-                self.current_playing_file = None
-                self._current_play_proc = None
-                self._current_synth_proc = None
-        return
-
-    def is_playing(self):
-        """Check if TTS is currently playing (not stopped and not paused)"""
-        return self._threads_running and not self._stop_event.is_set()
-
-    def is_paused(self):
-        """Check if TTS is currently paused"""
-        return self._paused.is_set() and not self._stop_event.is_set()
-
-    # UI JS helpers
-    def _run_js_highlight(self, sid):
-        webview = self.get_webview()
-        if not webview:
-            return
-        # Use scrollIntoView to snap to left for multi-column layouts
-        js = f"""
-        (function() {{
-            try {{
-                var el = document.querySelector('[data-tts-id="{sid}"]');
-                if (!el) return;
-                // remove previous
-                document.querySelectorAll('.tts-highlight').forEach(function(p){{ p.classList.remove('tts-highlight'); }});
-                el.classList.add('tts-highlight');
-                // For multi-column layouts, snap to left of the column containing the element
-                try {{
-                    var rect = el.getBoundingClientRect();
-                    var viewportWidth = window.innerWidth || document.documentElement.clientWidth;
-                    
-                    // Check if we're in multi-column mode (scrollWidth > clientWidth)
-                    var scrollWidth = document.documentElement.scrollWidth;
-                    var clientWidth = document.documentElement.clientWidth;
-                    
-                    if (scrollWidth > clientWidth) {{
-                        // Multi-column mode - snap to left of containing column
-                        var currentScroll = window.pageXOffset || document.documentElement.scrollLeft;
-                        
-                        // If element is not fully visible, scroll to make it visible at the left
-                        if (rect.left < 0 || rect.right > viewportWidth) {{
-                            var targetScroll = currentScroll + rect.left - 20; // 20px margin from left
-                            window.scrollTo({{ left: Math.max(0, targetScroll), behavior: 'smooth' }});
-                        }}
-                    }} else {{
-                        // Single column mode - center vertically
-                        el.scrollIntoView({{ behavior: 'smooth', block: 'center', inline: 'nearest' }});
-                    }}
-                }} catch(e) {{
-                    console.log('Fallback scroll');
-                    el.scrollIntoView({{ behavior: 'smooth', block: 'nearest', inline: 'start' }});
-                }}
-            }} catch(e){{ console.error('highlight error', e); }}
-        }})();
-        """
-        GLib.idle_add(lambda: webview.evaluate_javascript(js, -1, None, None, None, None, None))
-
-    def _run_js_unhighlight(self, sid):
-        webview = self.get_webview()
-        if not webview:
-            return
-        js = f"""
-        (function() {{
-            try {{
-                var el = document.querySelector('[data-tts-id="{sid}"]');
-                if (el) el.classList.remove('tts-highlight');
-            }} catch(e){{ }}
-        }})();
-        """
-        GLib.idle_add(lambda: webview.evaluate_javascript(js, -1, None, None, None, None, None))
-
-    def _run_js_clear_highlight(self):
-        webview = self.get_webview()
-        if not webview:
-            return
-        js = """
-        (function() {
-            try {
-                document.querySelectorAll('.tts-highlight').forEach(function(p){ p.classList.remove('tts-highlight'); });
-            } catch(e) {}
-        })();
-        """
-        GLib.idle_add(lambda: webview.evaluate_javascript(js, -1, None, None, None, None, None))
-
-    def reapply_highlight_after_reload(self):
-        # Called after chapter reload/resize to reapply highlight if any
-        if self.current_highlight_id:
-            self._run_js_highlight(self.current_highlight_id)
 
 # -----------------------
 # EpubViewer (with TOC sidebar)
@@ -999,32 +587,16 @@ class EpubViewer(Adw.ApplicationWindow):
                 return True
             return False
 
-        # Multi-column navigation
+        # === Multi-column mode ===
         margin_total = self._webview_horizontal_margins()
-        if self.column_mode == 'fixed':
-            column_width = int(self.actual_column_width)
-            column_gap = int(self.column_gap)
-            if keyval in (65361, 65365):  # Left / PageUp
-                js_code = f"""
-                (function() {{
-                    var columnWidth = {column_width};
-                    var columnGap = {column_gap};
-                    var stepSize = columnWidth + columnGap;
-                    var currentScroll = window.pageXOffset || document.documentElement.scrollLeft;
-                    var viewportWidth = window.innerWidth || document.documentElement.clientWidth;
-                    var columnsPerView = Math.floor(viewportWidth / stepSize);
-                    if (columnsPerView < 1) columnsPerView = 1;
-                    var currentColumn = Math.round(currentScroll / stepSize);
-                    var targetColumn = Math.max(0, currentColumn - columnsPerView);
-                    var newScroll = targetColumn * stepSize;
-                    window.scrollTo({{ left: newScroll, behavior: 'smooth' }});
-                    setTimeout(function() {{ window.scrollTo({{ left: newScroll, behavior: 'auto' }}); }}, 400);
-                }})();
-                """
-                self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_js_result, None)
-                return True
-            elif keyval in (65363, 65366):  # Right / PageDown
-                js_code = f"""
+        column_width = int(self.actual_column_width)
+        column_gap = int(self.column_gap)
+        desired_width = int(self.desired_column_width)
+
+        def scroll_js(direction: str, fixed: bool):
+            """Helper to reuse scroll logic from on_scroll_event"""
+            if fixed:
+                return f"""
                 (function() {{
                     var columnWidth = {column_width};
                     var columnGap = {column_gap};
@@ -1035,19 +607,13 @@ class EpubViewer(Adw.ApplicationWindow):
                     var columnsPerView = Math.floor(viewportWidth / stepSize);
                     if (columnsPerView < 1) columnsPerView = 1;
                     var currentColumn = Math.round(currentScroll / stepSize);
-                    var targetColumn = currentColumn + columnsPerView;
-                    var newScroll = Math.min(maxScroll, targetColumn * stepSize);
+                    var targetColumn = { "Math.max(0, currentColumn - 1)" if direction == "left" else "currentColumn + 1" };
+                    var newScroll = { "targetColumn * stepSize" if direction == "left" else "Math.min(maxScroll, targetColumn * stepSize)" };
                     window.scrollTo({{ left: newScroll, behavior: 'smooth' }});
-                    setTimeout(function() {{ window.scrollTo({{ left: newScroll, behavior: 'auto' }}); }}, 400);
                 }})();
                 """
-                self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_js_result, None)
-                return True
-        else:
-            desired_width = int(self.desired_column_width)
-            column_gap = int(self.column_gap)
-            if keyval in (65361, 65365):  # Left / PageUp
-                js_code = f"""
+            else:
+                return f"""
                 (function() {{
                     var desiredColumnWidth = {desired_width};
                     var columnGap = {column_gap};
@@ -1061,15 +627,27 @@ class EpubViewer(Adw.ApplicationWindow):
                     var actualColumnWidth = (availableWidth - totalGapWidth) / actualColumns;
                     var actualStepSize = actualColumnWidth + columnGap;
                     var currentColumn = Math.round(currentScroll / actualStepSize);
-                    var targetColumn = currentColumn + actualColumns;
-                    var newScroll = Math.min(maxScroll, targetColumn * actualStepSize);
+                    var targetColumn = { "Math.max(0, currentColumn - 1)" if direction == "left" else "currentColumn + 1" };
+                    var newScroll = { "targetColumn * actualStepSize" if direction == "left" else "Math.min(maxScroll, targetColumn * actualStepSize)" };
                     window.scrollTo({{ left: newScroll, behavior: 'smooth' }});
-                    setTimeout(function() {{ window.scrollTo({{ left: newScroll, behavior: 'auto' }}); }}, 400);
                 }})();
                 """
-                self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_js_result, None)
-                return True
 
+        # Map Left/Right keys to same logic as scroll
+        if keyval in (65361, 65363):  # ← / →
+            direction = "left" if keyval == 65361 else "right"
+            js_code = scroll_js(direction, self.column_mode == 'fixed')
+            self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_js_result, None)
+            return True
+
+        # PageUp/PageDown in multi-column
+        if keyval in (65365, 65366):
+            direction = "left" if keyval == 65365 else "right"
+            js_code = scroll_js(direction, self.column_mode == 'fixed')
+            self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_js_result, None)
+            return True
+
+        # Home/End still horizontal
         if keyval == 65360:
             js_code = "window.scrollTo({ left: 0, behavior: 'smooth' });"
             self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_js_result, None)
@@ -1083,7 +661,9 @@ class EpubViewer(Adw.ApplicationWindow):
             """
             self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_js_result, None)
             return True
+
         return False
+
 
     def on_scroll_event(self, controller, dx, dy):
         if not self.current_book:
