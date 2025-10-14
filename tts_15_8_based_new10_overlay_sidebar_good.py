@@ -52,6 +52,401 @@ def synth_single_process(model_path, voices_path, text, outpath, voice, speed, l
         print("synth_single_process error:", e, file=sys.stderr)
         return 3
 
+# --- TTS Manager ---
+class TTSManager:
+    """
+    Enhanced TTS Manager with:
+    - GStreamer-based playback (no paplay)
+    - Pre-buffering (4 sentences)
+    - Next sentence navigation
+    - Smart pause (synthesize 2 extra sentences)
+    - Smooth fade-in / fade-out transitions
+    - Full highlight + column scroll logic preserved
+    """
+
+    def __init__(self, webview_getter, base_temp_dir,
+                 kokoro_model_path=None, voices_bin_path=None,
+                 voice="af_sarah", speed=1.0, lang="en-us"):
+        self.get_webview = webview_getter
+        self.base_temp_dir = base_temp_dir
+        self.tts_dir = os.path.join(self.base_temp_dir, "tts")
+        os.makedirs(self.tts_dir, exist_ok=True)
+
+        self.kokoro_model_path = kokoro_model_path or os.environ.get("KOKORO_ONNX_PATH", "/app/share/kokoro-models/kokoro-v1.0.onnx")
+        self.voices_bin_path = voices_bin_path or os.environ.get("KOKORO_VOICES_PATH", "/app/share/kokoro-models/voices-v1.0.bin")
+        self.voice = voice
+        self.speed = speed
+        self.lang = lang
+
+        self.synth_queue = queue.Queue()
+        self.play_queue = queue.Queue()
+
+        self._synth_thread = None
+        self._player_thread = None
+
+        self._stop_event = threading.Event()
+        self._paused = threading.Event()
+
+        self._current_synth_proc = None
+        self._threads_running = False
+
+        self.current_chapter_id = None
+        self.current_highlight_id = None
+
+        self.played_files = []
+        self.max_cache_files = 5
+        self.current_playing_file = None
+
+        # --- GStreamer setup ---
+        Gst.init(None)
+        self.player = Gst.ElementFactory.make("playbin", "player")
+        self.bus = self.player.get_bus()
+        self.bus.add_signal_watch()
+        self.bus.connect("message", self._on_gst_message)
+        self.playback_finished = threading.Event()
+        self._gst_lock = threading.Lock()
+
+        # volume fade control
+        self._fade_thread = None
+        self._volume_target = 1.0
+        self._volume_current = 1.0
+
+    # ------------------ GStreamer Handling ------------------
+
+    def _on_gst_message(self, bus, message):
+        t = message.type
+        if t == Gst.MessageType.EOS:
+            with self._gst_lock:
+                self.player.set_state(Gst.State.NULL)
+            self.playback_finished.set()
+        elif t == Gst.MessageType.ERROR:
+            err, debug = message.parse_error()
+            print(f"[GstError] {err}: {debug}")
+            with self._gst_lock:
+                self.player.set_state(Gst.State.NULL)
+            self.playback_finished.set()
+
+    def _set_volume(self, vol):
+        with self._gst_lock:
+            try:
+                self.player.set_property("volume", max(0.0, min(vol, 1.0)))
+                self._volume_current = vol
+            except Exception:
+                pass
+
+    def _fade_to(self, target, duration=0.3):
+        """Smooth fade in/out using GStreamer volume property."""
+        if self._fade_thread and self._fade_thread.is_alive():
+            return
+        def fade():
+            steps = int(duration / 0.03)
+            start = self._volume_current
+            delta = (target - start) / max(1, steps)
+            for _ in range(steps):
+                if self._stop_event.is_set():
+                    break
+                newv = self._volume_current + delta
+                self._set_volume(newv)
+                time.sleep(0.03)
+            self._set_volume(target)
+        self._fade_thread = threading.Thread(target=fade, daemon=True)
+        self._fade_thread.start()
+
+    # ------------------ Control API ------------------
+
+    def start(self, chapter_id, sentences):
+        if self.current_chapter_id != chapter_id:
+            self.stop()
+        self.current_chapter_id = chapter_id
+        os.makedirs(self.tts_dir, exist_ok=True)
+        self._stop_event.clear()
+        for sid, text in sentences:
+            if text and text.strip():
+                self.synth_queue.put((sid, text))
+        if not self._threads_running:
+            self._threads_running = True
+            self._synth_thread = threading.Thread(target=self._synth_worker, name="tts-synth", daemon=True)
+            self._player_thread = threading.Thread(target=self._player_worker, name="tts-player", daemon=True)
+            self._synth_thread.start()
+            self._player_thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        if self.player:
+            with self._gst_lock:
+                self.player.set_state(Gst.State.NULL)
+        self.playback_finished.set()
+        while not self.synth_queue.empty():
+            try: self.synth_queue.get_nowait()
+            except queue.Empty: break
+        while not self.play_queue.empty():
+            try:
+                sid, f = self.play_queue.get_nowait()
+                if os.path.exists(f): os.remove(f)
+            except Exception: pass
+        if self._current_synth_proc:
+            try:
+                self._current_synth_proc.terminate()
+                self._current_synth_proc.join(timeout=0.5)
+            except Exception: pass
+        self._paused.clear()
+        self._threads_running = False
+        self._clean_cache_files()
+        self._run_js_clear_highlight()
+
+    def pause(self):
+        if self._paused.is_set():
+            return
+        self._paused.set()
+        self._fade_to(0.3, 0.25)
+        time.sleep(0.5)
+        with self._gst_lock:
+            self.player.set_state(Gst.State.PAUSED)
+
+    def resume(self):
+        if not self._paused.is_set():
+            return
+        self._paused.clear()
+        with self._gst_lock:
+            self.player.set_state(Gst.State.PLAYING)
+        self._fade_to(1.0, 0.25)
+
+    def next_sentence(self):
+        if not self._threads_running:
+            return
+        self._fade_to(0.0, 0.25)
+        with self._gst_lock:
+            self.player.set_state(Gst.State.NULL)
+        self.playback_finished.set()
+        time.sleep(0.15)
+        self._fade_to(1.0, 0.25)
+
+    def is_playing(self):
+        return self._threads_running and not self._paused.is_set() and not self._stop_event.is_set()
+
+    def is_paused(self):
+        return self._paused.is_set() and not self._stop_event.is_set()
+
+    # ------------------ Worker Threads ------------------
+
+    def _synth_worker(self):
+        buffer_limit = 4
+        while not self._stop_event.is_set():
+            if self.play_queue.qsize() >= buffer_limit:
+                time.sleep(0.1)
+                continue
+            try:
+                sid, text = self.synth_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            outname = f"{sid}_{uuid.uuid4().hex[:8]}.wav"
+            outpath = os.path.join(self.tts_dir, outname)
+            proc = multiprocessing.Process(
+                target=synth_single_process,
+                args=(self.kokoro_model_path, self.voices_bin_path,
+                      text, outpath, self.voice, self.speed, self.lang)
+            )
+            self._current_synth_proc = proc
+            proc.start()
+            while proc.is_alive() and not self._stop_event.is_set():
+                time.sleep(0.05)
+            proc.join(timeout=0.2)
+            self._current_synth_proc = None
+            if os.path.exists(outpath) and not self._stop_event.is_set():
+                self.play_queue.put((sid, outpath))
+            else:
+                try:
+                    if os.path.exists(outpath):
+                        os.remove(outpath)
+                except Exception:
+                    pass
+
+    def _player_worker(self):
+        """Main playback loop with GStreamer, adaptive fades, and 4-sentence prebuffer."""
+        # --- prebuffer stage ---
+        prebuffer_target = 4
+        prebuffer_wait_time = 0
+        while not self._stop_event.is_set() and self.play_queue.qsize() < prebuffer_target:
+            time.sleep(0.1)
+            prebuffer_wait_time += 0.1
+            # safety cutoff: don't block forever if fewer than 4 sentences exist
+            if prebuffer_wait_time > 8.0:  # 8 seconds max
+                break
+
+        # --- normal playback loop ---
+        while not self._stop_event.is_set() or not self.play_queue.empty():
+            if self._paused.is_set():
+                time.sleep(0.05)
+                continue
+            try:
+                sid, wavpath = self.play_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            self.current_playing_file = wavpath
+            self.current_highlight_id = sid
+            self._run_js_highlight(sid)
+
+            # --- prepare playback ---
+            with self._gst_lock:
+                self.playback_finished.clear()
+                self.player.set_property("uri", f"file://{wavpath}")
+                self.player.set_state(Gst.State.PLAYING)
+
+            # allow pipeline to preroll before querying duration
+            time.sleep(0.05)
+            duration_s = 2.0  # default estimate
+            try:
+                ok, ns = self.player.query_duration(Gst.Format.TIME)
+                if ok and ns > 0:
+                    duration_s = ns / 1_000_000_000.0
+            except Exception:
+                pass
+
+            # --- determine fade durations based on clip length ---
+            if duration_s < 1.5:
+                fade_in_dur, fade_out_dur = 0.15, 0.15
+            elif duration_s < 4.0:
+                fade_in_dur, fade_out_dur = 0.25, 0.25
+            else:
+                fade_in_dur, fade_out_dur = 0.4, 0.35
+
+            # --- perform fade-in ---
+            self._set_volume(0.0)
+            self._fade_to(1.0, fade_in_dur)
+
+            # --- monitor playback ---
+            while not self.playback_finished.is_set() and not self._stop_event.is_set():
+                if self._paused.is_set():
+                    with self._gst_lock:
+                        self.player.set_state(Gst.State.PAUSED)
+                time.sleep(0.05)
+
+            # --- graceful fade-out ---
+            self._fade_to(0.0, fade_out_dur)
+            time.sleep(fade_out_dur)
+            with self._gst_lock:
+                self.player.set_state(Gst.State.NULL)
+
+            # --- cleanup and highlighting ---
+            if not self._paused.is_set():
+                self._run_js_unhighlight(sid)
+            self._manage_file_cache(wavpath, sid)
+
+            self.current_highlight_id = None
+            self.current_playing_file = None
+
+
+    # ------------------ File Cache ------------------
+
+    def _manage_file_cache(self, new_file_path, sid):
+        self.played_files.append((sid, new_file_path))
+        while len(self.played_files) > self.max_cache_files:
+            old_sid, old_path = self.played_files.pop(0)
+            try:
+                if os.path.exists(old_path) and old_path != self.current_playing_file:
+                    os.remove(old_path)
+            except Exception:
+                pass
+
+    def _clean_cache_files(self):
+        for sid, path in self.played_files:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+        self.played_files.clear()
+        self.current_playing_file = None
+
+    # ------------------ WebView Highlight Helpers ------------------
+
+    def _run_js_highlight(self, sid):
+        webview = self.get_webview()
+        if not webview:
+            return
+        js = f"""
+        (function() {{
+            try {{
+                var el = document.querySelector('[data-tts-id="{sid}"]');
+                if (!el) return;
+                
+                // Remove previous highlight
+                document.querySelectorAll('.tts-highlight').forEach(function(p){{ 
+                    p.classList.remove('tts-highlight'); 
+                }});
+                el.classList.add('tts-highlight');
+                
+                var rect = el.getBoundingClientRect();
+                var viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+                var viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+                
+                var scrollWidth = document.documentElement.scrollWidth;
+                var clientWidth = document.documentElement.clientWidth;
+                var isMultiColumn = scrollWidth > clientWidth;
+                
+                if (isMultiColumn) {{
+                    var currentScroll = window.pageXOffset || document.documentElement.scrollLeft;
+                    var isVisible = rect.left >= 0 && rect.right <= viewportWidth &&
+                                   rect.top >= 0 && rect.bottom <= viewportHeight;
+                    var isPartiallyCutOff = rect.left >= 0 && rect.left < viewportWidth && rect.right > viewportWidth;
+                    
+                    if (!isVisible || isPartiallyCutOff) {{
+                        var elementLeft = currentScroll + rect.left;
+                        var targetScroll = elementLeft - 20;
+                        var maxScroll = Math.max(0, scrollWidth - clientWidth);
+                        targetScroll = Math.max(0, Math.min(targetScroll, maxScroll));
+                        window.scrollTo({{ left: targetScroll, behavior: 'smooth' }});
+                    }}
+                }} else {{
+                    var isVerticallyVisible = rect.top >= 0 && rect.bottom <= viewportHeight;
+                    var isPartiallyCutOff = rect.top >= 0 && rect.top < viewportHeight && rect.bottom > viewportHeight;
+                    if (!isVerticallyVisible || isPartiallyCutOff) {{
+                        var currentScrollY = window.pageYOffset || document.documentElement.scrollTop;
+                        var elementTop = currentScrollY + rect.top;
+                        var targetScrollY = elementTop - 20;
+                        window.scrollTo({{ top: Math.max(0, targetScrollY), behavior: 'smooth' }});
+                    }}
+                }}
+            }} catch(e){{ 
+                console.error('highlight error', e); 
+            }}
+        }})();
+        """
+        GLib.idle_add(lambda: webview.evaluate_javascript(js, -1, None, None, None, None, None))
+
+    def _run_js_unhighlight(self, sid):
+        webview = self.get_webview()
+        if not webview:
+            return
+        js = f"""
+        (function() {{
+            try {{
+                var el = document.querySelector('[data-tts-id="{sid}"]');
+                if (el) el.classList.remove('tts-highlight');
+            }} catch(e){{}}
+        }})();
+        """
+        GLib.idle_add(lambda: webview.evaluate_javascript(js, -1, None, None, None, None, None))
+
+    def _run_js_clear_highlight(self):
+        webview = self.get_webview()
+        if not webview:
+            return
+        js = """
+        (function() {
+            try {
+                document.querySelectorAll('.tts-highlight').forEach(function(p){ p.classList.remove('tts-highlight'); });
+            } catch(e) {}
+        })();
+        """
+        GLib.idle_add(lambda: webview.evaluate_javascript(js, -1, None, None, None, None, None))
+
+    def reapply_highlight_after_reload(self):
+        if self.current_highlight_id:
+            self._run_js_highlight(self.current_highlight_id)
+
+
 class EpubViewer(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
@@ -96,6 +491,7 @@ class EpubViewer(Adw.ApplicationWindow):
     def setup_ui(self):
         # Create the main split view
         self.split_view = Adw.OverlaySplitView()
+        self.split_view.set_collapsed(True)
         self.split_view.set_show_sidebar(False)
         self.split_view.set_sidebar_position(Gtk.PackType.START)
         self.split_view.set_max_sidebar_width(300)
@@ -110,11 +506,11 @@ class EpubViewer(Adw.ApplicationWindow):
         self.toolbar_view.add_top_bar(header_bar)
         
         # Toggle sidebar button
-        self.sidebar_toggle = Gtk.ToggleButton()
+        self.sidebar_toggle = Gtk.Button()
         self.sidebar_toggle.set_icon_name("view-sidebar-start-symbolic")
         self.sidebar_toggle.set_tooltip_text("Toggle Table of Contents")
         self.sidebar_toggle.add_css_class("flat")
-        self.sidebar_toggle.connect("toggled", self.on_sidebar_toggle)
+        self.sidebar_toggle.connect("clicked", self.on_sidebar_toggle)
         
         # Open button
         open_button = Gtk.Button()
@@ -324,7 +720,13 @@ class EpubViewer(Adw.ApplicationWindow):
     
     def on_sidebar_toggle(self, button):
         """Toggle sidebar visibility"""
-        self.split_view.set_show_sidebar(button.get_active())
+        visible = self.split_view.get_show_sidebar()
+        self.split_view.set_show_sidebar(not visible)
+
+        # Optionally focus sidebar when shown
+        if not visible and hasattr(self, "sidebar_box"):
+            self.sidebar_box.grab_focus()
+
     
     def on_sidebar_visibility_changed(self, split_view, pspec):
         """Handle sidebar visibility changes to recalculate columns"""
@@ -1647,13 +2049,161 @@ class EpubViewer(Adw.ApplicationWindow):
         except Exception:
             pass
 
+
+#######
+    def _on_sidebar_toggle_complete(self):
+        """Recalculate and update columns after sidebar toggle"""
+        self.sidebar_toggle_timeout_id = None
+        if self.current_book and self.chapters:
+            # Save current scroll position before recalculating
+            js_code = """
+            (function() {
+                return {
+                    scrollLeft: window.pageXOffset || document.documentElement.scrollLeft,
+                    scrollTop: window.pageYOffset || document.documentElement.scrollTop,
+                    scrollWidth: document.documentElement.scrollWidth,
+                    clientWidth: document.documentElement.clientWidth
+                };
+            })();
+            """
+            self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_sidebar_scroll_before_reflow, None)
+        return False
+
+    def _on_sidebar_scroll_before_reflow(self, webview, result, user_data):
+        """Handle scroll info before sidebar reflow"""
+        try:
+            js_result = webview.evaluate_javascript_finish(result)
+            if js_result:
+                # Store scroll info for restoration
+                self._pending_scroll_restore = {
+                    'scrollLeft': js_result.to_string() if hasattr(js_result, 'to_string') else 0,
+                    'scrollTop': 0
+                }
+        except Exception:
+            self._pending_scroll_restore = {'scrollLeft': 0, 'scrollTop': 0}
+        
+        # Now reflow with new dimensions
+        self.calculate_column_dimensions()
+        self._update_column_css_with_scroll_restore()
+
+    def _update_column_css_with_scroll_restore(self):
+        """Update CSS and restore scroll position"""
+        if self.is_single_column_mode():
+            js_code = """
+            (function() {
+                var body = document.body;
+                if (body) {
+                    body.style.columnCount = '1';
+                    body.style.columnWidth = 'auto';
+                    body.style.columnGap = '0';
+                    body.style.height = 'auto';
+                    body.style.overflowX = 'hidden';
+                    body.style.overflowY = 'auto';
+                }
+            })();
+            """
+        else:
+            if self.column_mode == 'fixed':
+                js_code = f"""
+                (function() {{
+                    var body = document.body;
+                    if (body) {{
+                        body.style.columnCount = '{self.fixed_column_count}';
+                        body.style.columnWidth = 'auto';
+                        body.style.columnGap = '{self.column_gap}px';
+                        body.style.columnFill = 'balance';
+                        body.style.height = 'calc(100vh - {self.column_padding * 2}px)';
+                        body.style.overflowX = 'auto';
+                        body.style.overflowY = 'hidden';
+                    }}
+                }})();
+                """
+            else:
+                js_code = f"""
+                (function() {{
+                    var body = document.body;
+                    if (body) {{
+                        body.style.columnCount = 'auto';
+                        body.style.columnWidth = '{self.actual_column_width}px';
+                        body.style.columnGap = '{self.column_gap}px';
+                        body.style.columnFill = 'balance';
+                        body.style.height = 'calc(100vh - {self.column_padding * 2}px)';
+                        body.style.overflowX = 'auto';
+                        body.style.overflowY = 'hidden';
+                    }}
+                }})();
+                """
+        
+        self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_css_update_restore_scroll, None)
+
+    def _on_css_update_restore_scroll(self, webview, result, user_data):
+        """After CSS update, restore scroll position and reapply TTS highlight"""
+        # Give the browser time to reflow
+        GLib.timeout_add(150, self._restore_scroll_after_sidebar)
+
+    def _restore_scroll_after_sidebar(self):
+        """Restore scroll position after sidebar toggle reflow"""
+        if hasattr(self, '_pending_scroll_restore') and self._pending_scroll_restore:
+            scroll_info = self._pending_scroll_restore
+            
+            if self.is_single_column_mode():
+                js_code = f"""
+                (function() {{
+                    window.scrollTo({{ top: {scroll_info.get('scrollTop', 0)}, behavior: 'auto' }});
+                }})();
+                """
+            else:
+                # For multi-column, we need to calculate the approximate column position
+                js_code = f"""
+                (function() {{
+                    var oldScrollLeft = {scroll_info.get('scrollLeft', 0)};
+                    
+                    // Calculate which column we were on
+                    var columnWidth = {int(self.actual_column_width)};
+                    var columnGap = {int(self.column_gap)};
+                    var stepSize = columnWidth + columnGap;
+                    
+                    // Find the column number we were viewing
+                    var oldColumn = Math.round(oldScrollLeft / stepSize);
+                    
+                    // Calculate new scroll position for that column
+                    var newScrollLeft = oldColumn * stepSize;
+                    
+                    // Ensure we don't scroll beyond bounds
+                    var maxScroll = Math.max(0, document.documentElement.scrollWidth - (window.innerWidth || document.documentElement.clientWidth));
+                    newScrollLeft = Math.max(0, Math.min(newScrollLeft, maxScroll));
+                    
+                    window.scrollTo({{ left: newScrollLeft, behavior: 'auto' }});
+                }})();
+                """
+            
+            self.webview.evaluate_javascript(js_code, -1, None, None, None, self._on_scroll_restored, None)
+            self._pending_scroll_restore = None
+        else:
+            self._finalize_sidebar_toggle()
+        
+        return False
+
+    def _on_scroll_restored(self, webview, result, user_data):
+        """Finalize after scroll restoration"""
+        GLib.timeout_add(50, self._finalize_sidebar_toggle)
+
+    def _finalize_sidebar_toggle(self):
+        """Final updates after sidebar toggle"""
+        self.update_navigation()
+        if self.tts:
+            try:
+                self.tts.reapply_highlight_after_reload()
+            except Exception:
+                pass
+        return False
     def on_window_resize(self, *args):
         self.calculate_column_dimensions()
         if self.current_book and self.chapters:
             if hasattr(self, 'resize_timeout_id') and self.resize_timeout_id:
                 GLib.source_remove(self.resize_timeout_id)
             # Just reflow, don't reload
-            self.resize_timeout_id = GLib.timeout_add(2250, self._delayed_resize_reflow)
+            self.resize_timeout_id = GLib.timeout_add(250, self._delayed_resize_reflow)
 
     
     def on_content_size_changed(self, *args):
