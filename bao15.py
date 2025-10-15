@@ -601,15 +601,19 @@ class Win(Adw.ApplicationWindow):
         (function() {{
             try {{
                 const anchorData = JSON.parse('{anchor_json}');
-                const searchText = anchorData.text.trim();
+                const searchText = anchorData.text.trim().replace(/\\s+/g, ' ');
                 
-                console.log('Searching for anchor text:', searchText.substring(0, 50));
+                console.log('🔍 Searching for:', searchText.substring(0, 60));
                 
-                // Find element with matching text - use a more flexible search
+                // Create a more flexible search - use first 8-10 words
+                const words = searchText.split(' ');
+                const searchPhrase = words.slice(0, Math.min(8, words.length)).join(' ');
+                
+                console.log('🔍 Search phrase:', searchPhrase);
+                
                 let foundElement = null;
-                let foundOffset = 0;
                 
-                // Create a TreeWalker to iterate through all text nodes
+                // Method 1: Use TreeWalker to search all text nodes
                 const walker = document.createTreeWalker(
                     document.body,
                     NodeFilter.SHOW_TEXT,
@@ -617,61 +621,92 @@ class Win(Adw.ApplicationWindow):
                     false
                 );
                 
-                const searchWords = searchText.split(' ').slice(0, 6).join(' ');
-                
                 while (walker.nextNode()) {{
                     const node = walker.currentNode;
-                    const text = node.textContent.trim();
+                    const nodeText = node.textContent.trim().replace(/\\s+/g, ' ');
                     
-                    // Try to find our search text in this node
-                    if (text.includes(searchWords)) {{
+                    // Check if this text node contains our search phrase
+                    if (nodeText.includes(searchPhrase)) {{
                         foundElement = node.parentElement;
-                        
-                        // Find the character offset where our text starts
-                        const index = text.indexOf(searchWords);
-                        if (index !== -1) {{
-                            foundOffset = index;
-                            console.log('✓ Found matching text in:', node.parentElement.tagName);
+                        console.log('✓ Found in text node, parent:', foundElement.tagName);
+                        break;
+                    }}
+                    
+                    // Also try checking if search phrase is at the start
+                    if (nodeText.startsWith(words[0]) && nodeText.includes(words[1] || '')) {{
+                        foundElement = node.parentElement;
+                        console.log('✓ Found partial match, parent:', foundElement.tagName);
+                        break;
+                    }}
+                }}
+                
+                // Method 2: If not found, search all elements
+                if (!foundElement) {{
+                    const allElements = document.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6, li, span, td, th, a, b, i, strong');
+                    for (let elem of allElements) {{
+                        const elemText = elem.textContent.trim().replace(/\\s+/g, ' ');
+                        if (elemText.includes(searchPhrase) || elemText.startsWith(words.slice(0, 3).join(' '))) {{
+                            foundElement = elem;
+                            console.log('✓ Found in element:', elem.tagName);
                             break;
                         }}
                     }}
                 }}
                 
                 if (foundElement) {{
-                    // Scroll to the element
-                    const rect = foundElement.getBoundingClientRect();
-                    const absoluteX = window.scrollX + rect.left;
-                    
-                    // Snap to nearest column
-                    const colWidth = window.getColumnWidth ? window.getColumnWidth() : window.innerWidth;
-                    if (colWidth > 0) {{
-                        const targetColumn = Math.round(absoluteX / colWidth);
-                        const targetScroll = targetColumn * colWidth;
-                        window.scrollTo(targetScroll, window.scrollY);
-                        console.log('✓ Restored to column:', targetColumn, 'scroll:', targetScroll);
+                    // Wait a bit for layout to settle
+                    setTimeout(function() {{
+                        const rect = foundElement.getBoundingClientRect();
+                        const absoluteX = window.scrollX + rect.left;
                         
-                        // Send updated viewport text after a delay
-                        setTimeout(function() {{
-                            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.viewportText) {{
-                                const testPoints = [[10, 10], [20, 20], [30, 30]];
+                        console.log('📍 Element position - Left:', rect.left, 'Absolute:', absoluteX);
+                        
+                        // Snap to nearest column
+                        const colWidth = window.getColumnWidth ? window.getColumnWidth() : window.innerWidth;
+                        console.log('📏 Column width:', colWidth);
+                        
+                        if (colWidth > 0) {{
+                            const targetColumn = Math.round(absoluteX / colWidth);
+                            const targetScroll = Math.max(0, targetColumn * colWidth);
+                            
+                            console.log('🎯 Target column:', targetColumn, 'Target scroll:', targetScroll);
+                            
+                            window.scrollTo(targetScroll, window.scrollY);
+                            
+                            // Send updated viewport text after scroll
+                            setTimeout(function() {{
+                                const testPoints = [[5, 5], [10, 10], [15, 15]];
                                 for (let [x, y] of testPoints) {{
                                     const vpElement = document.elementFromPoint(x, y);
                                     if (vpElement) {{
                                         const range = document.caretRangeFromPoint(x, y);
-                                        if (range && range.startContainer && range.startContainer.nodeType === Node.TEXT_NODE) {{
-                                            const vpText = range.startContainer.textContent.substring(range.startOffset).trim();
+                                        if (range && range.startContainer) {{
+                                            let node = range.startContainer;
+                                            let vpText = '';
+                                            
+                                            if (node.nodeType === Node.TEXT_NODE) {{
+                                                vpText = node.textContent.substring(range.startOffset);
+                                            }} else {{
+                                                vpText = node.textContent;
+                                            }}
+                                            
+                                            vpText = vpText.trim().replace(/\\s+/g, ' ');
+                                            
                                             if (vpText.length > 10) {{
-                                                window.webkit.messageHandlers.viewportText.postMessage(vpText.substring(0, 80));
+                                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.viewportText) {{
+                                                    window.webkit.messageHandlers.viewportText.postMessage(vpText.substring(0, 80));
+                                                }}
+                                                console.log('✅ Restored viewport text:', vpText.substring(0, 50));
                                                 break;
                                             }}
                                         }}
                                     }}
                                 }}
-                            }}
-                        }}, 150);
-                    }}
+                            }}, 100);
+                        }}
+                    }}, 50);
                 }} else {{
-                    console.log('✗ Could not find text:', searchWords);
+                    console.log('❌ Could not find text:', searchPhrase);
                 }}
             }} catch (e) {{
                 console.error('Error restoring position:', e);
