@@ -251,6 +251,430 @@ def highlight_markup(text: str, query: str) -> str:
     return "".join(parts)
 
 
+# -------------------------
+# TTSEngine (copied & slightly trimmed for integration)
+# -------------------------
+class TTSEngine:
+    def __init__(self, webview_getter, base_temp_dir=None, kokoro_model_path=None, voices_bin_path=None):
+        self.webview_getter = webview_getter
+        self.base_temp_dir = base_temp_dir or tempfile.gettempdir()
+        self.kokoro = None
+        self.is_playing_flag = False
+        self.should_stop = False
+        self.current_thread = None
+
+        # Playback / navigation state
+        self._tts_sentences = []
+        self._tts_sids = []
+        self._tts_voice = None
+        self._tts_speed = 1.0
+        self._tts_lang = "en-us"
+        self._tts_finished_callback = None
+        self._tts_highlight_callback = None
+
+        # index and audio cache
+        self._current_play_index = 0
+        self._audio_files = {}
+        self._audio_lock = threading.Lock()
+        self._synthesis_done = threading.Event()
+
+        # delayed on-demand synth timer
+        self._delayed_timer = None
+        self._delayed_timer_lock = threading.Lock()
+
+        # paused state
+        self.paused = False
+        self._resume_event = threading.Event()
+        self._resume_event.set()
+
+        # init kokoro if available
+        if TTS_AVAILABLE and Kokoro:
+            try:
+                model_path = os.environ.get("KOKORO_ONNX_PATH", "/app/share/kokoro-models/kokoro-v1.0.onnx")
+                voices_path = os.environ.get("KOKORO_VOICES_PATH", "/app/share/kokoro-models/voices-v1.0.bin")
+                if os.path.exists(model_path) and os.path.exists(voices_path):
+                    self.kokoro = Kokoro(model_path, voices_path)
+                    print("[info] Kokoro TTS initialized")
+                else:
+                    print(f"[warn] Kokoro models not found at {model_path}")
+            except Exception as e:
+                print(f"[error] Failed to initialize Kokoro: {e}")
+                self.kokoro = None
+
+        # Initialize GStreamer if available
+        try:
+            if TTS_AVAILABLE and Gst:
+                Gst.init(None)
+                self.player = Gst.ElementFactory.make("playbin", "player")
+                bus = self.player.get_bus()
+                bus.add_signal_watch()
+                bus.connect("message", self.on_gst_message)
+                self.playback_finished = False
+            else:
+                self.player = None
+                self.playback_finished = True
+        except Exception as e:
+            print(f"[warn] GStreamer init failed: {e}")
+            self.player = None
+            self.playback_finished = True
+
+    def is_playing(self):
+        return bool(self.is_playing_flag) and not bool(self.paused)
+
+    def is_paused(self):
+        return bool(self.paused)
+
+    def on_gst_message(self, bus, message):
+        try:
+            t = message.type
+            if t == Gst.MessageType.EOS:
+                if self.player:
+                    self.player.set_state(Gst.State.NULL)
+                self.playback_finished = True
+            elif t == Gst.MessageType.ERROR:
+                if self.player:
+                    self.player.set_state(Gst.State.NULL)
+                err, debug = message.parse_error()
+                print(f"[error] GStreamer error: {err}, {debug}")
+                self.playback_finished = True
+        except Exception as e:
+            print("on_gst_message error:", e)
+
+    def split_sentences(self, text):
+        if not text or not text.strip():
+            return []
+
+        abbreviations = r"(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Mt|vs|etc|Fig|fig|Eq|eq|Dept|No|pp|Rev|Lt|Col|Gen|Sgt|Capt|Sen|Rep|Gov|Pres|Ave|Rd|Blvd|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\."
+        protected = re.sub(abbreviations, lambda m: m.group(0).replace('.', '∯'), text)
+
+        parts = re.split(r'(?<=[.!?])\s+(?=[A-Z0-9"\'])', protected)
+
+        return [p.replace('∯', '.').strip() for p in parts if p.strip()]
+
+
+    def synthesize_sentence(self, sentence, voice, speed, lang):
+        if not self.kokoro:
+            return None
+        try:
+            base = self.base_temp_dir or tempfile.gettempdir()
+            try:
+                os.makedirs(base, exist_ok=True)
+            except Exception:
+                base = tempfile.gettempdir()
+
+            samples, sample_rate = self.kokoro.create(sentence, voice=voice, speed=speed, lang=lang)
+
+            ntf = _tempfile.NamedTemporaryFile(prefix="tts_", suffix=".wav", delete=False, dir=base)
+            ntf_name = ntf.name
+            ntf.close()
+            try:
+                import soundfile as sf
+                sf.write(ntf_name, samples, sample_rate)
+            except Exception as e:
+                print("[error] writing wav failed:", e)
+                return None
+            return ntf_name
+        except Exception as e:
+            print(f"[error] Synthesis error: {e}")
+            return None
+
+    # (speak_sentences_list and other methods kept unchanged — truncated here for brevity)
+    # Full implementations follow in part 2 to keep message manageable.
+# Continuation: TTSEngine rest + EPubViewer integration + application main
+# (Start by defining the remaining TTSEngine methods that were kept in the reference.)
+
+    def _cancel_delayed_timer(self):
+        with self._delayed_timer_lock:
+            if self._delayed_timer:
+                try:
+                    self._delayed_timer.cancel()
+                except Exception:
+                    pass
+                self._delayed_timer = None
+
+    def _schedule_delayed_synthesis(self, idx, delay=0.5):
+        self._cancel_delayed_timer()
+        def timer_cb():
+            try:
+                if self.should_stop:
+                    return
+                with self._audio_lock:
+                    if self._audio_files.get(idx):
+                        return
+                if idx != self._current_play_index:
+                    return
+                audio_file = self.synthesize_sentence(self._tts_sentences[idx], self._tts_voice, self._tts_speed, self._tts_lang)
+                if audio_file:
+                    with self._audio_lock:
+                        self._audio_files[idx] = audio_file
+            except Exception as e:
+                print(f"[error] delayed synthesis: {e}")
+            finally:
+                with self._delayed_timer_lock:
+                    self._delayed_timer = None
+        timer = threading.Timer(delay, timer_cb)
+        with self._delayed_timer_lock:
+            self._delayed_timer = timer
+        timer.daemon = True
+        timer.start()
+
+    def speak_sentences_list(self, sentences_with_meta, voice="af_sarah", speed=1.0, lang="en-us", highlight_callback=None, finished_callback=None):
+        if not self.kokoro:
+            print("[warn] TTS not available")
+            if finished_callback:
+                GLib.idle_add(finished_callback)
+            return
+
+        self.stop()
+        time.sleep(0.05)
+
+        self.should_stop = False
+        self._tts_sentences = []
+        self._tts_sids = []
+        for s in sentences_with_meta:
+            if isinstance(s, dict):
+                self._tts_sids.append(s.get("sid"))
+                self._tts_sentences.append(s.get("text"))
+            else:
+                self._tts_sids.append(None)
+                self._tts_sentences.append(str(s))
+
+        self._tts_voice = voice
+        self._tts_speed = speed
+        self._tts_lang = lang
+        self._tts_finished_callback = finished_callback
+        self._tts_highlight_callback = highlight_callback
+        self._audio_files = {}
+        self._current_play_index = 0
+        self._synthesis_done.clear()
+        self._cancel_delayed_timer()
+        self.paused = False
+        self._resume_event.set()
+
+        def tts_thread():
+            try:
+                total = len(self._tts_sentences)
+                def synthesis_worker():
+                    try:
+                        synth_idx = 0
+                        while not self.should_stop and synth_idx < total:
+                            with self._audio_lock:
+                                cur = self._current_play_index
+                            if synth_idx < cur:
+                                synth_idx = cur
+                            lookahead_limit = cur + (1 if self.paused else 3)
+                            if synth_idx > lookahead_limit:
+                                time.sleep(0.05); continue
+                            with self._audio_lock:
+                                if self._audio_files.get(synth_idx):
+                                    synth_idx += 1; continue
+                            if synth_idx <= lookahead_limit:
+                                if self.should_stop: break
+                                audio_file = self.synthesize_sentence(self._tts_sentences[synth_idx], self._tts_voice, self._tts_speed, self._tts_lang)
+                                if audio_file:
+                                    with self._audio_lock:
+                                        if synth_idx not in self._audio_files:
+                                            self._audio_files[synth_idx] = audio_file
+                                synth_idx += 1
+                            else:
+                                time.sleep(0.05)
+                        self._synthesis_done.set()
+                    except Exception as e:
+                        print(f"[error] Synthesis worker: {e}")
+                        self._synthesis_done.set()
+
+                synth_thread = threading.Thread(target=synthesis_worker, daemon=True)
+                synth_thread.start()
+
+                self.is_playing_flag = True
+
+                while self._current_play_index < len(self._tts_sentences) and not self.should_stop:
+                    idx = self._current_play_index
+
+                    if self._tts_highlight_callback:
+                        GLib.idle_add(self._tts_highlight_callback, idx, {"sid": self._tts_sids[idx], "text": self._tts_sentences[idx]})
+
+                    while self.paused and not self.should_stop:
+                        self._cancel_delayed_timer()
+                        self._resume_event.wait(0.1)
+
+                    if self.should_stop:
+                        break
+
+                    audio_file = None
+                    with self._audio_lock:
+                        audio_file = self._audio_files.get(idx)
+
+                    if not audio_file:
+                        self._schedule_delayed_synthesis(idx, delay=0.5)
+                        waited = 0.0
+                        while not self.should_stop:
+                            with self._audio_lock:
+                                audio_file = self._audio_files.get(idx)
+                            if audio_file:
+                                break
+                            if self._current_play_index != idx:
+                                break
+                            time.sleep(0.02); waited += 0.02
+                            if self._synthesis_done.is_set() and waited > 0.5:
+                                break
+
+                    if self.should_stop:
+                        break
+
+                    with self._audio_lock:
+                        audio_file = self._audio_files.get(idx)
+
+                    if not audio_file:
+                        audio_file = self.synthesize_sentence(self._tts_sentences[idx], self._tts_voice, self._tts_speed, self._tts_lang)
+                        if audio_file:
+                            with self._audio_lock:
+                                self._audio_files[idx] = audio_file
+
+                    if not audio_file:
+                        print(f"[warn] No audio for {idx}, skipping")
+                        self._current_play_index = idx + 1
+                        continue
+
+                    if self.paused:
+                        continue
+
+                    if self.player:
+                        try:
+                            self.player.set_property("uri", f"file://{audio_file}")
+                            self.player.set_state(Gst.State.PLAYING)
+                            self.playback_finished = False
+                        except Exception as e:
+                            print("player error:", e)
+                            self.playback_finished = True
+                    else:
+                        self.playback_finished = True
+                        time.sleep(0.05)
+
+                    while not self.playback_finished and not self.should_stop:
+                        if self._current_play_index != idx:
+                            break
+                        if self.paused:
+                            try:
+                                if self.player:
+                                    self.player.set_state(Gst.State.NULL)
+                            except Exception:
+                                pass
+                            break
+                        time.sleep(0.02)
+
+                    try:
+                        if self.player:
+                            self.player.set_state(Gst.State.NULL)
+                    except Exception:
+                        pass
+
+                    if (self._current_play_index == idx) and (not self.paused):
+                        try:
+                            with self._audio_lock:
+                                af = self._audio_files.get(idx)
+                                if af:
+                                    try: os.remove(af)
+                                    except Exception: pass
+                                    try: del self._audio_files[idx]
+                                    except Exception: pass
+                        except Exception:
+                            pass
+                        self._current_play_index = idx + 1
+
+                self.is_playing_flag = False
+                self._cancel_delayed_timer()
+                if self._tts_highlight_callback and not self.should_stop:
+                    GLib.idle_add(self._tts_highlight_callback, -1, {"sid": None, "text": ""})
+                if self._tts_finished_callback:
+                    GLib.idle_add(self._tts_finished_callback)
+
+            except Exception as e:
+                print(f"[error] TTS thread: {e}")
+                import traceback
+                traceback.print_exc()
+                if self._tts_finished_callback:
+                    GLib.idle_add(self._tts_finished_callback)
+
+        self.current_thread = threading.Thread(target=tts_thread, daemon=True)
+        self.current_thread.start()
+
+    def next_sentence(self):
+        if not self._tts_sentences:
+            return
+        with self._audio_lock:
+            self._current_play_index = min(len(self._tts_sentences)-1, self._current_play_index + 1)
+            idx = self._current_play_index
+        if self._tts_highlight_callback:
+            GLib.idle_add(self._tts_highlight_callback, idx, {"sid": self._tts_sids[idx], "text": self._tts_sentences[idx]})
+        try:
+            if self.player:
+                self.player.set_state(Gst.State.NULL)
+        except Exception:
+            pass
+        self._schedule_delayed_synthesis(idx, delay=0.5)
+
+    def prev_sentence(self):
+        if not self._tts_sentences:
+            return
+        with self._audio_lock:
+            self._current_play_index = max(0, self._current_play_index - 1)
+            idx = self._current_play_index
+        if self._tts_highlight_callback:
+            GLib.idle_add(self._tts_highlight_callback, idx, {"sid": self._tts_sids[idx], "text": self._tts_sentences[idx]})
+        try:
+            if self.player:
+                self.player.set_state(Gst.State.NULL)
+        except Exception:
+            pass
+        self._schedule_delayed_synthesis(idx, delay=0.5)
+
+    def pause(self):
+        self.paused = True
+        self._resume_event.clear()
+        try:
+            if self.player:
+                self.player.set_state(Gst.State.NULL)
+        except Exception:
+            pass
+
+    def resume(self):
+        self.paused = False
+        self._resume_event.set()
+        self._cancel_delayed_timer()
+
+    def stop(self):
+        self.should_stop = True
+        self.paused = False
+        self.playback_finished = True
+        try:
+            self._resume_event.set()
+        except Exception:
+            pass
+        self._cancel_delayed_timer()
+        if self.player:
+            try:
+                self.player.set_state(Gst.State.NULL)
+            except Exception:
+                pass
+        self.is_playing_flag = False
+        if self.current_thread:
+            try:
+                self.current_thread.join(timeout=1.0)
+            except Exception:
+                pass
+        try:
+            with self._audio_lock:
+                for idx, path in list(self._audio_files.items()):
+                    try:
+                        if path and os.path.exists(path):
+                            os.remove(path)
+                    except Exception:
+                        pass
+                self._audio_files.clear()
+        except Exception:
+            pass
+
 
 class EPubViewer(Adw.ApplicationWindow):
     def __init__(self, app):
@@ -1093,6 +1517,7 @@ class EPubViewer(Adw.ApplicationWindow):
         except Exception as e:
             print("setup_font_dropdown error:", e)
 
+             
     def _install_persistent_user_style(self):
         """
         Ensure a persistent <style id="userFontOverride"> is present and kept after any head changes.
@@ -1329,19 +1754,24 @@ class EPubViewer(Adw.ApplicationWindow):
                 import traceback as _tb; _tb.print_exc()
 
 
-    def _ensure_sentence_wrapping_and_start(self, sentences):
+    def _ensure_sentence_wrapping_and_start(self, sentences, auto_start=True):
         """
         Wrap sentences into the webview DOM. Uses a single global text concat + cursor
         so repeated short strings (e.g. "Why?") match in the reading order rather than
         jumping to a later identical occurrence.
+        
+        Args:
+            sentences: List of sentence dicts with 'sid' and 'text'
+            auto_start: If True, starts TTS playback. If False, just wraps sentences.
         """
         try:
             if not getattr(self, "webview", None):
-                self.tts.speak_sentences_list(
-                    sentences,
-                    highlight_callback=self._on_tts_highlight,
-                    finished_callback=self._on_tts_finished
-                )
+                if auto_start:
+                    self.tts.speak_sentences_list(
+                        sentences,
+                        highlight_callback=self._on_tts_highlight,
+                        finished_callback=self._on_tts_finished
+                    )
                 return False
 
             import json, traceback
@@ -1617,7 +2047,7 @@ class EPubViewer(Adw.ApplicationWindow):
                         concat = global.concat; mapping = global.mapping;
                       } else {
                         // relaxed ellipsis mapping
-                        var alt = text.replace(/\\u2026/g,'...').replace(/…/g,'...');
+                        var alt = text.replace(/\\u2026/g,'...').replace(/â€¦/g,'...');
                         var aidx = h.indexOf(alt);
                         if(aidx !== -1){
                           cont.innerHTML = h.slice(0,aidx) + '<span class="tts-sentence" data-sid="' + sid + '">' + alt + '</span>' + h.slice(aidx+alt.length);
@@ -1653,12 +2083,14 @@ class EPubViewer(Adw.ApplicationWindow):
                 print("[TTS] html-snippet wrapper injection error:", e)
                 traceback.print_exc()
 
-            # start TTS after short delay so wrappers apply in order
-            GLib.timeout_add(250, lambda: (self.tts.speak_sentences_list(
-                sentences,
-                highlight_callback=self._on_tts_highlight,
-                finished_callback=self._on_tts_finished
-            ), False)[1])
+            # Start TTS playback if auto_start is True
+            if auto_start:
+                # start TTS after short delay so wrappers apply in order
+                GLib.timeout_add(250, lambda: (self.tts.speak_sentences_list(
+                    sentences,
+                    highlight_callback=self._on_tts_highlight,
+                    finished_callback=self._on_tts_finished
+                ), False)[1])
 
             return False
         except Exception as e:
@@ -1667,7 +2099,7 @@ class EPubViewer(Adw.ApplicationWindow):
 
 
     def _on_tts_highlight(self, idx, meta):
-        """Highlight the sentence being spoken. Fast data-sid path + robust word-sequence fallback."""
+        """Highlight the sentence being spoken and auto-scroll to keep it visible."""
         if not self.webview:
             return
 
@@ -1691,13 +2123,13 @@ class EPubViewer(Adw.ApplicationWindow):
                     synth_text = str(meta or "")[:1200]
             except Exception:
                 synth_text = ""
-            print(f"[TTS-debug] synth sid={sid!r} text={synth_text!r}")
+            print(f"[TTS] Highlighting sid={sid!r}")
 
             # clear highlight
             if sid is None or (isinstance(sid, int) and sid < 0):
                 js_clear = """(function(){
                   document.querySelectorAll('.tts-highlight').forEach(e => e.classList.remove('tts-highlight'));
-                  console.log('[TTS-Debug] clear highlights');
+                  console.log('[TTS] Cleared highlights');
                 })();"""
                 try:
                     self.webview.evaluate_javascript(js_clear, -1, None, None, None, None, None)
@@ -1711,96 +2143,176 @@ class EPubViewer(Adw.ApplicationWindow):
             import json
             safe_text = synth_text or ""
 
-            # JS: try data-sid, else fallback to robust word-sequence search & wrap
+            # JS: highlight and auto-scroll with column-aware logic
             js = f"""(function(){{
               try {{
+                // Clear previous highlights
                 document.querySelectorAll('.tts-highlight').forEach(e => e.classList.remove('tts-highlight'));
+                
                 var sid = "{sid}";
                 var fr = Array.from(document.querySelectorAll('[data-sid=\"{sid}\"]'));
+                
                 if(fr && fr.length) {{
-                  fr.forEach(function(e,i){{ e.classList.add('tts-highlight'); if(i===0) e.scrollIntoView({{behavior:'smooth', block:'center'}}); }});
+                  fr.forEach(function(e,i){{ 
+                    e.classList.add('tts-highlight'); 
+                  }});
+                  
+                  // Smart scroll to keep sentence visible
+                  if(fr[0]) {{
+                    var container = document.querySelector('.ebook-content');
+                    if(!container) return;
+                    
+                    var element = fr[0];
+                    var elementRect = element.getBoundingClientRect();
+                    var containerRect = container.getBoundingClientRect();
+                    
+                    // Get actual column count
+                    var style = getComputedStyle(container);
+                    var actualColCount = parseFloat(style.columnCount) || 1;
+                    if(style.columnCount === 'auto' || actualColCount === 0) {{
+                      var colWidth = parseFloat(style.columnWidth);
+                      var gap = parseFloat(style.columnGap) || 0;
+                      if(colWidth > 0) {{
+                        actualColCount = Math.max(1, Math.floor((container.clientWidth + gap) / (colWidth + gap)));
+                      }}
+                    }}
+                    actualColCount = Math.max(1, Math.floor(actualColCount));
+                    
+                    if(actualColCount > 1) {{
+                      // Multi-column: horizontal scrolling
+                      var gap = parseFloat(style.columnGap) || 0;
+                      var paddingLeft = parseFloat(style.paddingLeft) || 0;
+                      var paddingRight = parseFloat(style.paddingRight) || 0;
+                      var availableWidth = container.clientWidth - paddingLeft - paddingRight;
+                      var totalGap = gap * (actualColCount - 1);
+                      var columnWidth = (availableWidth - totalGap) / actualColCount;
+                      var pageWidth = columnWidth + gap;
+                      
+                      // Calculate which column the element is in
+                      var elementLeft = elementRect.left - containerRect.left + container.scrollLeft;
+                      var elementColumn = Math.floor(elementLeft / pageWidth);
+                      
+                      // Check if element is visible in current viewport
+                      var currentScrollLeft = container.scrollLeft;
+                      var viewportRight = currentScrollLeft + container.clientWidth;
+                      var elementRight = elementLeft + elementRect.width;
+                      
+                      var isVisible = (elementLeft >= currentScrollLeft - 50) && 
+                                      (elementRight <= viewportRight + 50);
+                      
+                      if(!isVisible) {{
+                        // Scroll to the column containing this element
+                        var targetScroll = elementColumn * pageWidth;
+                        var maxScroll = container.scrollWidth - container.clientWidth;
+                        targetScroll = Math.max(0, Math.min(maxScroll, targetScroll));
+                        
+                        console.log('[TTS] Auto-scroll to column ' + elementColumn + ' (scroll: ' + targetScroll.toFixed(0) + 'px)');
+                        
+                        // Smooth scroll to column
+                        var start = container.scrollLeft;
+                        var distance = targetScroll - start;
+                        var duration = 350;
+                        var startTime = performance.now();
+                        
+                        function animateScroll(time) {{
+                          var elapsed = time - startTime;
+                          var t = Math.min(elapsed / duration, 1);
+                          var ease = t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
+                          container.scrollLeft = start + distance * ease;
+                          if(t < 1) requestAnimationFrame(animateScroll);
+                        }}
+                        requestAnimationFrame(animateScroll);
+                      }}
+                    }} else {{
+                      // Single column: vertical scrolling
+                      var elementTop = elementRect.top - containerRect.top + container.scrollTop;
+                      var elementBottom = elementTop + elementRect.height;
+                      var viewportTop = container.scrollTop;
+                      var viewportBottom = viewportTop + container.clientHeight;
+                      
+                      var isVisible = (elementTop >= viewportTop + 50) && 
+                                      (elementBottom <= viewportBottom - 50);
+                      
+                      if(!isVisible) {{
+                        // Scroll to center the element vertically
+                        var targetScroll = elementTop - (container.clientHeight / 2) + (elementRect.height / 2);
+                        targetScroll = Math.max(0, Math.min(container.scrollHeight - container.clientHeight, targetScroll));
+                        
+                        console.log('[TTS] Auto-scroll to Y:' + targetScroll.toFixed(0));
+                        container.scrollTo({{
+                          top: targetScroll,
+                          behavior: 'smooth'
+                        }});
+                      }}
+                    }}
+                  }}
                   return;
                 }}
 
+                // Fallback: data-sid not found, try text search
                 var text = {json.dumps(safe_text)};
                 if(!text) {{
-                  console.log('[TTS-Debug] no synth text for fallback sid=' + sid);
+                  console.log('[TTS] No text for fallback');
                   return;
                 }}
-                var needle = text.replace(/\\s+/g,' ').trim();
-                if(!needle) return;
-
-                function escapeRe(s) {{ return s.replace(/[.*+?^${{}}()|[\\]\\\\]/g,'\\\\$&'); }}
-
-                // build plain concat of all text nodes and mapping to nodes
+                
+                // Build text node mapping
                 var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
                 var nodes = [], n = walker.nextNode();
                 while(n){{ nodes.push(n); n = walker.nextNode(); }}
                 var concat = '', mapping = [];
-                for(var i=0;i<nodes.length;i++){{ var t = nodes[i].nodeValue || ''; var start = concat.length; concat += t; mapping.push({{node: nodes[i], start: start, end: concat.length}}); }}
-
-                // try direct substring first
-                var idx = concat.indexOf(needle);
-                var matchLen = needle.length;
-                if(idx === -1) {{
-                  // build word-sequence regex from needle to match across tags/punct
-                  var words = needle.match(/\\w+/g);
-                  if(words && words.length) {{
-                    var re = new RegExp(words.map(escapeRe).join('\\\\W+'), 'i');
-                    var m = re.exec(concat);
-                    if(m) {{ idx = m.index; matchLen = m[0].length; }}
-                  }}
+                for(var i=0;i<nodes.length;i++){{
+                  var txt = nodes[i].nodeValue || '';
+                  var start = concat.length;
+                  concat += txt;
+                  mapping.push({{node: nodes[i], start: start, end: concat.length}});
                 }}
 
+                var needle = text.replace(/\\s+/g,' ').trim();
+                var idx = concat.toLowerCase().indexOf(needle.toLowerCase());
+                
                 if(idx === -1) {{
-                  // try normalized concat (collapse whitespace) search
-                  var normConcat = concat.replace(/\\s+/g,' ').trim();
-                  var normNeedle = needle.replace(/\\s+/g,' ').trim();
-                  var nidx = normConcat.toLowerCase().indexOf(normNeedle.toLowerCase());
-                  if(nidx !== -1) {{
-                    // map norm position to approx raw concat by finding first word
-                    var first = normNeedle.split(' ')[0];
-                    var r = new RegExp(escapeRe(first),'i');
-                    var m = r.exec(concat);
-                    if(m) idx = m.index;
-                  }}
-                }}
-
-                if(idx === -1) {{
-                  console.log('[TTS-Debug] fallback not found for sid=' + sid + ' needle=\"' + needle.slice(0,120) + '\"');
+                  console.log('[TTS] Text not found in fallback');
                   return;
                 }}
 
-                // map idx..idx+matchLen to startNode/endNode
-                var startNode=null,endNode=null,startOffset=0,endOffset=0;
-                var endPos = idx + matchLen;
-                for(var i=0;i<mapping.length;i++){{ 
-                  if(mapping[i].start <= idx && mapping[i].end > idx){{ startNode = mapping[i].node; startOffset = idx - mapping[i].start; }} 
-                  if(mapping[i].start < endPos && mapping[i].end >= endPos){{ endNode = mapping[i].node; endOffset = endPos - mapping[i].start; break; }} 
-                }}
-                if(!startNode || !endNode) {{
-                  console.log('[TTS-Debug] mapping failed for sid=' + sid);
-                  return;
+                // Find nodes
+                var startNode=null, endNode=null, startOffset=0, endOffset=0;
+                var endPos = idx + needle.length;
+                for(var i=0;i<mapping.length;i++){{
+                  if(mapping[i].start <= idx && mapping[i].end > idx){{
+                    startNode = mapping[i].node;
+                    startOffset = idx - mapping[i].start;
+                  }}
+                  if(mapping[i].start < endPos && mapping[i].end >= endPos){{
+                    endNode = mapping[i].node;
+                    endOffset = endPos - mapping[i].start;
+                    break;
+                  }}
                 }}
 
-                try {{
+                if(startNode && endNode) {{
                   var range = document.createRange();
                   range.setStart(startNode, Math.max(0,startOffset));
                   range.setEnd(endNode, Math.max(0,endOffset));
                   var span = document.createElement('span');
                   span.className = 'tts-sentence tts-highlight';
                   span.dataset.sid = sid;
-                  try {{ range.surroundContents(span); }} catch(e) {{
+                  try {{
+                    range.surroundContents(span);
+                  }} catch(e) {{
                     var frag = range.extractContents();
                     span.appendChild(frag);
                     range.insertNode(span);
                   }}
+                  
+                  // Auto-scroll the fallback highlight (same logic as above)
                   span.scrollIntoView({{behavior:'smooth', block:'center'}});
-                  console.log('[TTS-Debug] fallback wrapped sid=' + sid);
-                }} catch(e) {{
-                  console.log('[TTS-Debug] wrap error', e);
+                  console.log('[TTS] Fallback wrapped and scrolled');
                 }}
-              }} catch(err) {{ console.log('[TTS-Debug] highlight error', err); }}
+              }} catch(err) {{ 
+                console.log('[TTS] Highlight error', err); 
+              }}
             }})();"""
 
             try:
@@ -1813,7 +2325,6 @@ class EPubViewer(Adw.ApplicationWindow):
 
         except Exception as e:
             print(f"[TTS] Highlight callback error: {e}")
-
 
     def _on_tts_finished(self):
         """Clear highlighting when TTS finishes."""
@@ -3623,6 +4134,19 @@ class EPubViewer(Adw.ApplicationWindow):
             if self.current_index < 0 or self.current_index >= len(self.items):
                 return False
 
+            # Check if TTS is currently active
+            tts_was_playing = False
+            current_tts_index = -1
+            current_tts_sentences = []
+            try:
+                if self.tts and self.tts.is_playing():
+                    tts_was_playing = True
+                    current_tts_index = getattr(self.tts, '_current_play_index', -1)
+                    current_tts_sentences = getattr(self.tts, '_tts_sentences', [])
+                    print(f"[TTS] Active during display_page, current index: {current_tts_index}")
+            except Exception:
+                pass
+
             item = self.items[self.current_index]
 
             # get raw item content
@@ -3672,13 +4196,50 @@ class EPubViewer(Adw.ApplicationWindow):
                 try:
                     if base_uri:
                         self.webview.load_html(wrapped_html, base_uri)
-
                     else:
                         # if base_uri isn't available, pass empty string
                         self.webview.load_html(wrapped_html, "")
 
                     if fragment:
                         GLib.timeout_add(100, lambda: self._scroll_to_fragment(fragment))
+                    
+                    # If TTS was playing, re-wrap sentences and restore highlight
+                    if tts_was_playing and current_tts_index >= 0 and current_tts_sentences:
+                        print(f"[TTS] Re-wrapping after column change")
+                        
+                        def restore_tts_highlight():
+                            try:
+                                # Re-wrap sentences in the new layout
+                                sentences_meta = []
+                                for i, sent in enumerate(current_tts_sentences):
+                                    if isinstance(sent, dict):
+                                        sentences_meta.append(sent)
+                                    else:
+                                        sentences_meta.append({"sid": i, "text": str(sent)})
+                                
+                                # Use the same wrapping logic
+                                self._ensure_sentence_wrapping_and_start(
+                                    sentences_meta,
+                                    auto_start=False  # Don't restart TTS, just wrap
+                                )
+                                
+                                # Re-highlight current sentence after wrapping
+                                GLib.timeout_add(100, lambda: (
+                                    self._on_tts_highlight(
+                                        current_tts_index,
+                                        {"sid": current_tts_index, "text": current_tts_sentences[current_tts_index]}
+                                    ),
+                                    False
+                                )[1])
+                                
+                                print(f"[TTS] Restored highlight at index {current_tts_index}")
+                            except Exception as e:
+                                print(f"[TTS] Error restoring highlight: {e}")
+                            return False
+                        
+                        # Wait for page to fully load, then restore
+                        GLib.timeout_add(500, restore_tts_highlight)
+                        
                 except Exception as e:
                     print("Failed to load webview:", e)
                     # fallback to plain text view
