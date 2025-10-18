@@ -2224,25 +2224,28 @@ class EPubViewer(Adw.ApplicationWindow):
                         requestAnimationFrame(animateScroll);
                       }}
                     }} else {{
-                      // Single column: vertical scrolling
+                      // Single column: scroll only when TTS highlights a partially cut-off sentence
                       var elementTop = elementRect.top - containerRect.top + container.scrollTop;
                       var elementBottom = elementTop + elementRect.height;
                       var viewportTop = container.scrollTop;
                       var viewportBottom = viewportTop + container.clientHeight;
                       
-                      var isVisible = (elementTop >= viewportTop + 50) && 
-                                      (elementBottom <= viewportBottom - 50);
+                      // Check if the CURRENT highlight (sentence being spoken) is FULLY visible
+                      var isFullyVisible = (elementTop >= viewportTop + 5) && 
+                                           (elementBottom <= viewportBottom - 5);
                       
-                      if(!isVisible) {{
-                        // Scroll to center the element vertically
-                        var targetScroll = elementTop - (container.clientHeight / 2) + (elementRect.height / 2);
+                      if(!isFullyVisible) {{
+                        // Current sentence is partially cut off - scroll to show it fully at top
+                        var targetScroll = elementTop - 10; // Minimal padding (10px from absolute top)
                         targetScroll = Math.max(0, Math.min(container.scrollHeight - container.clientHeight, targetScroll));
                         
-                        console.log('[TTS] Auto-scroll to Y:' + targetScroll.toFixed(0));
+                        console.log('[TTS] Scroll to top (current sentence partial), Y:' + targetScroll.toFixed(0));
                         container.scrollTo({{
                           top: targetScroll,
                           behavior: 'smooth'
                         }});
+                      }} else {{
+                        console.log('[TTS] Current sentence fully visible, no scroll');
                       }}
                     }}
                   }}
