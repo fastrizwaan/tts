@@ -709,17 +709,40 @@ class EPubViewer(Adw.ApplicationWindow):
         self.split.set_content(self.toolbar)
 
         # WebKit fallback
+        # WebKit fallback
         try:
             gi.require_version("WebKit", "6.0")
             from gi.repository import WebKit
             self.WebKit = WebKit
             self.webview = WebKit.WebView()
+            
+            # ENABLE JAVASCRIPT
+            try:
+                settings = self.webview.get_settings()
+                settings.set_enable_javascript(True)
+                settings.set_javascript_can_access_clipboard(False)
+                settings.set_enable_developer_extras(True)
+                print("✓ WebKit JavaScript enabled:", settings.get_enable_javascript())
+            except Exception as e:
+                print(f"⚠ Could not configure WebKit settings: {e}")
+            
             self.scrolled.set_child(self.webview)
             try: 
                 self.webview.connect("decide-policy", self.on_decide_policy)
-                self.webview.connect("console-message", self._on_webconsole_message)
-
-            except Exception: pass
+                # REMOVED: self.webview.connect("console-message", self._on_webconsole_message)
+                print("✓ WebKit decide-policy connected")
+            except Exception as e:
+                print(f"⚠ Could not connect WebKit handlers: {e}")
+                
+            # ADD CONSOLE MESSAGE HANDLER (like scrollEvent)
+            try:
+                content_manager = self.webview.get_user_content_manager()
+                content_manager.connect("script-message-received::consoleLog", 
+                                        self._on_console_log_received)
+                content_manager.register_script_message_handler("consoleLog")
+                print("✓ Console log handler registered")
+            except Exception as e:
+                print(f"⚠ Could not register console handler: {e}")
             # after creating self.webview (inside __init__), add:
             try:
                 def _on_load_changed(webview, load_event):
@@ -795,7 +818,13 @@ class EPubViewer(Adw.ApplicationWindow):
         # periodic update of TTS button states
         GLib.timeout_add(400, self._update_tts_button_states)
 
-
+    def _on_console_log_received(self, content_manager, js_result):
+        """Handle console.log messages from JavaScript"""
+        try:
+            msg = js_result.to_string()
+            print(f"[JS] {msg}")
+        except Exception as e:
+            print(f"[JS Error] Could not read message: {e}")
 
     # ---------- minimal TTS control methods ----------
     def _update_tts_button_states(self):
@@ -2193,46 +2222,92 @@ class EPubViewer(Adw.ApplicationWindow):
         self.toolbar.set_content(container); self.content_title_label.set_text("Library")
 
     def apply_column_layout(self, num_columns=2):
-        """Inject multi-column scrollable layout with snapping and PageUp/PageDown support."""
+        """Inject multi-column scrollable layout with enhanced snapping and navigation."""
+        
+        # Determine actual column count from current settings
+        if hasattr(self, 'column_mode_use_width') and self.column_mode_use_width:
+            # In column-width mode, browser determines count; use 2 as default for JS
+            effective_columns = 2
+        else:
+            effective_columns = getattr(self, 'column_count', num_columns)
+        
         js_script = f"""
         (function() {{
-            window.currentColumnCount = {num_columns};
-
+            // ===============================================================
+            // GLOBAL STATE
+            // ===============================================================
+            window.currentColumnCount = {effective_columns};
+            
+            // ===============================================================
+            // COLUMN WIDTH CALCULATION
+            // ===============================================================
             function getColumnWidth() {{
-                const container = document.querySelector('.ebook-content, body');
+                const container = document.querySelector('.ebook-content') || document.body;
                 if (!container) return window.innerWidth;
+                
                 const style = getComputedStyle(container);
                 const gap = parseFloat(style.columnGap) || 0;
                 const totalWidth = container.scrollWidth;
                 const colCount = window.currentColumnCount || 1;
+                
+                // Calculate column width including gap
                 const colWidth = (totalWidth - gap * (colCount - 1)) / colCount;
                 return colWidth + gap;
             }}
-
-            function smoothScrollTo(xTarget) {{
+            
+            // ===============================================================
+            // SMOOTH SCROLL ANIMATION (Cubic ease-in-out)
+            // ===============================================================
+            function smoothScrollTo(xTarget, yTarget) {{
                 const startX = window.scrollX;
-                const distance = xTarget - startX;
-                const duration = 350;
+                const startY = window.scrollY;
+                const distanceX = xTarget - startX;
+                const distanceY = yTarget - startY;
+                const duration = 350;  // milliseconds
                 const start = performance.now();
+                
                 function step(time) {{
-                    const t = Math.min((time - start) / duration, 1);
-                    const ease = t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2;
-                    window.scrollTo(startX + distance * ease, 0);
-                    if (t < 1) requestAnimationFrame(step);
-                    else snapScroll();
+                    const elapsed = time - start;
+                    const t = Math.min(elapsed / duration, 1);
+                    
+                    // Cubic ease-in-out
+                    const ease = t < 0.5 
+                        ? 4 * t * t * t 
+                        : 1 - Math.pow(-2 * t + 2, 3) / 2;
+                    
+                    window.scrollTo(
+                        startX + distanceX * ease,
+                        startY + distanceY * ease
+                    );
+                    
+                    if (t < 1) {{
+                        requestAnimationFrame(step);
+                    }} else {{
+                        // Snap to exact position after animation
+                        if (window.currentColumnCount > 1) snapScroll();
+                    }}
                 }}
                 requestAnimationFrame(step);
             }}
-
+            
+            // ===============================================================
+            // SNAP SCROLL TO COLUMN BOUNDARY
+            // ===============================================================
             function snapScroll() {{
                 if (window.currentColumnCount <= 1) return;
+                
                 const colWidth = getColumnWidth();
                 const current = window.scrollX;
                 const snapped = Math.round(current / colWidth) * colWidth;
-                if (Math.abs(snapped - current) > 2)
+                
+                if (Math.abs(snapped - current) > 2) {{
                     window.scrollTo({{ left: snapped, behavior: 'smooth' }});
+                }}
             }}
-
+            
+            // ===============================================================
+            // SCROLL EVENT LISTENER (for snap-to-column)
+            // ===============================================================
             let scrollTimer;
             window.addEventListener('scroll', () => {{
                 clearTimeout(scrollTimer);
@@ -2240,36 +2315,127 @@ class EPubViewer(Adw.ApplicationWindow):
                     if (window.currentColumnCount > 1) snapScroll();
                 }}, 150);
             }});
-
+            
+            // ===============================================================
+            // MOUSE WHEEL NAVIGATION (scrolls exactly 1 column)
+            // ===============================================================
             window.addEventListener('wheel', (e) => {{
-                if (window.currentColumnCount <= 1) return;
+                if (window.currentColumnCount <= 1) {{
+                    // Single column: allow default vertical scrolling
+                    return;
+                }}
+                
+                // Multi-column: horizontal navigation
                 e.preventDefault();
+                
                 const colWidth = getColumnWidth();
+                if (colWidth <= 0) return;
+                
+                // Scroll exactly 1 column left or right
                 const dir = Math.sign(e.deltaY || e.deltaX);
                 const target = Math.max(0, Math.min(
                     document.body.scrollWidth - window.innerWidth,
                     window.scrollX + dir * colWidth
                 ));
-                smoothScrollTo(target);
+                
+                smoothScrollTo(target, window.scrollY);
             }}, {{ passive: false }});
-
+            
+            // ===============================================================
+            // KEYBOARD NAVIGATION
+            // ===============================================================
             document.addEventListener('keydown', (e) => {{
                 if (e.ctrlKey || e.metaKey || e.altKey) return;
+                
                 const colWidth = getColumnWidth();
+                const viewportH = window.innerHeight;
                 const maxScroll = document.body.scrollWidth - window.innerWidth;
+                const maxScrollY = document.body.scrollHeight - viewportH;
+                
                 let target = window.scrollX;
-                switch (e.key) {{
-                    case 'ArrowLeft': e.preventDefault(); target = Math.max(0, window.scrollX - colWidth); break;
-                    case 'ArrowRight': e.preventDefault(); target = Math.min(maxScroll, window.scrollX + colWidth); break;
-                    case 'PageUp': e.preventDefault(); target = Math.max(0, window.scrollX - colWidth * 2); break;
-                    case 'PageDown': e.preventDefault(); target = Math.min(maxScroll, window.scrollX + colWidth * 2); break;
-                    case 'Home': e.preventDefault(); target = 0; break;
-                    case 'End': e.preventDefault(); target = maxScroll; break;
-                    default: return;
+                let targetY = window.scrollY;
+                let shouldScroll = false;
+                
+                if (window.currentColumnCount === 1) {{
+                    // SINGLE COLUMN: Vertical scrolling
+                    switch (e.key) {{
+                        case 'ArrowUp':
+                            e.preventDefault();
+                            targetY = Math.max(0, targetY - viewportH * 0.8);
+                            shouldScroll = true;
+                            break;
+                        case 'ArrowDown':
+                            e.preventDefault();
+                            targetY = Math.min(maxScrollY, targetY + viewportH * 0.8);
+                            shouldScroll = true;
+                            break;
+                        case 'PageUp':
+                            e.preventDefault();
+                            targetY = Math.max(0, targetY - viewportH);
+                            shouldScroll = true;
+                            break;
+                        case 'PageDown':
+                            e.preventDefault();
+                            targetY = Math.min(maxScrollY, targetY + viewportH);
+                            shouldScroll = true;
+                            break;
+                        case 'Home':
+                            e.preventDefault();
+                            targetY = 0;
+                            shouldScroll = true;
+                            break;
+                        case 'End':
+                            e.preventDefault();
+                            targetY = maxScrollY;
+                            shouldScroll = true;
+                            break;
+                    }}
+                    if (shouldScroll) {{
+                        smoothScrollTo(window.scrollX, targetY);
+                    }}
+                }} else {{
+                    // MULTI-COLUMN: Horizontal navigation
+                    switch (e.key) {{
+                        case 'ArrowLeft':
+                            e.preventDefault();
+                            target = Math.max(0, window.scrollX - colWidth);
+                            shouldScroll = true;
+                            break;
+                        case 'ArrowRight':
+                            e.preventDefault();
+                            target = Math.min(maxScroll, window.scrollX + colWidth);
+                            shouldScroll = true;
+                            break;
+                        case 'PageUp':
+                            e.preventDefault();
+                            // Scroll N columns (where N = current column count)
+                            target = Math.max(0, window.scrollX - (colWidth * window.currentColumnCount));
+                            shouldScroll = true;
+                            break;
+                        case 'PageDown':
+                            e.preventDefault();
+                            // Scroll N columns (where N = current column count)
+                            target = Math.min(maxScroll, window.scrollX + (colWidth * window.currentColumnCount));
+                            shouldScroll = true;
+                            break;
+                        case 'Home':
+                            e.preventDefault();
+                            target = 0;
+                            shouldScroll = true;
+                            break;
+                        case 'End':
+                            e.preventDefault();
+                            target = maxScroll;
+                            shouldScroll = true;
+                            break;
+                    }}
+                    if (shouldScroll) {{
+                        smoothScrollTo(target, window.scrollY);
+                    }}
                 }}
-                smoothScrollTo(target);
             }});
-
+            
+            // Initial snap after page loads
             requestAnimationFrame(() => snapScroll());
         }})();
         """
@@ -2593,7 +2759,24 @@ class EPubViewer(Adw.ApplicationWindow):
                 self.href_map[k] = node
 
     # ---- helper: wrapper that injects CSS & base ----
-    # A) Replace your existing _wrap_html with this (keeps previous behavior; injects margins)
+    def _on_webconsole_message(self, webview, message):
+        """Debug: Print JavaScript console messages to terminal"""
+        try:
+            # Try different WebKit API versions
+            try:
+                # WebKit 6.0 API
+                msg = message.get_message()
+            except:
+                try:
+                    # Older API
+                    msg = message.props.message if hasattr(message, 'props') else str(message)
+                except:
+                    msg = str(message)
+            print(f"[WebView Console] {msg}")
+        except Exception as e:
+            print(f"[WebView Console Error] {e}")
+            
+                
     def _wrap_html(self, raw_html, base_uri):
         """
         Wrap EPUB HTML and inject user overrides: font, size, line-height, justification,
@@ -2620,36 +2803,43 @@ class EPubViewer(Adw.ApplicationWindow):
             padding_decl = f"padding: {mt}px {mr}px {mb}px {ml}px;"
 
             col_rules = (
-                "/* Reset nested column rules from EPUB CSS */\n"
-                ".ebook-content * {\n"
-                "  -webkit-column-count: unset !important;\n"
-                "  column-count: unset !important;\n"
-                "  -webkit-column-width: unset !important;\n"
-                "  column-width: unset !important;\n"
-                "  -webkit-column-gap: unset !important;\n"
-                "  column-gap: unset !important;\n"
-                "  -webkit-column-fill: unset !important;\n"
-                "  column-fill: unset !important;\n"
-                "}\n"
-                "html, body { height: 100%; min-height: 100%; margin: 0; padding: 0; overflow-x: hidden; }\n"
-                ".ebook-content {\n"
-            ) + "  " + col_decl + " " + gap_decl + " " + fill_decl + "\n" + (
-                "  height: 100vh !important;\n"
-                "  min-height: 0 !important;\n            "
-            ) + "  " + padding_decl + "\n" + (
-                "  overflow-y: hidden !important;\n"
-                "  box-sizing: border-box !important;\n"
-                "}\n"
-                ".single-column .ebook-content {\n"
-                "  height: auto !important;\n"
-                "  overflow-y: auto !important;\n"
-                "  -webkit-column-width: unset !important;\n"
-                "  column-width: unset !important;\n"
-                "  -webkit-column-count: unset !important;\n"
-                "  column-count: unset !important;\n"
-                "}\n"
-                ".ebook-content img, .ebook-content svg { max-width: 100%; height: auto; }\n"
-            )
+            "/* Reset nested column rules from EPUB CSS */\n"
+            ".ebook-content * {\n"
+            "  -webkit-column-count: unset !important;\n"
+            "  column-count: unset !important;\n"
+            "  -webkit-column-width: unset !important;\n"
+            "  column-width: unset !important;\n"
+            "  -webkit-column-gap: unset !important;\n"
+            "  column-gap: unset !important;\n"
+            "  -webkit-column-fill: unset !important;\n"
+            "  column-fill: unset !important;\n"
+            "}\n"
+            "html, body {\n"
+            "  height: 100%;\n"
+            "  margin: 0;\n"
+            "  padding: 0;\n"
+            "  overflow: hidden !important;\n"  # FIXED: Hide scrollbars on html/body
+            "}\n"
+            ".ebook-content {\n"
+        ) + "  " + col_decl + " " + gap_decl + " " + fill_decl + "\n" + (
+            "  width: 100vw !important;\n"  # FIXED: Constrain to viewport width
+            "  height: 100vh !important;\n"
+        ) + "  " + padding_decl + "\n" + (
+            "  overflow-x: auto !important;\n"  # FIXED: Allow horizontal scroll
+            "  overflow-y: hidden !important;\n"
+            "  box-sizing: border-box !important;\n"
+            "}\n"
+            ".single-column .ebook-content {\n"
+            "  height: auto !important;\n"
+            "  overflow-y: auto !important;\n"
+            "  overflow-x: hidden !important;\n"
+            "  -webkit-column-width: unset !important;\n"
+            "  column-width: unset !important;\n"
+            "  -webkit-column-count: unset !important;\n"
+            "  column-count: unset !important;\n"
+            "}\n"
+            ".ebook-content img, .ebook-content svg { max-width: 100%; height: auto; }\n"
+        )
 
             # user overrides (font/size/line-height/justify)
             extra = ""
@@ -2694,12 +2884,286 @@ class EPubViewer(Adw.ApplicationWindow):
         except Exception:
             page_css = (self.css_content or "") + "\n" + THEME_INJECTION_CSS
 
-        js_template = """<script>/* column JS omitted for brevity - keep your existing script */</script>"""
-        # keep your existing JS; if you used the previous version, reuse it and keep __GAP__ replacement.
-        js_detect_columns = js_template.replace("__GAP__", str(getattr(self, "_column_gap", 24)))
+        # Determine effective column count for JavaScript
+        if self.column_mode_use_width:
+            effective_columns = 2  # Default for width-based mode
+        else:
+            effective_columns = getattr(self, 'column_count', 2)
+        
+        # ENHANCED COLUMN NAVIGATION JAVASCRIPT WITH DEBUGGING
+        js_detect_columns = f"""<script>
+    (function() {{
+        // Redirect console.log to Python
+        const originalLog = console.log;
+        console.log = function(...args) {{
+            const msg = args.map(a => String(a)).join(' ');
+            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.consoleLog) {{
+                window.webkit.messageHandlers.consoleLog.postMessage(msg);
+            }}
+            originalLog.apply(console, args);
+        }};
+        
+        console.log('=== COLUMN NAVIGATION SCRIPT LOADED ===');
+        console.log('Column count: {effective_columns}');
+        
+        // ===============================================================
+        // GLOBAL STATE
+        // ===============================================================
+        window.currentColumnCount = {effective_columns};
+        
+        // ===============================================================
+        // COLUMN WIDTH CALCULATION
+        // ===============================================================
+        function getColumnWidth() {{
+            const container = document.querySelector('.ebook-content') || document.body;
+            if (!container) {{
+                console.log('No container found');
+                return window.innerWidth;
+            }}
+            
+            const style = getComputedStyle(container);
+            const gap = parseFloat(style.columnGap) || 0;
+            const totalWidth = container.scrollWidth;
+            const colCount = window.currentColumnCount || 1;
+            
+            const colWidth = (totalWidth - gap * (colCount - 1)) / colCount;
+            const result = colWidth + gap;
+            console.log('Column width: ' + result + 'px (total:' + totalWidth + ' gap:' + gap + ')');
+            return result;
+        }}
+        
+        // ===============================================================
+        // SMOOTH SCROLL ANIMATION
+        // ===============================================================
+        function smoothScrollTo(xTarget, yTarget) {{
+            console.log('Smooth scroll to X:' + xTarget + ' Y:' + yTarget);
+            const startX = window.scrollX;
+            const startY = window.scrollY;
+            const distanceX = xTarget - startX;
+            const distanceY = yTarget - startY;
+            const duration = 350;
+            const start = performance.now();
+            
+            function step(time) {{
+                const elapsed = time - start;
+                const t = Math.min(elapsed / duration, 1);
+                
+                const ease = t < 0.5 
+                    ? 4 * t * t * t 
+                    : 1 - Math.pow(-2 * t + 2, 3) / 2;
+                
+                window.scrollTo(
+                    startX + distanceX * ease,
+                    startY + distanceY * ease
+                );
+                
+                if (t < 1) {{
+                    requestAnimationFrame(step);
+                }} else {{
+                    if (window.currentColumnCount > 1) snapScroll();
+                }}
+            }}
+            requestAnimationFrame(step);
+        }}
+        
+        // ===============================================================
+        // SNAP SCROLL
+        // ===============================================================
+        function snapScroll() {{
+            if (window.currentColumnCount <= 1) return;
+            
+            const colWidth = getColumnWidth();
+            const current = window.scrollX;
+            const snapped = Math.round(current / colWidth) * colWidth;
+            
+            if (Math.abs(snapped - current) > 2) {{
+                console.log('Snapping from ' + current + ' to ' + snapped);
+                window.scrollTo({{ left: snapped, behavior: 'smooth' }});
+            }}
+        }}
+        
+        // ===============================================================
+        // SCROLL EVENT LISTENER
+        // ===============================================================
+        let scrollTimer;
+        window.addEventListener('scroll', function() {{
+            clearTimeout(scrollTimer);
+            scrollTimer = setTimeout(function() {{
+                if (window.currentColumnCount > 1) snapScroll();
+            }}, 150);
+        }}, false);
+        console.log('Scroll listener attached');
+        
+        // ===============================================================
+        // MOUSE WHEEL NAVIGATION
+        // ===============================================================
+        window.addEventListener('wheel', function(e) {{
+            console.log('WHEEL deltaY:' + e.deltaY + ' columns:' + window.currentColumnCount);
+            
+            if (window.currentColumnCount <= 1) {{
+                console.log('Single column - default scroll');
+                return;
+            }}
+            
+            console.log('Multi-column - preventing default');
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const colWidth = getColumnWidth();
+            if (colWidth <= 0) {{
+                console.log('Invalid column width');
+                return;
+            }}
+            
+            const dir = e.deltaY > 0 ? 1 : -1;
+            const currentScroll = window.scrollX;
+            const bodyScrollWidth = document.body.scrollWidth;
+            const innerWidth = window.innerWidth;
+            const maxScroll = bodyScrollWidth - innerWidth;
+            
+            console.log('bodyScrollW:' + bodyScrollWidth + ' innerW:' + innerWidth + ' maxScroll:' + maxScroll);
+            
+            const target = Math.max(0, Math.min(maxScroll, currentScroll + dir * colWidth));
+            
+            console.log('Wheel scroll from ' + currentScroll + ' to ' + target + ' (dir:' + dir + ' colW:' + colWidth + ')');
+            smoothScrollTo(target, window.scrollY);
+        }}, {{ passive: false, capture: true }});
+        console.log('Wheel listener attached');
+        
+        // ===============================================================
+        // KEYBOARD NAVIGATION
+        // ===============================================================
+        document.addEventListener('keydown', function(e) {{
+            console.log('KEY:' + e.key + ' ctrl:' + e.ctrlKey + ' cols:' + window.currentColumnCount);
+            
+            if (e.ctrlKey || e.metaKey || e.altKey) {{
+                console.log('Modifier key, ignoring');
+                return;
+            }}
+            
+            const colWidth = getColumnWidth();
+            const viewportH = window.innerHeight;
+            const maxScroll = document.body.scrollWidth - window.innerWidth;
+            const maxScrollY = document.body.scrollHeight - viewportH;
+            
+            console.log('maxScroll:' + maxScroll + ' maxScrollY:' + maxScrollY);
+            
+            let target = window.scrollX;
+            let targetY = window.scrollY;
+            let shouldScroll = false;
+            
+            if (window.currentColumnCount === 1) {{
+                switch (e.key) {{
+                    case 'ArrowUp':
+                        e.preventDefault();
+                        targetY = Math.max(0, targetY - viewportH * 0.8);
+                        shouldScroll = true;
+                        console.log('ArrowUp -> Y:' + targetY);
+                        break;
+                    case 'ArrowDown':
+                        e.preventDefault();
+                        targetY = Math.min(maxScrollY, targetY + viewportH * 0.8);
+                        shouldScroll = true;
+                        console.log('ArrowDown -> Y:' + targetY);
+                        break;
+                    case 'PageUp':
+                        e.preventDefault();
+                        targetY = Math.max(0, targetY - viewportH);
+                        shouldScroll = true;
+                        console.log('PageUp -> Y:' + targetY);
+                        break;
+                    case 'PageDown':
+                        e.preventDefault();
+                        targetY = Math.min(maxScrollY, targetY + viewportH);
+                        shouldScroll = true;
+                        console.log('PageDown -> Y:' + targetY);
+                        break;
+                    case 'Home':
+                        e.preventDefault();
+                        targetY = 0;
+                        shouldScroll = true;
+                        console.log('Home -> top');
+                        break;
+                    case 'End':
+                        e.preventDefault();
+                        targetY = maxScrollY;
+                        shouldScroll = true;
+                        console.log('End -> bottom');
+                        break;
+                }}
+                if (shouldScroll) smoothScrollTo(window.scrollX, targetY);
+            }} else {{
+                switch (e.key) {{
+                    case 'ArrowLeft':
+                        e.preventDefault();
+                        target = Math.max(0, window.scrollX - colWidth);
+                        shouldScroll = true;
+                        console.log('ArrowLeft -> X:' + target);
+                        break;
+                    case 'ArrowRight':
+                        e.preventDefault();
+                        target = Math.min(maxScroll, window.scrollX + colWidth);
+                        shouldScroll = true;
+                        console.log('ArrowRight -> X:' + target);
+                        break;
+                    case 'PageUp':
+                        e.preventDefault();
+                        target = Math.max(0, window.scrollX - (colWidth * window.currentColumnCount));
+                        shouldScroll = true;
+                        console.log('PageUp -> ' + window.currentColumnCount + ' cols to X:' + target);
+                        break;
+                    case 'PageDown':
+                        e.preventDefault();
+                        target = Math.min(maxScroll, window.scrollX + (colWidth * window.currentColumnCount));
+                        shouldScroll = true;
+                        console.log('PageDown -> ' + window.currentColumnCount + ' cols to X:' + target);
+                        break;
+                    case 'Home':
+                        e.preventDefault();
+                        target = 0;
+                        shouldScroll = true;
+                        console.log('Home -> start');
+                        break;
+                    case 'End':
+                        e.preventDefault();
+                        target = maxScroll;
+                        shouldScroll = true;
+                        console.log('End -> end');
+                        break;
+                }}
+                if (shouldScroll) smoothScrollTo(target, window.scrollY);
+            }}
+        }}, {{ passive: false, capture: true }});
+        console.log('Keyboard listener attached');
+        
+        // Initial snap
+        setTimeout(function() {{
+            console.log('Initial dimensions:');
+            console.log('  body.scrollWidth: ' + document.body.scrollWidth);
+            console.log('  window.innerWidth: ' + window.innerWidth);
+            console.log('  .ebook-content width: ' + (document.querySelector('.ebook-content') ? document.querySelector('.ebook-content').offsetWidth : 'N/A'));
+            if (window.currentColumnCount > 1) snapScroll();
+        }}, 100);
+        
+        console.log('=== SCRIPT COMPLETE ===');
+    }})();
+    </script>"""
 
         link_intercept_script = """
-        <script> (function(){ /* keep existing link intercept script */ })(); </script>
+        <script>
+        (function(){
+            document.addEventListener('click', function(e) {
+                var target = e.target;
+                while (target && target.tagName !== 'A') {
+                    target = target.parentElement;
+                }
+                if (target && target.tagName === 'A' && target.href) {
+                    e.preventDefault();
+                    window.location.href = target.href;
+                }
+            });
+        })();
+        </script>
         """
 
         base_tag = ""
@@ -2718,7 +3182,6 @@ class EPubViewer(Adw.ApplicationWindow):
 
         wrapped = "<!DOCTYPE html><html><head>{}</head><body><div class=\"ebook-content\">{}</div></body></html>".format(head, raw_html)
         return wrapped
-
 
     # ---- file dialog ----
     def open_file(self, *_):

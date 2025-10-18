@@ -709,17 +709,40 @@ class EPubViewer(Adw.ApplicationWindow):
         self.split.set_content(self.toolbar)
 
         # WebKit fallback
+        # WebKit fallback
         try:
             gi.require_version("WebKit", "6.0")
             from gi.repository import WebKit
             self.WebKit = WebKit
             self.webview = WebKit.WebView()
+            
+            # ENABLE JAVASCRIPT
+            try:
+                settings = self.webview.get_settings()
+                settings.set_enable_javascript(True)
+                settings.set_javascript_can_access_clipboard(False)
+                settings.set_enable_developer_extras(True)
+                print("✓ WebKit JavaScript enabled:", settings.get_enable_javascript())
+            except Exception as e:
+                print(f"⚠ Could not configure WebKit settings: {e}")
+            
             self.scrolled.set_child(self.webview)
             try: 
                 self.webview.connect("decide-policy", self.on_decide_policy)
-                self.webview.connect("console-message", self._on_webconsole_message)
-
-            except Exception: pass
+                # REMOVED: self.webview.connect("console-message", self._on_webconsole_message)
+                print("✓ WebKit decide-policy connected")
+            except Exception as e:
+                print(f"⚠ Could not connect WebKit handlers: {e}")
+                
+            # ADD CONSOLE MESSAGE HANDLER (like scrollEvent)
+            try:
+                content_manager = self.webview.get_user_content_manager()
+                content_manager.connect("script-message-received::consoleLog", 
+                                        self._on_console_log_received)
+                content_manager.register_script_message_handler("consoleLog")
+                print("✓ Console log handler registered")
+            except Exception as e:
+                print(f"⚠ Could not register console handler: {e}")
             # after creating self.webview (inside __init__), add:
             try:
                 def _on_load_changed(webview, load_event):
@@ -795,7 +818,13 @@ class EPubViewer(Adw.ApplicationWindow):
         # periodic update of TTS button states
         GLib.timeout_add(400, self._update_tts_button_states)
 
-
+    def _on_console_log_received(self, content_manager, js_result):
+        """Handle console.log messages from JavaScript"""
+        try:
+            msg = js_result.to_string()
+            print(f"[JS] {msg}")
+        except Exception as e:
+            print(f"[JS Error] Could not read message: {e}")
 
     # ---------- minimal TTS control methods ----------
     def _update_tts_button_states(self):
@@ -1823,28 +1852,40 @@ class EPubViewer(Adw.ApplicationWindow):
 
     # ---- new window methods invoked by app actions ----
     def set_columns(self, n):
+        """Set number of columns (from menu action)"""
         try:
             n = int(n)
         except Exception:
             return
         self.column_mode_use_width = False
         self.column_count = max(1, min(10, n))
+        print(f"✓ Set columns to {self.column_count}")
         try:
-            self.display_page()
-        except Exception:
-            pass
+            if self.book and self.items:
+                self.display_page()
+                print(f"✓ Regenerated page with {self.column_count} columns")
+        except Exception as e:
+            print(f"✗ display_page() failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     def set_column_width(self, w):
+        """Set column width in pixels (from menu action)"""
         try:
             w = int(w)
         except Exception:
             return
         self.column_mode_use_width = True
         self.column_width_px = max(50, min(500, w))
+        print(f"✓ Set column width to {self.column_width_px}px")
         try:
-            self.display_page()
-        except Exception:
-            pass
+            if self.book and self.items:
+                self.display_page()
+                print(f"✓ Regenerated page with width {self.column_width_px}px")
+        except Exception as e:
+            print(f"✗ display_page() failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     # ---- column control handlers (kept for compatibility but widgets replaced) ----
     def _on_column_control_changed(self):
@@ -2192,95 +2233,6 @@ class EPubViewer(Adw.ApplicationWindow):
         container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL); container.append(scroll)
         self.toolbar.set_content(container); self.content_title_label.set_text("Library")
 
-    def apply_column_layout(self, num_columns=2):
-        """Inject multi-column scrollable layout with snapping and PageUp/PageDown support."""
-        js_script = f"""
-        (function() {{
-            window.currentColumnCount = {num_columns};
-
-            function getColumnWidth() {{
-                const container = document.querySelector('.ebook-content, body');
-                if (!container) return window.innerWidth;
-                const style = getComputedStyle(container);
-                const gap = parseFloat(style.columnGap) || 0;
-                const totalWidth = container.scrollWidth;
-                const colCount = window.currentColumnCount || 1;
-                const colWidth = (totalWidth - gap * (colCount - 1)) / colCount;
-                return colWidth + gap;
-            }}
-
-            function smoothScrollTo(xTarget) {{
-                const startX = window.scrollX;
-                const distance = xTarget - startX;
-                const duration = 350;
-                const start = performance.now();
-                function step(time) {{
-                    const t = Math.min((time - start) / duration, 1);
-                    const ease = t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2;
-                    window.scrollTo(startX + distance * ease, 0);
-                    if (t < 1) requestAnimationFrame(step);
-                    else snapScroll();
-                }}
-                requestAnimationFrame(step);
-            }}
-
-            function snapScroll() {{
-                if (window.currentColumnCount <= 1) return;
-                const colWidth = getColumnWidth();
-                const current = window.scrollX;
-                const snapped = Math.round(current / colWidth) * colWidth;
-                if (Math.abs(snapped - current) > 2)
-                    window.scrollTo({{ left: snapped, behavior: 'smooth' }});
-            }}
-
-            let scrollTimer;
-            window.addEventListener('scroll', () => {{
-                clearTimeout(scrollTimer);
-                scrollTimer = setTimeout(() => {{
-                    if (window.currentColumnCount > 1) snapScroll();
-                }}, 150);
-            }});
-
-            window.addEventListener('wheel', (e) => {{
-                if (window.currentColumnCount <= 1) return;
-                e.preventDefault();
-                const colWidth = getColumnWidth();
-                const dir = Math.sign(e.deltaY || e.deltaX);
-                const target = Math.max(0, Math.min(
-                    document.body.scrollWidth - window.innerWidth,
-                    window.scrollX + dir * colWidth
-                ));
-                smoothScrollTo(target);
-            }}, {{ passive: false }});
-
-            document.addEventListener('keydown', (e) => {{
-                if (e.ctrlKey || e.metaKey || e.altKey) return;
-                const colWidth = getColumnWidth();
-                const maxScroll = document.body.scrollWidth - window.innerWidth;
-                let target = window.scrollX;
-                switch (e.key) {{
-                    case 'ArrowLeft': e.preventDefault(); target = Math.max(0, window.scrollX - colWidth); break;
-                    case 'ArrowRight': e.preventDefault(); target = Math.min(maxScroll, window.scrollX + colWidth); break;
-                    case 'PageUp': e.preventDefault(); target = Math.max(0, window.scrollX - colWidth * 2); break;
-                    case 'PageDown': e.preventDefault(); target = Math.min(maxScroll, window.scrollX + colWidth * 2); break;
-                    case 'Home': e.preventDefault(); target = 0; break;
-                    case 'End': e.preventDefault(); target = maxScroll; break;
-                    default: return;
-                }}
-                smoothScrollTo(target);
-            }});
-
-            requestAnimationFrame(() => snapScroll());
-        }})();
-        """
-
-        try:
-            self.webview.evaluate_javascript(js_script, -1, None, None, None, None, None)
-        except Exception:
-            try:
-                self.webview.run_javascript(js_script, None, None, None)
-            except Exception:
-                pass
 
     # ---- UI helpers ----
     def _setup_window_size_constraints(self):
@@ -2593,12 +2545,31 @@ class EPubViewer(Adw.ApplicationWindow):
                 self.href_map[k] = node
 
     # ---- helper: wrapper that injects CSS & base ----
-    # A) Replace your existing _wrap_html with this (keeps previous behavior; injects margins)
+    def _on_webconsole_message(self, webview, message):
+        """Debug: Print JavaScript console messages to terminal"""
+        try:
+            # Try different WebKit API versions
+            try:
+                # WebKit 6.0 API
+                msg = message.get_message()
+            except:
+                try:
+                    # Older API
+                    msg = message.props.message if hasattr(message, 'props') else str(message)
+                except:
+                    msg = str(message)
+            print(f"[WebView Console] {msg}")
+        except Exception as e:
+            print(f"[WebView Console Error] {e}")
+            
+                
     def _wrap_html(self, raw_html, base_uri):
         """
         Wrap EPUB HTML and inject user overrides: font, size, line-height, justification,
         column gap and page margins so they persist across rebuilds.
         """
+        print(f"📄 _wrap_html: column_count={getattr(self, 'column_count', '?')}, use_width={getattr(self, 'column_mode_use_width', '?')}")
+        
         try:
             page_css_base = (self.css_content or "") + "\n" + THEME_INJECTION_CSS
 
@@ -2608,48 +2579,85 @@ class EPubViewer(Adw.ApplicationWindow):
             else:
                 col_decl = "column-count: {}; -webkit-column-count: {};".format(self.column_count, self.column_count)
 
-            gap_val = getattr(self, "_column_gap", 24)
+            gap_val = getattr(self, "_column_gap", 32)
             gap_decl = "column-gap: {}px; -webkit-column-gap: {}px;".format(gap_val, gap_val)
             fill_decl = "column-fill: auto; -webkit-column-fill: auto;"
 
-            # page margins (use padding inside .ebook-content as page margins)
+            # page margins
             mt = int(getattr(self, "page_margin_top", 12))
             mr = int(getattr(self, "page_margin_right", 12))
             mb = int(getattr(self, "page_margin_bottom", 12))
             ml = int(getattr(self, "page_margin_left", 12))
             padding_decl = f"padding: {mt}px {mr}px {mb}px {ml}px;"
 
-            col_rules = (
-                "/* Reset nested column rules from EPUB CSS */\n"
-                ".ebook-content * {\n"
-                "  -webkit-column-count: unset !important;\n"
-                "  column-count: unset !important;\n"
-                "  -webkit-column-width: unset !important;\n"
-                "  column-width: unset !important;\n"
-                "  -webkit-column-gap: unset !important;\n"
-                "  column-gap: unset !important;\n"
-                "  -webkit-column-fill: unset !important;\n"
-                "  column-fill: unset !important;\n"
-                "}\n"
-                "html, body { height: 100%; min-height: 100%; margin: 0; padding: 0; overflow-x: hidden; }\n"
-                ".ebook-content {\n"
-            ) + "  " + col_decl + " " + gap_decl + " " + fill_decl + "\n" + (
-                "  height: 100vh !important;\n"
-                "  min-height: 0 !important;\n            "
-            ) + "  " + padding_decl + "\n" + (
-                "  overflow-y: hidden !important;\n"
-                "  box-sizing: border-box !important;\n"
-                "}\n"
-                ".single-column .ebook-content {\n"
-                "  height: auto !important;\n"
-                "  overflow-y: auto !important;\n"
-                "  -webkit-column-width: unset !important;\n"
-                "  column-width: unset !important;\n"
-                "  -webkit-column-count: unset !important;\n"
-                "  column-count: unset !important;\n"
-                "}\n"
-                ".ebook-content img, .ebook-content svg { max-width: 100%; height: auto; }\n"
-            )
+            # Determine if single column mode
+            is_single_column = (not self.column_mode_use_width and getattr(self, 'column_count', 1) == 1)
+            
+            if is_single_column:
+                # SINGLE COLUMN: Vertical scrolling
+                col_rules = """
+                    html, body {
+                        height: 100%;
+                        margin: 0;
+                        padding: 0;
+                        overflow: hidden;
+                    }
+                    .ebook-content {
+                        width: 100%;
+                        height: 100%;
+                        overflow-x: hidden !important;
+                        overflow-y: auto !important;
+                        box-sizing: border-box;
+                    """ + padding_decl + """
+                    }
+                    .ebook-content img, .ebook-content svg { max-width: 100%; height: auto; }
+                """
+            else:
+                # MULTI-COLUMN: Horizontal scrolling
+                col_rules = f"""
+                    html {{
+                        height: 100vh;
+                        overflow: hidden;
+                    }}
+                    body {{
+                        margin: 0;
+                        padding: 0;
+                        height: 100vh;
+                        overflow: hidden;
+                    }}
+                    .ebook-content {{
+                        {col_decl}
+                        {gap_decl}
+                        {fill_decl}
+                        {padding_decl}
+                        
+                        /* Container dimensions */
+                        width: 100vw;
+                        height: 100vh;
+                        
+                        /* Reset nested columns */
+                        * {{
+                            -webkit-column-count: unset !important;
+                            column-count: unset !important;
+                        }}
+                        
+                        /* Scrolling behavior */
+                        overflow-x: auto;
+                        overflow-y: hidden;
+                        
+                        /* Important for columns to work */
+                        box-sizing: border-box;
+                        position: relative;
+                    }}
+                    .ebook-content img, .ebook-content svg {{
+                        max-width: 100%;
+                        height: auto;
+                        break-inside: avoid;
+                    }}
+                    .ebook-content p, .ebook-content div {{
+                        break-inside: auto;
+                    }}
+                """
 
             # user overrides (font/size/line-height/justify)
             extra = ""
@@ -2691,15 +2699,169 @@ class EPubViewer(Adw.ApplicationWindow):
 
             page_css = page_css_base + "\n" + col_rules + "\n" + extra
 
-        except Exception:
+        except Exception as e:
+            print(f"CSS generation error: {e}")
             page_css = (self.css_content or "") + "\n" + THEME_INJECTION_CSS
 
-        js_template = """<script>/* column JS omitted for brevity - keep your existing script */</script>"""
-        # keep your existing JS; if you used the previous version, reuse it and keep __GAP__ replacement.
-        js_detect_columns = js_template.replace("__GAP__", str(getattr(self, "_column_gap", 24)))
+        # Determine effective column count for JavaScript
+        if self.column_mode_use_width:
+            effective_columns = 2  # Default for width-based mode
+        else:
+            effective_columns = getattr(self, 'column_count', 1)
+        
+        print(f"📊 Injecting JS with {effective_columns} columns")
+        
+        # ENHANCED COLUMN NAVIGATION JAVASCRIPT
+        js_detect_columns = f"""<script>
+    (function() {{
+        const originalLog = console.log;
+        console.log = function(...args) {{
+            const msg = args.map(a => String(a)).join(' ');
+            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.consoleLog) {{
+                window.webkit.messageHandlers.consoleLog.postMessage(msg);
+            }}
+            originalLog.apply(console, args);
+        }};
+        
+        console.log('=== COLUMN SCRIPT LOADED ===');
+        console.log('Columns: {effective_columns}');
+        
+        window.currentColumnCount = {effective_columns};
+        
+        function getColumnWidth() {{
+            const container = document.querySelector('.ebook-content');
+            if (!container) return window.innerWidth;
+            
+            const colCount = window.currentColumnCount || 1;
+            const gap = parseFloat(getComputedStyle(container).columnGap) || 0;
+            const viewportW = container.clientWidth;
+            const totalGap = gap * (colCount - 1);
+            const colW = (viewportW - totalGap) / colCount;
+            
+            console.log('ColW: ' + colW.toFixed(1) + 'px (viewport:' + viewportW + ' gap:' + gap + ')');
+            return colW + gap;
+        }}
+        
+        function smoothScrollTo(xTarget, yTarget) {{
+            const container = document.querySelector('.ebook-content');
+            if (!container) return;
+            
+            const startX = container.scrollLeft;
+            const startY = container.scrollTop;
+            const distX = xTarget - startX;
+            const distY = yTarget - startY;
+            const duration = 350;
+            const start = performance.now();
+            
+            function step(time) {{
+                const t = Math.min((time - start) / duration, 1);
+                const ease = t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
+                container.scrollLeft = startX + distX * ease;
+                container.scrollTop = startY + distY * ease;
+                if (t < 1) requestAnimationFrame(step);
+            }}
+            requestAnimationFrame(step);
+        }}
+        
+        function snapScroll() {{
+            if (window.currentColumnCount <= 1) return;
+            const container = document.querySelector('.ebook-content');
+            if (!container) return;
+            const colW = getColumnWidth();
+            const curr = container.scrollLeft;
+            const snapped = Math.round(curr / colW) * colW;
+            if (Math.abs(snapped - curr) > 2) {{
+                console.log('Snap: ' + curr.toFixed(0) + ' → ' + snapped.toFixed(0));
+                container.scrollLeft = snapped;
+            }}
+        }}
+        
+        const container = document.querySelector('.ebook-content');
+        if (container) {{
+            let scrollTimer;
+            container.addEventListener('scroll', function() {{
+                clearTimeout(scrollTimer);
+                scrollTimer = setTimeout(() => {{
+                    if (window.currentColumnCount > 1) snapScroll();
+                }}, 150);
+            }});
+        }}
+        
+        window.addEventListener('wheel', function(e) {{
+            const container = document.querySelector('.ebook-content');
+            if (!container || window.currentColumnCount <= 1) return;
+            
+            e.preventDefault();
+            const colW = getColumnWidth();
+            const dir = e.deltaY > 0 ? 1 : -1;
+            const curr = container.scrollLeft;
+            const max = container.scrollWidth - container.clientWidth;
+            const target = Math.max(0, Math.min(max, curr + dir * colW));
+            
+            console.log('🖱️ ' + (dir>0?'→':'←') + ' | ' + curr.toFixed(0) + ' → ' + target.toFixed(0));
+            smoothScrollTo(target, container.scrollTop);
+        }}, {{passive: false, capture: true}});
+        
+        document.addEventListener('keydown', function(e) {{
+            if (e.ctrlKey || e.metaKey || e.altKey) return;
+            
+            const container = document.querySelector('.ebook-content');
+            if (!container) return;
+            
+            const colW = getColumnWidth();
+            const viewH = container.clientHeight;
+            const maxX = container.scrollWidth - container.clientWidth;
+            const maxY = container.scrollHeight - viewH;
+            
+            let x = container.scrollLeft, y = container.scrollTop, scroll = false;
+            
+            if (window.currentColumnCount === 1) {{
+                switch(e.key) {{
+                    case 'ArrowUp': e.preventDefault(); y = Math.max(0, y - viewH*0.8); scroll = true; break;
+                    case 'ArrowDown': e.preventDefault(); y = Math.min(maxY, y + viewH*0.8); scroll = true; break;
+                    case 'PageUp': e.preventDefault(); y = Math.max(0, y - viewH); scroll = true; break;
+                    case 'PageDown': e.preventDefault(); y = Math.min(maxY, y + viewH); scroll = true; break;
+                    case 'Home': e.preventDefault(); y = 0; scroll = true; break;
+                    case 'End': e.preventDefault(); y = maxY; scroll = true; break;
+                }}
+                if (scroll) {{ console.log('⬆️⬇️ ' + e.key); smoothScrollTo(x, y); }}
+            }} else {{
+                switch(e.key) {{
+                    case 'ArrowLeft': e.preventDefault(); x = Math.max(0, x - colW); scroll = true; break;
+                    case 'ArrowRight': e.preventDefault(); x = Math.min(maxX, x + colW); scroll = true; break;
+                    case 'PageUp': e.preventDefault(); x = Math.max(0, x - colW * window.currentColumnCount); scroll = true; break;
+                    case 'PageDown': e.preventDefault(); x = Math.min(maxX, x + colW * window.currentColumnCount); scroll = true; break;
+                    case 'Home': e.preventDefault(); x = 0; scroll = true; break;
+                    case 'End': e.preventDefault(); x = maxX; scroll = true; break;
+                }}
+                if (scroll) {{ console.log('⬅️➡️ ' + e.key + ' | ' + container.scrollLeft.toFixed(0) + ' → ' + x.toFixed(0)); smoothScrollTo(x, y); }}
+            }}
+        }}, {{passive: false, capture: true}});
+        
+        setTimeout(() => {{
+            const c = document.querySelector('.ebook-content');
+            if (c) console.log('📏 scrollW:' + c.scrollWidth + ' clientW:' + c.clientWidth + ' scrollH:' + c.scrollHeight + ' clientH:' + c.clientHeight);
+        }}, 200);
+        
+        console.log('=== SCRIPT READY ===');
+    }})();
+    </script>"""
 
         link_intercept_script = """
-        <script> (function(){ /* keep existing link intercept script */ })(); </script>
+        <script>
+        (function(){
+            document.addEventListener('click', function(e) {
+                var target = e.target;
+                while (target && target.tagName !== 'A') {
+                    target = target.parentElement;
+                }
+                if (target && target.tagName === 'A' && target.href) {
+                    e.preventDefault();
+                    window.location.href = target.href;
+                }
+            });
+        })();
+        </script>
         """
 
         base_tag = ""
@@ -2718,7 +2880,6 @@ class EPubViewer(Adw.ApplicationWindow):
 
         wrapped = "<!DOCTYPE html><html><head>{}</head><body><div class=\"ebook-content\">{}</div></body></html>".format(head, raw_html)
         return wrapped
-
 
     # ---- file dialog ----
     def open_file(self, *_):
@@ -3219,7 +3380,7 @@ class EPubViewer(Adw.ApplicationWindow):
             try:
                 if self.webview: 
                     self.webview.load_html(html, base_uri)
-                    GLib.timeout_add(300, lambda: (self.apply_column_layout(2), False)[1])
+
                 else: self.textview.get_buffer().set_text(f"[Image] {file_path}")
             except Exception as e:
                 print(f"Error loading image: {e}")
@@ -3242,7 +3403,7 @@ class EPubViewer(Adw.ApplicationWindow):
                 if self.webview:
                     self.webview.load_html(html_content, base_uri)
                     if fragment: GLib.timeout_add(100, lambda: self._scroll_to_fragment(fragment))
-                    GLib.timeout_add(300, lambda: (self.apply_column_layout(2), False)[1])
+
 
                 else:
                     self.textview.get_buffer().set_text(soup.get_text())
@@ -3316,12 +3477,10 @@ class EPubViewer(Adw.ApplicationWindow):
                 try:
                     if base_uri:
                         self.webview.load_html(wrapped_html, base_uri)
-                        GLib.timeout_add(300, lambda: (self.apply_column_layout(2), False)[1])
 
                     else:
                         # if base_uri isn't available, pass empty string
                         self.webview.load_html(wrapped_html, "")
-                        GLib.timeout_add(300, lambda: (self.apply_column_layout(2), False)[1])
 
                     if fragment:
                         GLib.timeout_add(100, lambda: self._scroll_to_fragment(fragment))
