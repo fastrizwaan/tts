@@ -1,0 +1,718 @@
+#!/usr/bin/env python3
+# Requires: pip install ebooklib
+import os, json, tempfile, shutil, re, urllib.parse, signal, sys, math
+os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
+import gi
+gi.require_version('Gtk', '4.0')
+gi.require_version('Adw', '1')
+gi.require_version('WebKit', '6.0')
+gi.require_version('Pango', '1.0')
+gi.require_version('PangoCairo', '1.0')
+from gi.repository import Gtk, Adw, WebKit, Gio, GLib, Pango
+from ebooklib import epub
+
+Adw.init()
+
+class EpubViewer(Adw.ApplicationWindow):
+    """
+    Changes to behavior:
+    - Two modes for columns:
+      * width mode (default): you set desired_column_width (pixels). The app computes how many
+        columns fit in the available width and uses CSS column-width so columns are created
+        automatically by layout. This keeps the column *width* consistent and allows the number
+        of columns to change with window size.
+      * fixed mode: user called set_column_count(n) (menu). That enforces exact column-count
+        in CSS (independent of window size) — columns widths will be adjusted by the browser.
+    """
+    def __init__(self, app):
+        super().__init__(application=app)
+        self.set_title("EPUB Viewer")
+        self.set_default_size(1200, 800)
+
+        # EPUB state
+        self.current_book = None
+        self.chapters = []
+        self.current_chapter = 0
+        self.temp_dir = None
+
+        # Column / paging settings
+        # Mode: 'width' or 'fixed'
+        self.column_mode = 'width'        # default use column-width to create columns
+        self.fixed_column_count = 2      # used when column_mode == 'fixed'
+        self.desired_column_width = 400  # used when column_mode == 'width'
+        self.column_gap = 40
+        self.column_padding = 20
+        self.actual_column_width = self.desired_column_width
+
+        # UI
+        self.setup_ui()
+        self.setup_navigation()
+
+    def setup_ui(self):
+        self.toolbar_view = Adw.ToolbarView()
+        self.set_content(self.toolbar_view)
+
+        header_bar = Adw.HeaderBar()
+        self.toolbar_view.add_top_bar(header_bar)
+
+        self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.toolbar_view.set_content(self.main_box)
+
+        menu_button = Gtk.MenuButton()
+        menu_button.set_icon_name("open-menu-symbolic")
+        menu_button.add_css_class("flat")
+        menu = Gio.Menu()
+
+        # Columns submenu: choosing a number switches to fixed mode (keeps behavior user expects)
+        columns_menu = Gio.Menu()
+        for i in range(1, 11):
+            columns_menu.append(f"{i} Column{'s' if i>1 else ''}", f"app.set-columns({i})")
+        menu.append_submenu("Columns (fixed)", columns_menu)
+
+        # Add an action to switch to width-based mode and set desired width quickly
+        width_menu = Gio.Menu()
+        for w in (300, 350, 400, 450, 500):
+            width_menu.append(f"{w}px width", f"app.set-column-width({w})")
+        menu.append_submenu("Use column width", width_menu)
+
+        menu_button.set_menu_model(menu)
+
+        open_button = Gtk.Button()
+        open_button.set_icon_name("document-open-symbolic")
+        open_button.set_tooltip_text("Open EPUB")
+        open_button.add_css_class("flat")
+        open_button.connect("clicked", self.on_open_clicked)
+
+        nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        nav_box.set_spacing(6)
+
+        # Prev chapter (leftmost)
+        self.prev_chapter_btn = Gtk.Button()
+        self.prev_chapter_btn.set_icon_name("media-skip-backward-symbolic")
+        self.prev_chapter_btn.set_tooltip_text("Previous Chapter")
+        self.prev_chapter_btn.add_css_class("flat")
+        self.prev_chapter_btn.connect("clicked", self.on_prev_chapter)
+        self.prev_chapter_btn.set_sensitive(False)
+        nav_box.append(self.prev_chapter_btn)
+
+        # Prev page
+        self.prev_column_btn = Gtk.Button()
+        self.prev_column_btn.set_icon_name("go-previous-symbolic")
+        self.prev_column_btn.set_tooltip_text("Previous Page")
+        self.prev_column_btn.add_css_class("flat")
+        self.prev_column_btn.connect("clicked", self.on_prev_page)
+        self.prev_column_btn.set_sensitive(False)
+        nav_box.append(self.prev_column_btn)
+
+        # Page / Column info
+        self.column_info = Gtk.Label()
+        self.column_info.set_text("--/--")
+        self.column_info.add_css_class("dim-label")
+        self.column_info.set_margin_start(6)
+        self.column_info.set_margin_end(6)
+        nav_box.append(self.column_info)
+
+        # Next page
+        self.next_column_btn = Gtk.Button()
+        self.next_column_btn.set_icon_name("go-next-symbolic")
+        self.next_column_btn.set_tooltip_text("Next Page")
+        self.next_column_btn.add_css_class("flat")
+        self.next_column_btn.connect("clicked", self.on_next_page)
+        self.next_column_btn.set_sensitive(False)
+        nav_box.append(self.next_column_btn)
+
+        # Next chapter
+        self.next_chapter_btn = Gtk.Button()
+        self.next_chapter_btn.set_icon_name("media-skip-forward-symbolic")
+        self.next_chapter_btn.set_tooltip_text("Next Chapter")
+        self.next_chapter_btn.add_css_class("flat")
+        self.next_chapter_btn.connect("clicked", self.on_next_chapter)
+        self.next_chapter_btn.set_sensitive(False)
+        nav_box.append(self.next_chapter_btn)
+
+        try:
+            header_bar.pack_start(open_button)
+            header_bar.pack_start(nav_box)
+            header_bar.pack_end(menu_button)
+        except AttributeError:
+            button_box_start = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+            button_box_start.set_spacing(6)
+            button_box_start.append(open_button)
+            button_box_start.append(nav_box)
+            button_box_end = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+            button_box_end.append(menu_button)
+            header_content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+            header_content.set_hexpand(True)
+            header_content.append(button_box_start)
+            spacer = Gtk.Box()
+            spacer.set_hexpand(True)
+            header_content.append(spacer)
+            header_content.append(button_box_end)
+            header_bar.set_title_widget(header_content)
+
+        self.scrolled_window = Gtk.ScrolledWindow()
+        self.scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        self.scrolled_window.set_vexpand(True)
+        self.main_box.append(self.scrolled_window)
+
+        self.webview = WebKit.WebView()
+        self.webview.set_hexpand(True)
+        self.webview.set_vexpand(True)
+        settings = self.webview.get_settings()
+        settings.set_enable_smooth_scrolling(True)
+        settings.set_enable_javascript(True)
+
+        # detect load finished to refresh adjustments
+        self.webview.connect("load-changed", self.on_webview_load_changed)
+
+        self.scrolled_window.set_child(self.webview)
+
+        self.info_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        self.info_bar.set_margin_top(5)
+        self.info_bar.set_margin_bottom(5)
+        self.info_bar.set_margin_start(10)
+        self.info_bar.set_margin_end(10)
+
+        self.chapter_label = Gtk.Label()
+        self.chapter_label.set_markup("<i>No EPUB loaded</i>")
+        self.chapter_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.chapter_label.set_max_width_chars(80)
+        self.info_bar.append(self.chapter_label)
+
+        self.main_box.append(self.info_bar)
+
+        # Connect resize notifications to recalc columns
+        self.connect("notify::default-width", self.on_window_resize)
+        self.connect("notify::default-height", self.on_window_resize)
+
+    def setup_navigation(self):
+        self.h_adjustment = self.scrolled_window.get_hadjustment()
+        if self.h_adjustment:
+            self.h_adjustment.connect("value-changed", self.on_scroll_position_changed)
+        key_controller = Gtk.EventControllerKey()
+        key_controller.connect("key-pressed", self.on_key_pressed)
+        self.add_controller(key_controller)
+        scroll_controller = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.HORIZONTAL)
+        scroll_controller.connect("scroll", self.on_scroll_event)
+        self.webview.add_controller(scroll_controller)
+        self.snap_timeout_id = None
+
+    # -------------------------
+    # Column mode setters used by app actions
+    # -------------------------
+    def set_column_count(self, count):
+        """Switch to fixed column-count mode (exact number of columns)."""
+        try:
+            count = int(count)
+            if count < 1:
+                count = 1
+        except Exception:
+            count = 1
+        self.column_mode = 'fixed'
+        self.fixed_column_count = count
+        if self.current_book:
+            self.extract_chapters()
+            self.load_chapter()
+            GLib.timeout_add(150, self.update_navigation)
+
+    def set_column_width(self, width):
+        """Switch to width mode (desired column width in px)."""
+        try:
+            w = int(width)
+            if w < 100:
+                w = 100
+        except Exception:
+            w = 400
+        self.column_mode = 'width'
+        self.desired_column_width = w
+        if self.current_book:
+            self.calculate_column_dimensions()
+            self.extract_chapters()
+            self.load_chapter()
+            GLib.timeout_add(150, self.update_navigation)
+
+    # -------------------------
+    # WebView / adjustments
+    # -------------------------
+    def on_webview_load_changed(self, webview, load_event):
+        if self.scrolled_window:
+            self.h_adjustment = self.scrolled_window.get_hadjustment()
+            if self.h_adjustment:
+                try:
+                    self.h_adjustment.disconnect_by_func(self.on_scroll_position_changed)
+                except Exception:
+                    pass
+                self.h_adjustment.connect("value-changed", self.on_scroll_position_changed)
+        GLib.timeout_add(150, self._after_load_update)
+
+    def _after_load_update(self):
+        self.calculate_column_dimensions()
+        self.update_navigation()
+        return False
+
+    def on_scroll_position_changed(self, adjustment):
+        self.update_column_info()
+
+    def on_key_pressed(self, controller, keyval, keycode, state):
+        if not self.current_book or not self.h_adjustment:
+            return False
+        page_size = max(1, int(self.h_adjustment.get_page_size()))
+        current_pos = self.h_adjustment.get_value()
+        if keyval in (65361, 65365):  # Left or PageUp
+            new_pos = max(0, current_pos - page_size)
+        elif keyval in (65363, 65366):  # Right or PageDown
+            max_pos = max(0, self.h_adjustment.get_upper() - self.h_adjustment.get_page_size())
+            new_pos = min(max_pos, current_pos + page_size)
+        elif keyval == 65360:  # Home
+            new_pos = 0
+        elif keyval == 65367:  # End
+            new_pos = max(0, self.h_adjustment.get_upper() - self.h_adjustment.get_page_size())
+        else:
+            return False
+        if new_pos != current_pos:
+            self.smooth_scroll_to(new_pos)
+            return True
+        return False
+
+    def on_scroll_event(self, controller, dx, dy):
+        if self.snap_timeout_id:
+            try:
+                GLib.source_remove(self.snap_timeout_id)
+            except Exception:
+                pass
+        self.snap_timeout_id = GLib.timeout_add(200, self.snap_to_nearest_page)
+        return False
+
+    def snap_to_nearest_page(self):
+        if not self.current_book or not self.h_adjustment:
+            self.snap_timeout_id = None
+            return False
+        page_size = max(1, int(self.h_adjustment.get_page_size()))
+        current_pos = self.h_adjustment.get_value()
+        page_index = round(current_pos / page_size)
+        target_pos = page_index * page_size
+        max_pos = max(0, self.h_adjustment.get_upper() - self.h_adjustment.get_page_size())
+        target_pos = max(0, min(target_pos, max_pos))
+        if abs(current_pos - target_pos) > 5:
+            self.smooth_scroll_to(target_pos)
+        self.snap_timeout_id = None
+        return False
+
+    def smooth_scroll_to(self, target_pos):
+        if not self.h_adjustment:
+            return False
+        current_pos = self.h_adjustment.get_value()
+        distance = target_pos - current_pos
+        if abs(distance) < 1:
+            self.h_adjustment.set_value(target_pos)
+            return False
+        steps = 20
+        step_size = distance / steps
+        step_count = 0
+        def animation_frame():
+            nonlocal step_count
+            if step_count >= steps:
+                self.h_adjustment.set_value(target_pos)
+                return False
+            new_pos = current_pos + (step_size * (step_count + 1))
+            self.h_adjustment.set_value(new_pos)
+            step_count += 1
+            return True
+        GLib.timeout_add(16, animation_frame)
+
+    # -------------------------
+    # File open / EPUB load
+    # -------------------------
+    def on_open_clicked(self, button):
+        dialog = Gtk.FileChooserNative(
+            title="Open EPUB File",
+            transient_for=self,
+            action=Gtk.FileChooserAction.OPEN,
+            accept_label="_Open",
+            cancel_label="_Cancel"
+        )
+        epub_filter = Gtk.FileFilter()
+        epub_filter.set_name("EPUB Files")
+        epub_filter.add_pattern("*.epub")
+        dialog.set_filter(epub_filter)
+        dialog.connect("response", self.on_file_dialog_response)
+        dialog.show()
+
+    def on_file_dialog_response(self, dialog, response):
+        if response == Gtk.ResponseType.ACCEPT:
+            files = dialog.get_files()
+            file = files.get_item(0) if files is not None else None
+            if file:
+                path = file.get_path()
+                if path:
+                    self.load_epub(path)
+        dialog.destroy()
+
+    def load_epub(self, filepath):
+        try:
+            if self.temp_dir and os.path.exists(self.temp_dir):
+                shutil.rmtree(self.temp_dir)
+            self.temp_dir = tempfile.mkdtemp()
+            self.current_book = epub.read_epub(filepath)
+            self.extract_chapters()
+            if self.chapters:
+                self.current_chapter = 0
+                self.load_chapter()
+                self.update_navigation()
+        except Exception as e:
+            self.show_error(f"Error loading EPUB: {str(e)}")
+
+    def extract_chapters(self):
+        self.chapters = []
+        if not self.current_book:
+            return
+        spine_items = [item[0] for item in self.current_book.spine]
+        self.extract_resources()
+        for item_id in spine_items:
+            item = None
+            for book_item in self.current_book.get_items():
+                if getattr(book_item, "id", None) == item_id:
+                    item = book_item
+                    break
+            if item and getattr(item, "media_type", "") == 'application/xhtml+xml':
+                content = item.get_content().decode('utf-8')
+                chapter_file = os.path.join(self.temp_dir, f"{item_id}.html")
+                processed_content = self.process_chapter_content(content, item)
+                with open(chapter_file, 'w', encoding='utf-8') as f:
+                    f.write(processed_content)
+                self.chapters.append({
+                    'id': item_id,
+                    'title': self.extract_title(content),
+                    'file': chapter_file,
+                    'item': item
+                })
+
+    def process_chapter_content(self, content, item):
+        # Recalculate columns before generating CSS
+        self.calculate_column_dimensions()
+
+        # Build CSS based on mode
+        if self.column_mode == 'fixed':
+            # enforce exact number of columns (browser will size them)
+            column_css = f"column-count: {self.fixed_column_count}; column-gap: {self.column_gap}px;"
+        else:
+            # width mode: use column-width and column-gap - browser will create as many columns as fit
+            column_css = f"column-width: {self.actual_column_width}px; column-gap: {self.column_gap}px;"
+
+        css_styles = f"""
+        <style>
+        html, body {{ height:100%; margin:0; padding:0; }}
+        body {{
+            margin: 0;
+            padding: {self.column_padding}px;
+            font-family: 'Cantarell', sans-serif;
+            font-size: 16px;
+            line-height: 1.6;
+            background-color: #fafafa;
+            color: #2e3436;
+            {column_css}
+            column-fill: balance;
+            height: calc(100vh - {self.column_padding * 2}px);
+            overflow-x: auto;
+            overflow-y: hidden;
+            box-sizing: border-box;
+        }}
+        h1,h2,h3,h4,h5,h6 {{ margin-top:1.5em; margin-bottom:0.5em; font-weight:bold; break-after:auto; break-inside:auto; }}
+        p {{ margin:0 0 1em 0; text-align:justify; hyphens:auto; break-inside:auto; orphans:1; widows:1; }}
+        img {{ max-width:100%; height:auto; margin:1em 0; }}
+        blockquote {{ margin:1em 2em; font-style:italic; border-left:3px solid #3584e4; padding-left:1em; }}
+        div, section, article, span, ul, ol, li {{ break-inside:auto; }}
+        @media (prefers-color-scheme: dark) {{
+            body {{ background-color:#242424; color:#ffffff; }}
+            blockquote {{ border-left-color:#62a0ea; }}
+        }}
+        </style>
+        """
+        script = """
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            document.addEventListener('keydown', function(event) {
+                if (['ArrowLeft','ArrowRight','PageUp','PageDown','Home','End'].includes(event.key)) {
+                    event.preventDefault();
+                    return false;
+                }
+            });
+            document.body.tabIndex = -1;
+        });
+        </script>
+        """
+        body_match = re.search(r'<body[^>]*>(.*?)</body>', content, re.DOTALL | re.IGNORECASE)
+        body_content = body_match.group(1) if body_match else content
+        body_content = re.sub(r'</?(?:html|head|meta|title)[^>]*>', '', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'<style[^>]*>.*?</style>', '', body_content, flags=re.DOTALL | re.IGNORECASE)
+
+        resources_dir_fs = os.path.join(self.temp_dir, 'resources')
+        available = set()
+        if os.path.isdir(resources_dir_fs):
+            for fn in os.listdir(resources_dir_fs):
+                available.add(fn)
+        def repl_src(m):
+            orig = m.group(1)
+            name = os.path.basename(orig)
+            if name in available:
+                return f'src="resources/{name}"'
+            return f'src="{orig}"'
+        body_content = re.sub(r'src=["\']([^"\']+)["\']', repl_src, body_content, flags=re.IGNORECASE)
+        def repl_href(m):
+            orig = m.group(1)
+            name = os.path.basename(orig)
+            if name in available:
+                return f'href="resources/{name}"'
+            return f'href="{orig}"'
+        body_content = re.sub(r'href=["\']([^"\']+)["\']', repl_href, body_content, flags=re.IGNORECASE)
+
+        return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{css_styles}</head><body>{body_content}{script}</body></html>"""
+
+    def extract_resources(self):
+        if not self.current_book or not self.temp_dir:
+            return
+        resources_dir = os.path.join(self.temp_dir, 'resources')
+        os.makedirs(resources_dir, exist_ok=True)
+        for item in self.current_book.get_items():
+            if hasattr(item, 'media_type'):
+                if item.media_type in ['text/css', 'image/jpeg', 'image/png', 'image/gif', 'image/svg+xml']:
+                    name = None
+                    try:
+                        name = item.get_name()
+                    except Exception:
+                        name = None
+                    if not name:
+                        name = getattr(item, 'id', None) or "resource"
+                    name = os.path.basename(name)
+                    resource_path = os.path.join(resources_dir, name)
+                    try:
+                        with open(resource_path, 'wb') as f:
+                            f.write(item.get_content())
+                    except Exception:
+                        pass
+
+    def extract_title(self, content):
+        h1_match = re.search(r'<h1[^>]*>(.*?)</h1>', content, re.IGNORECASE | re.DOTALL)
+        if h1_match:
+            title = re.sub(r'<[^>]+>', '', h1_match.group(1)).strip()
+            if title:
+                return title
+        title_match = re.search(r'<title[^>]*>(.*?)</title>', content, re.IGNORECASE | re.DOTALL)
+        if title_match:
+            title = re.sub(r'<[^>]+>', '', title_match.group(1)).strip()
+            if title:
+                return title
+        return "Untitled Chapter"
+
+    def load_chapter(self):
+        if not self.chapters or self.current_chapter >= len(self.chapters):
+            return
+        chapter = self.chapters[self.current_chapter]
+        file_uri = GLib.filename_to_uri(chapter['file'])
+        self.webview.load_uri(file_uri)
+        chapter_info = f"Chapter {self.current_chapter + 1} of {len(self.chapters)}: {chapter['title']}"
+        self.chapter_label.set_text(chapter_info)
+
+    def update_navigation(self):
+        self.prev_chapter_btn.set_sensitive(self.current_chapter > 0)
+        self.next_chapter_btn.set_sensitive(self.current_chapter < len(self.chapters) - 1)
+
+        # re-acquire adjustment and connect handler
+        self.h_adjustment = self.scrolled_window.get_hadjustment()
+        if self.h_adjustment:
+            try:
+                self.h_adjustment.disconnect_by_func(self.on_scroll_position_changed)
+            except Exception:
+                pass
+            self.h_adjustment.connect("value-changed", self.on_scroll_position_changed)
+
+        # enable/disable page buttons based on whether horizontal scroll exists
+        self._refresh_buttons_based_on_adjustment()
+        self.update_column_info()
+
+    def _refresh_buttons_based_on_adjustment(self):
+        if not self.h_adjustment:
+            self.prev_column_btn.set_sensitive(False)
+            self.next_column_btn.set_sensitive(False)
+            return
+        max_pos = max(0, self.h_adjustment.get_upper() - self.h_adjustment.get_page_size())
+        if max_pos <= 5:
+            self.prev_column_btn.set_sensitive(False)
+            self.next_column_btn.set_sensitive(False)
+        else:
+            current_pos = self.h_adjustment.get_value()
+            self.prev_column_btn.set_sensitive(current_pos > 0)
+            self.next_column_btn.set_sensitive(current_pos < max_pos - 5)
+
+    def on_prev_chapter(self, button):
+        if self.current_chapter > 0:
+            self.current_chapter -= 1
+            self.load_chapter()
+            self.update_navigation()
+
+    def on_next_chapter(self, button):
+        if self.current_chapter < len(self.chapters) - 1:
+            self.current_chapter += 1
+            self.load_chapter()
+            self.update_navigation()
+
+    # Page navigation (by viewport)
+    def on_prev_page(self, button):
+        if not self.current_book or not self.h_adjustment:
+            return
+        self.h_adjustment = self.scrolled_window.get_hadjustment()
+        self.calculate_column_dimensions()
+        page_size = max(1, int(self.h_adjustment.get_page_size()))
+        current_pos = self.h_adjustment.get_value()
+        new_pos = max(0, current_pos - page_size)
+        self.smooth_scroll_to(new_pos)
+        GLib.timeout_add(200, self._refresh_buttons_based_on_adjustment)
+
+    def on_next_page(self, button):
+        if not self.current_book or not self.h_adjustment:
+            return
+        self.h_adjustment = self.scrolled_window.get_hadjustment()
+        self.calculate_column_dimensions()
+        page_size = max(1, int(self.h_adjustment.get_page_size()))
+        current_pos = self.h_adjustment.get_value()
+        max_pos = max(0, self.h_adjustment.get_upper() - self.h_adjustment.get_page_size())
+        new_pos = min(max_pos, current_pos + page_size)
+        self.smooth_scroll_to(new_pos)
+        GLib.timeout_add(200, self._refresh_buttons_based_on_adjustment)
+
+    def update_column_info(self):
+        """Show current page/total pages based on viewport size."""
+        if not self.current_book or not self.h_adjustment:
+            self.column_info.set_text("--/--")
+            self.prev_column_btn.set_sensitive(False)
+            self.next_column_btn.set_sensitive(False)
+            return
+        page_size = max(1, int(self.h_adjustment.get_page_size()))
+        current_pos = self.h_adjustment.get_value()
+        max_pos = max(0, self.h_adjustment.get_upper() - self.h_adjustment.get_page_size())
+        if page_size <= 0:
+            self.column_info.set_text("1/1")
+            return
+        current_page = int(current_pos / page_size) + 1
+        total_pages = max(1, int(math.ceil((max_pos + page_size) / page_size)))
+        if current_page < 1: current_page = 1
+        if current_page > total_pages: current_page = total_pages
+        self.column_info.set_text(f"{current_page}/{total_pages}")
+        self.prev_column_btn.set_sensitive(current_pos > 0)
+        self.next_column_btn.set_sensitive(current_pos < max_pos - 5)
+
+    def calculate_column_dimensions(self):
+        """Calculate actual_column_width depending on mode.
+
+        In 'width' mode: we take desired_column_width and clamp it so at least one fits.
+        We keep actual_column_width equal to desired_column_width (browser will determine
+        how many columns are created via column-width).
+        In 'fixed' mode: we compute column width so fixed count fits inside available width
+        (used for CSS column-count rendering).
+        """
+        width = self.get_allocated_width()
+        height = self.get_allocated_height()
+        if width <= 0 or height <= 0:
+            width = 1200
+            height = 800
+
+        available_width = max(100, width - (2 * self.column_padding))
+        total_gap_width = max(0, ( (self.fixed_column_count - 1) if self.fixed_column_count>0 else 0) * self.column_gap)
+
+        if self.column_mode == 'fixed':
+            # compute a column width that will allow fixed_column_count to fit
+            cols = max(1, int(self.fixed_column_count))
+            total_gap_width = (cols - 1) * self.column_gap
+            # subtract gaps and padding, divide equally
+            cw = max(100, (available_width - total_gap_width) // cols)
+            self.actual_column_width = cw
+        else:
+            # width mode: honor desired_column_width (browser will create N columns automatically)
+            # but ensure desired_column_width is not greater than available width (so at least 1 column)
+            self.actual_column_width = max(100, min(self.desired_column_width, available_width))
+            # we don't compute a fixed count here; browser will lay out columns based on column-width
+        return
+
+    def on_window_resize(self, *args):
+        self.calculate_column_dimensions()
+        if self.current_book and self.chapters:
+            GLib.timeout_add(100, self._delayed_reload)
+
+    def _delayed_reload(self):
+        # Regenerate chapter files with updated CSS
+        self.extract_chapters()
+        self.load_chapter()
+        return False
+
+    def set_column_width_action(self, width_px):
+        # convenience wrapper for app action binding
+        self.set_column_width(width_px)
+
+    def show_error(self, message):
+        dialog = Adw.MessageDialog.new(self, "Error", message)
+        dialog.add_response("ok", "_OK")
+        dialog.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+        dialog.present()
+
+    def cleanup(self):
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            try:
+                shutil.rmtree(self.temp_dir)
+            except Exception:
+                pass
+
+class EpubViewerApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id="com.example.epubviewer")
+
+    def do_activate(self):
+        window = self.get_active_window()
+        if not window:
+            window = EpubViewer(self)
+
+        # add actions for fixed columns (menu) and column widths
+        for i in range(1, 11):
+            act = Gio.SimpleAction.new(f"set-columns", GLib.VariantType.new("i"))
+            act.connect("activate", self.on_set_columns)
+            self.add_action(act)
+        for w in (300, 350, 400, 450, 500):
+            act_w = Gio.SimpleAction.new(f"set-column-width", GLib.VariantType.new("i"))
+            act_w.connect("activate", self.on_set_column_width)
+            self.add_action(act_w)
+
+        window.present()
+
+    def on_set_columns(self, action, parameter):
+        count = parameter.get_int32()
+        window = self.get_active_window()
+        if window:
+            window.set_column_count(count)
+
+    def on_set_column_width(self, action, parameter):
+        w = parameter.get_int32()
+        window = self.get_active_window()
+        if window:
+            window.set_column_width(w)
+
+def main():
+    app = EpubViewerApp()
+
+    def cleanup_handler(signum, frame):
+        window = app.get_active_window()
+        if window:
+            window.cleanup()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, cleanup_handler)
+    signal.signal(signal.SIGTERM, cleanup_handler)
+
+    try:
+        app.run(sys.argv)
+    finally:
+        window = app.get_active_window()
+        if window:
+            window.cleanup()
+
+if __name__ == "__main__":
+    main()
+
