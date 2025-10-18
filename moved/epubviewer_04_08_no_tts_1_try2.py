@@ -2286,8 +2286,20 @@ class EPubViewer(Adw.ApplicationWindow):
                 self._user_hid_sidebar = True
             else:
                 self._user_hid_sidebar = False
-        except Exception:
-            pass
+            
+            # Wait for sidebar animation to complete (350ms), then regenerate page
+            def _regenerate_after_animation():
+                try:
+                    if self.book and self.items:
+                        print("🔄 Sidebar toggled - regenerating page")
+                        self.display_page()
+                except Exception as e:
+                    print(f"Error regenerating after sidebar toggle: {e}")
+                return False  # Don't repeat
+            
+            GLib.timeout_add(400, _regenerate_after_animation)  # 400ms = 350ms animation + 50ms buffer
+        except Exception as e:
+            print(f"Sidebar toggle error: {e}")
 
     def _on_window_size_changed(self, *args):
         try:
@@ -2301,19 +2313,31 @@ class EPubViewer(Adw.ApplicationWindow):
             if is_narrow == self._last_was_narrow:
                 return
             self._last_was_narrow = is_narrow
+            
             if self._responsive_enabled and self.book and self.book_path:
                 if is_narrow:
                     self.split.set_collapsed(True)
                 else:
                     self.split.set_collapsed(False)
                     self.split.set_show_sidebar(True)
+                
+                # Regenerate page after responsive change
+                def _regenerate_after_responsive():
+                    try:
+                        if self.book and self.items:
+                            print("🔄 Responsive change - regenerating page")
+                            self.display_page()
+                    except Exception:
+                        pass
+                    return False
+                
+                GLib.timeout_add(400, _regenerate_after_responsive)
             else:
                 if self._last_was_narrow is not None:
                     self.split.set_collapsed(False)
                     self.split.set_show_sidebar(False)
         except Exception as e:
             print(f"Error in window size handler: {e}")
-            
             
     def _enable_responsive_sidebar(self):
         self._responsive_enabled = True
@@ -2712,140 +2736,297 @@ class EPubViewer(Adw.ApplicationWindow):
         print(f"📊 Injecting JS with {effective_columns} columns")
         
         # ENHANCED COLUMN NAVIGATION JAVASCRIPT
+        # ENHANCED COLUMN NAVIGATION JAVASCRIPT WITH PRECISE SNAPPING
         js_detect_columns = f"""<script>
-    (function() {{
-        const originalLog = console.log;
-        console.log = function(...args) {{
-            const msg = args.map(a => String(a)).join(' ');
-            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.consoleLog) {{
-                window.webkit.messageHandlers.consoleLog.postMessage(msg);
+        (function() {{
+            const originalLog = console.log;
+            console.log = function(...args) {{
+                const msg = args.map(a => String(a)).join(' ');
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.consoleLog) {{
+                    window.webkit.messageHandlers.consoleLog.postMessage(msg);
+                }}
+                originalLog.apply(console, args);
+            }};
+            
+            console.log('=== COLUMN SCRIPT LOADED ===');
+            console.log('Columns: {effective_columns}');
+            
+            window.currentColumnCount = {effective_columns};
+            
+            function getContainerMetrics() {{
+                const container = document.querySelector('.ebook-content');
+                if (!container) return null;
+                
+                const style = getComputedStyle(container);
+                const paddingLeft = parseFloat(style.paddingLeft) || 0;
+                const paddingRight = parseFloat(style.paddingRight) || 0;
+                const gap = parseFloat(style.columnGap) || 0;
+                
+                const clientWidth = container.clientWidth;
+                const availableWidth = clientWidth - paddingLeft - paddingRight;
+                
+                const colCount = window.currentColumnCount || 1;
+                const totalGap = gap * (colCount - 1);
+                const columnWidth = (availableWidth - totalGap) / colCount;
+                
+                return {{
+                    container: container,
+                    clientWidth: clientWidth,
+                    availableWidth: availableWidth,
+                    paddingLeft: paddingLeft,
+                    paddingRight: paddingRight,
+                    gap: gap,
+                    colCount: colCount,
+                    columnWidth: columnWidth,
+                    pageWidth: columnWidth + gap  // Width to scroll per column
+                }};
             }}
-            originalLog.apply(console, args);
-        }};
-        
-        console.log('=== COLUMN SCRIPT LOADED ===');
-        console.log('Columns: {effective_columns}');
-        
-        window.currentColumnCount = {effective_columns};
-        
-        function getColumnWidth() {{
-            const container = document.querySelector('.ebook-content');
-            if (!container) return window.innerWidth;
             
-            const colCount = window.currentColumnCount || 1;
-            const gap = parseFloat(getComputedStyle(container).columnGap) || 0;
-            const viewportW = container.clientWidth;
-            const totalGap = gap * (colCount - 1);
-            const colW = (viewportW - totalGap) / colCount;
-            
-            console.log('ColW: ' + colW.toFixed(1) + 'px (viewport:' + viewportW + ' gap:' + gap + ')');
-            return colW + gap;
-        }}
-        
-        function smoothScrollTo(xTarget, yTarget) {{
-            const container = document.querySelector('.ebook-content');
-            if (!container) return;
-            
-            const startX = container.scrollLeft;
-            const startY = container.scrollTop;
-            const distX = xTarget - startX;
-            const distY = yTarget - startY;
-            const duration = 350;
-            const start = performance.now();
-            
-            function step(time) {{
-                const t = Math.min((time - start) / duration, 1);
-                const ease = t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
-                container.scrollLeft = startX + distX * ease;
-                container.scrollTop = startY + distY * ease;
-                if (t < 1) requestAnimationFrame(step);
+            function getCurrentColumnIndex() {{
+                const metrics = getContainerMetrics();
+                if (!metrics || metrics.colCount <= 1) return 0;
+                
+                const scrollLeft = metrics.container.scrollLeft;
+                const columnIndex = Math.round(scrollLeft / metrics.pageWidth);
+                return columnIndex;
             }}
-            requestAnimationFrame(step);
-        }}
-        
-        function snapScroll() {{
-            if (window.currentColumnCount <= 1) return;
-            const container = document.querySelector('.ebook-content');
-            if (!container) return;
-            const colW = getColumnWidth();
-            const curr = container.scrollLeft;
-            const snapped = Math.round(curr / colW) * colW;
-            if (Math.abs(snapped - curr) > 2) {{
-                console.log('Snap: ' + curr.toFixed(0) + ' → ' + snapped.toFixed(0));
-                container.scrollLeft = snapped;
+            
+            function scrollToColumnIndex(index, smooth = true) {{
+                const metrics = getContainerMetrics();
+                if (!metrics) return;
+                
+                const targetScroll = index * metrics.pageWidth;
+                const maxScroll = metrics.container.scrollWidth - metrics.clientWidth;
+                const clampedScroll = Math.max(0, Math.min(maxScroll, targetScroll));
+                
+                if (smooth) {{
+                    smoothScrollTo(clampedScroll, metrics.container.scrollTop);
+                }} else {{
+                    metrics.container.scrollLeft = clampedScroll;
+                }}
+                
+                console.log('→ Column ' + index + ' (scroll: ' + clampedScroll.toFixed(0) + 'px)');
             }}
-        }}
-        
-        const container = document.querySelector('.ebook-content');
-        if (container) {{
-            let scrollTimer;
-            container.addEventListener('scroll', function() {{
-                clearTimeout(scrollTimer);
-                scrollTimer = setTimeout(() => {{
-                    if (window.currentColumnCount > 1) snapScroll();
-                }}, 150);
+            
+            function smoothScrollTo(xTarget, yTarget) {{
+                const container = document.querySelector('.ebook-content');
+                if (!container) return;
+                
+                const startX = container.scrollLeft;
+                const startY = container.scrollTop;
+                const distX = xTarget - startX;
+                const distY = yTarget - startY;
+                
+                // Skip animation if distance is tiny
+                if (Math.abs(distX) < 1 && Math.abs(distY) < 1) {{
+                    container.scrollLeft = xTarget;
+                    container.scrollTop = yTarget;
+                    return;
+                }}
+                
+                const duration = 350;
+                const start = performance.now();
+                
+                function step(time) {{
+                    const t = Math.min((time - start) / duration, 1);
+                    const ease = t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
+                    container.scrollLeft = startX + distX * ease;
+                    container.scrollTop = startY + distY * ease;
+                    if (t < 1) requestAnimationFrame(step);
+                }}
+                requestAnimationFrame(step);
+            }}
+            
+            function snapScroll() {{
+                if (window.currentColumnCount <= 1) return;
+                
+                const metrics = getContainerMetrics();
+                if (!metrics) return;
+                
+                const currentScroll = metrics.container.scrollLeft;
+                const columnIndex = Math.round(currentScroll / metrics.pageWidth);
+                const targetScroll = columnIndex * metrics.pageWidth;
+                
+                if (Math.abs(targetScroll - currentScroll) > 2) {{
+                    console.log('↹ Snap to col ' + columnIndex + ' (' + currentScroll.toFixed(0) + '→' + targetScroll.toFixed(0) + ')');
+                    metrics.container.scrollLeft = targetScroll;
+                }}
+            }}
+            
+            // Scroll event listener
+            const container = document.querySelector('.ebook-content');
+            if (container) {{
+                let scrollTimer;
+                container.addEventListener('scroll', function() {{
+                    clearTimeout(scrollTimer);
+                    scrollTimer = setTimeout(() => {{
+                        if (window.currentColumnCount > 1) snapScroll();
+                    }}, 150);
+                }});
+            }}
+            
+            // Mouse wheel navigation
+            window.addEventListener('wheel', function(e) {{
+                const metrics = getContainerMetrics();
+                if (!metrics || metrics.colCount <= 1) return;
+                
+                e.preventDefault();
+                
+                const currentCol = getCurrentColumnIndex();
+                const direction = e.deltaY > 0 ? 1 : -1;
+                const targetCol = currentCol + direction;
+                
+                const maxScroll = metrics.container.scrollWidth - metrics.clientWidth;
+                const maxCol = Math.floor(maxScroll / metrics.pageWidth);
+                
+                if (targetCol >= 0 && targetCol <= maxCol) {{
+                    console.log('🖱️ ' + (direction>0?'→':'←') + ' col ' + currentCol + '→' + targetCol);
+                    scrollToColumnIndex(targetCol, true);
+                }}
+            }}, {{passive: false, capture: true}});
+            
+            // Keyboard navigation
+            document.addEventListener('keydown', function(e) {{
+                if (e.ctrlKey || e.metaKey || e.altKey) return;
+                
+                const container = document.querySelector('.ebook-content');
+                if (!container) return;
+                
+                const metrics = getContainerMetrics();
+                if (!metrics) return;
+                
+                if (metrics.colCount === 1) {{
+                    // Single column: vertical scrolling
+                    const viewH = container.clientHeight;
+                    const maxY = container.scrollHeight - viewH;
+                    let y = container.scrollTop;
+                    let scroll = false;
+                    
+                    switch(e.key) {{
+                        case 'ArrowUp': 
+                            e.preventDefault(); 
+                            y = Math.max(0, y - viewH*0.8); 
+                            scroll = true; 
+                            break;
+                        case 'ArrowDown': 
+                            e.preventDefault(); 
+                            y = Math.min(maxY, y + viewH*0.8); 
+                            scroll = true; 
+                            break;
+                        case 'PageUp': 
+                            e.preventDefault(); 
+                            y = Math.max(0, y - viewH); 
+                            scroll = true; 
+                            break;
+                        case 'PageDown': 
+                            e.preventDefault(); 
+                            y = Math.min(maxY, y + viewH); 
+                            scroll = true; 
+                            break;
+                        case 'Home': 
+                            e.preventDefault(); 
+                            y = 0; 
+                            scroll = true; 
+                            break;
+                        case 'End': 
+                            e.preventDefault(); 
+                            y = maxY; 
+                            scroll = true; 
+                            break;
+                    }}
+                    
+                    if (scroll) {{
+                        console.log('⬆️⬇️ ' + e.key);
+                        smoothScrollTo(container.scrollLeft, y);
+                    }}
+                }} else {{
+                    // Multi-column: horizontal navigation
+                    const currentCol = getCurrentColumnIndex();
+                    const maxScroll = metrics.container.scrollWidth - metrics.clientWidth;
+                    const maxCol = Math.floor(maxScroll / metrics.pageWidth);
+                    let targetCol = currentCol;
+                    let scroll = false;
+                    
+                    switch(e.key) {{
+                        case 'ArrowLeft': 
+                            e.preventDefault(); 
+                            targetCol = Math.max(0, currentCol - 1); 
+                            scroll = true; 
+                            break;
+                        case 'ArrowRight': 
+                            e.preventDefault(); 
+                            targetCol = Math.min(maxCol, currentCol + 1); 
+                            scroll = true; 
+                            break;
+                        case 'PageUp': 
+                            e.preventDefault(); 
+                            targetCol = Math.max(0, currentCol - metrics.colCount); 
+                            scroll = true; 
+                            break;
+                        case 'PageDown': 
+                            e.preventDefault(); 
+                            targetCol = Math.min(maxCol, currentCol + metrics.colCount); 
+                            scroll = true; 
+                            break;
+                        case 'Home': 
+                            e.preventDefault(); 
+                            targetCol = 0; 
+                            scroll = true; 
+                            break;
+                        case 'End': 
+                            e.preventDefault(); 
+                            targetCol = maxCol; 
+                            scroll = true; 
+                            break;
+                    }}
+                    
+                    if (scroll) {{
+                        console.log('⬅️➡️ ' + e.key + ' col ' + currentCol + '→' + targetCol);
+                        scrollToColumnIndex(targetCol, true);
+                    }}
+                }}
+            }}, {{passive: false, capture: true}});
+            
+            // Window resize handler - maintain column position
+            let resizeTimer;
+            window.addEventListener('resize', function() {{
+                clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(function() {{
+                    if (window.currentColumnCount > 1) {{
+                        const currentCol = getCurrentColumnIndex();
+                        console.log('🔄 Resize - staying at column ' + currentCol);
+                        // Force recalculation after resize
+                        const metrics = getContainerMetrics();
+                        if (metrics) {{
+                            console.log('  New pageW: ' + metrics.pageWidth.toFixed(1) + 'px');
+                            scrollToColumnIndex(currentCol, false);  // Instant, no animation
+                        }}
+                    }}
+                }}, 400);  // Changed from 250ms to 400ms to account for sidebar animation
             }});
-        }}
-        
-        window.addEventListener('wheel', function(e) {{
-            const container = document.querySelector('.ebook-content');
-            if (!container || window.currentColumnCount <= 1) return;
             
-            e.preventDefault();
-            const colW = getColumnWidth();
-            const dir = e.deltaY > 0 ? 1 : -1;
-            const curr = container.scrollLeft;
-            const max = container.scrollWidth - container.clientWidth;
-            const target = Math.max(0, Math.min(max, curr + dir * colW));
-            
-            console.log('🖱️ ' + (dir>0?'→':'←') + ' | ' + curr.toFixed(0) + ' → ' + target.toFixed(0));
-            smoothScrollTo(target, container.scrollTop);
-        }}, {{passive: false, capture: true}});
-        
-        document.addEventListener('keydown', function(e) {{
-            if (e.ctrlKey || e.metaKey || e.altKey) return;
-            
-            const container = document.querySelector('.ebook-content');
-            if (!container) return;
-            
-            const colW = getColumnWidth();
-            const viewH = container.clientHeight;
-            const maxX = container.scrollWidth - container.clientWidth;
-            const maxY = container.scrollHeight - viewH;
-            
-            let x = container.scrollLeft, y = container.scrollTop, scroll = false;
-            
-            if (window.currentColumnCount === 1) {{
-                switch(e.key) {{
-                    case 'ArrowUp': e.preventDefault(); y = Math.max(0, y - viewH*0.8); scroll = true; break;
-                    case 'ArrowDown': e.preventDefault(); y = Math.min(maxY, y + viewH*0.8); scroll = true; break;
-                    case 'PageUp': e.preventDefault(); y = Math.max(0, y - viewH); scroll = true; break;
-                    case 'PageDown': e.preventDefault(); y = Math.min(maxY, y + viewH); scroll = true; break;
-                    case 'Home': e.preventDefault(); y = 0; scroll = true; break;
-                    case 'End': e.preventDefault(); y = maxY; scroll = true; break;
+            // Initial metrics logging
+            setTimeout(() => {{
+                const m = getContainerMetrics();
+                if (m) {{
+                    console.log('📏 Metrics:');
+                    console.log('  clientW: ' + m.clientWidth + 'px');
+                    console.log('  availableW: ' + m.availableW + 'px (padding: ' + m.paddingLeft + '/' + m.paddingRight + ')');
+                    console.log('  gap: ' + m.gap + 'px');
+                    console.log('  columnW: ' + m.columnWidth.toFixed(1) + 'px');
+                    console.log('  pageW: ' + m.pageWidth.toFixed(1) + 'px');
+                    console.log('  scrollW: ' + m.container.scrollWidth + 'px');
+                    console.log('  maxScroll: ' + (m.container.scrollWidth - m.clientWidth) + 'px');
+                    
+                    if (window.currentColumnCount > 1) {{
+                        snapScroll();
+                    }}
                 }}
-                if (scroll) {{ console.log('⬆️⬇️ ' + e.key); smoothScrollTo(x, y); }}
-            }} else {{
-                switch(e.key) {{
-                    case 'ArrowLeft': e.preventDefault(); x = Math.max(0, x - colW); scroll = true; break;
-                    case 'ArrowRight': e.preventDefault(); x = Math.min(maxX, x + colW); scroll = true; break;
-                    case 'PageUp': e.preventDefault(); x = Math.max(0, x - colW * window.currentColumnCount); scroll = true; break;
-                    case 'PageDown': e.preventDefault(); x = Math.min(maxX, x + colW * window.currentColumnCount); scroll = true; break;
-                    case 'Home': e.preventDefault(); x = 0; scroll = true; break;
-                    case 'End': e.preventDefault(); x = maxX; scroll = true; break;
-                }}
-                if (scroll) {{ console.log('⬅️➡️ ' + e.key + ' | ' + container.scrollLeft.toFixed(0) + ' → ' + x.toFixed(0)); smoothScrollTo(x, y); }}
-            }}
-        }}, {{passive: false, capture: true}});
-        
-        setTimeout(() => {{
-            const c = document.querySelector('.ebook-content');
-            if (c) console.log('📏 scrollW:' + c.scrollWidth + ' clientW:' + c.clientWidth + ' scrollH:' + c.scrollHeight + ' clientH:' + c.clientHeight);
-        }}, 200);
-        
-        console.log('=== SCRIPT READY ===');
-    }})();
-    </script>"""
+            }}, 200);
+            
+            console.log('=== SCRIPT READY ===');
+        }})();
+        </script>"""
 
         link_intercept_script = """
         <script>
