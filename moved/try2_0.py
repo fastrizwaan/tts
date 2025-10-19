@@ -85,7 +85,7 @@ _css = """
 .epub-sidebar .adw-action-row.selected {
   background-color: rgba(0,0,0,0.12);
 }
-.book-title { font-weight: 600; margin-bottom: 2px; }
+.book-title { font-weight: 600; }
 .book-author { color: rgba(0,0,0,0.6); font-size: 12px; }
 """
 _css_provider = Gtk.CssProvider()
@@ -725,9 +725,9 @@ class EPubViewer(Adw.ApplicationWindow):
         header.set_title_widget(title_lbl); sidebar_box.append(header)
 
         # Book cover + metadata
-        book_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        book_box.set_valign(Gtk.Align.START)
-        book_box.set_margin_top(6); book_box.set_margin_bottom(6)
+        book_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=1)
+        book_box.set_valign(Gtk.Align.CENTER)
+        book_box.set_margin_top(0); book_box.set_margin_bottom(0)
         book_box.set_margin_start(8); book_box.set_margin_end(8)
         self.cover_image = Gtk.Image()
         placeholder_pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, COVER_W, COVER_H)
@@ -738,11 +738,30 @@ class EPubViewer(Adw.ApplicationWindow):
         except Exception:
             pass
         book_box.append(self.cover_image)
-        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4); text_box.set_valign(Gtk.Align.CENTER); text_box.set_hexpand(True)
-        self.book_title = Gtk.Label(label=""); self.book_title.add_css_class("book-title")
-        self.book_title.set_halign(Gtk.Align.START); self.book_title.set_xalign(0.0)
-        self.book_author = Gtk.Label(label=""); self.book_author.add_css_class("book-author")
-        text_box.append(self.book_title); text_box.append(self.book_author)
+
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        text_box.set_valign(Gtk.Align.CENTER)
+        text_box.set_hexpand(True)
+
+        self.book_title = Gtk.Label(label="")
+        self.book_title.add_css_class("book-title")
+        self.book_title.set_ellipsize(Pango.EllipsizeMode.END)
+        self.book_title.set_lines(2)
+        self.book_title.set_halign(Gtk.Align.START)
+        self.book_title.set_valign(Gtk.Align.CENTER)
+        self.book_title.set_xalign(0.0)
+        
+        self.book_author = Gtk.Label(label="")
+        self.book_author.add_css_class("book-author")
+        self.book_author.set_ellipsize(Pango.EllipsizeMode.END)
+        self.book_author.set_halign(Gtk.Align.START)
+        self.book_author.set_valign(Gtk.Align.CENTER)
+        self.book_author.set_lines(2)
+        self.book_author.set_margin_top(0)
+        self.book_author.set_xalign(0.0)
+
+        text_box.append(self.book_title)
+        text_box.append(self.book_author)
         book_box.append(text_box)
         sidebar_box.append(book_box)
 
@@ -3795,7 +3814,8 @@ class EPubViewer(Adw.ApplicationWindow):
 
             self.item_map = {it.get_name(): it for it in self.items}
             self.extract_css()
-
+          
+          # set title and app name
             title = APP_NAME; author = ""
             try:
                 meta = self.book.get_metadata("DC", "title");
@@ -3804,8 +3824,18 @@ class EPubViewer(Adw.ApplicationWindow):
                 if m2 and m2[0]: author = m2[0][0]
             except Exception:
                 pass
-            self.book_title.set_text(title); self.book_author.set_text(author)
-            self.content_title_label.set_text(title); self.set_title(title or APP_NAME)
+            self.book_title.set_text(title)
+            self.book_author.set_text(author)
+
+            # Dynamically adjust title margin based on its length
+            if len(title) > 35:  # Adjust threshold as needed
+                self.book_title.set_margin_bottom(15)  # Small margin for long/wrapped titles
+            else:
+                self.book_title.set_margin_bottom(6)  # Larger margin for short/single-line titles
+
+            self.content_title_label.set_text(title)
+            self.set_title(title or APP_NAME)
+
 
             try:
                 cover_path_to_use = None; cover_item_obj = None
