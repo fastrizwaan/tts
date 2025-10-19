@@ -1,0 +1,207 @@
+<?xml version="1.0"?>
+<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1" xml:lang="en">
+<head>
+<meta name="dtb:uid" content="9781605095332"/>
+<meta name="dtb:depth" content="1"/>
+<meta name="dtb:totalPageCount" content="0"/>
+<meta name="dtb:maxPageNumber" content="0"/>
+</head>
+<docTitle>
+<text>Eat That Frog!</text>
+</docTitle>
+<navMap>
+<navPoint id="cover" playOrder="1">
+<navLabel>
+<text>Cover Page</text>
+</navLabel>
+<content src="xhtml/cover.html"/>
+</navPoint>
+<navPoint id="title" playOrder="2">
+<navLabel>
+<text>Title Page</text>
+</navLabel>
+<content src="xhtml/title.html"/>
+</navPoint>
+<navPoint id="copy" playOrder="3">
+<navLabel>
+<text>Copyright Page</text>
+</navLabel>
+<content src="xhtml/copy.html"/>
+</navPoint>
+<navPoint id="ded" playOrder="4">
+<navLabel>
+<text>Dedication</text>
+</navLabel>
+<content src="xhtml/ded.html"/>
+</navPoint>
+<navPoint id="toc" playOrder="5">
+<navLabel>
+<text>Contents</text>
+</navLabel>
+<content src="xhtml/toc.html"/>
+</navPoint>
+<navPoint id="preface" playOrder="6">
+<navLabel>
+<text>Preface</text>
+</navLabel>
+<content src="xhtml/preface.html"/>
+</navPoint>
+<navPoint id="intro" playOrder="7">
+<navLabel>
+<text>Introduction: Eat That Frog</text>
+</navLabel>
+<content src="xhtml/intro.html"/>
+</navPoint>
+<navPoint id="ch01" playOrder="8">
+<navLabel>
+<text>1 Set the Table</text>
+</navLabel>
+<content src="xhtml/ch01.html"/>
+</navPoint>
+<navPoint id="ch02" playOrder="9">
+<navLabel>
+<text>2 Plan Every Day in Advance</text>
+</navLabel>
+<content src="xhtml/ch02.html"/>
+</navPoint>
+<navPoint id="ch03" playOrder="10">
+<navLabel>
+<text>3 Apply the 80/20 Rule to Everything</text>
+</navLabel>
+<content src="xhtml/ch03.html"/>
+</navPoint>
+<navPoint id="ch04" playOrder="11">
+<navLabel>
+<text>4 Consider the Consequences</text>
+</navLabel>
+<content src="xhtml/ch04.html"/>
+</navPoint>
+<navPoint id="ch05" playOrder="12">
+<navLabel>
+<text>5 Practice Creative Procrastination</text>
+</navLabel>
+<content src="xhtml/ch05.html"/>
+</navPoint>
+<navPoint id="ch06" playOrder="13">
+<navLabel>
+<text>6 Use the ABCDE Method Continually</text>
+</navLabel>
+<content src="xhtml/ch06.html"/>
+</navPoint>
+<navPoint id="ch07" playOrder="14">
+<navLabel>
+<text>7 Focus on Key Result Areas</text>
+</navLabel>
+<content src="xhtml/ch07.html"/>
+</navPoint>
+<navPoint id="ch08" playOrder="15">
+<navLabel>
+<text>8 Apply the Law of Three</text>
+</navLabel>
+<content src="xhtml/ch08.html"/>
+</navPoint>
+<navPoint id="ch09" playOrder="16">
+<navLabel>
+<text>9 Prepare Thoroughly Before You Begin</text>
+</navLabel>
+<content src="xhtml/ch09.html"/>
+</navPoint>
+<navPoint id="ch10" playOrder="17">
+<navLabel>
+<text>10 Take It One Oil Barrel at a Time</text>
+</navLabel>
+<content src="xhtml/ch10.html"/>
+</navPoint>
+<navPoint id="ch11" playOrder="18">
+<navLabel>
+<text>11 Upgrade Your Key Skills</text>
+</navLabel>
+<content src="xhtml/ch11.html"/>
+</navPoint>
+<navPoint id="ch12" playOrder="19">
+<navLabel>
+<text>12 Leverage Your Special Talents</text>
+</navLabel>
+<content src="xhtml/ch12.html"/>
+</navPoint>
+<navPoint id="ch13" playOrder="20">
+<navLabel>
+<text>13 Identify Your Key Constraints</text>
+</navLabel>
+<content src="xhtml/ch13.html"/>
+</navPoint>
+<navPoint id="ch14" playOrder="21">
+<navLabel>
+<text>14 Put the Pressure on Yourself</text>
+</navLabel>
+<content src="xhtml/ch14.html"/>
+</navPoint>
+<navPoint id="ch15" playOrder="22">
+<navLabel>
+<text>15 Maximize Your Personal Powers</text>
+</navLabel>
+<content src="xhtml/ch15.html"/>
+</navPoint>
+<navPoint id="ch16" playOrder="23">
+<navLabel>
+<text>16 Motivate Yourself into Action</text>
+</navLabel>
+<content src="xhtml/ch16.html"/>
+</navPoint>
+<navPoint id="ch17" playOrder="24">
+<navLabel>
+<text>17 Get Out of the Technological Time Sinks</text>
+</navLabel>
+<content src="xhtml/ch17.html"/>
+</navPoint>
+<navPoint id="ch18" playOrder="25">
+<navLabel>
+<text>18 Slice and Dice the Task</text>
+</navLabel>
+<content src="xhtml/ch18.html"/>
+</navPoint>
+<navPoint id="ch19" playOrder="26">
+<navLabel>
+<text>19 Create Large Chunks of Time</text>
+</navLabel>
+<content src="xhtml/ch19.html"/>
+</navPoint>
+<navPoint id="ch20" playOrder="27">
+<navLabel>
+<text>20 Develop a Sense of Urgency</text>
+</navLabel>
+<content src="xhtml/ch20.html"/>
+</navPoint>
+<navPoint id="ch21" playOrder="28">
+<navLabel>
+<text>21 Single Handle Every Task</text>
+</navLabel>
+<content src="xhtml/ch21.html"/>
+</navPoint>
+<navPoint id="conc" playOrder="29">
+<navLabel>
+<text>Conclusion: Putting It All Together</text>
+</navLabel>
+<content src="xhtml/conc.html"/>
+</navPoint>
+<navPoint id="index" playOrder="30">
+<navLabel>
+<text>Index</text>
+</navLabel>
+<content src="xhtml/index.html"/>
+</navPoint>
+<navPoint id="back01" playOrder="31">
+<navLabel>
+<text>Learning Resources of Brian Tracy International</text>
+</navLabel>
+<content src="xhtml/back01.html"/>
+</navPoint>
+<navPoint id="back02" playOrder="32">
+<navLabel>
+<text>About the Author</text>
+</navLabel>
+<content src="xhtml/back02.html"/>
+</navPoint>
+</navMap>
+</ncx>

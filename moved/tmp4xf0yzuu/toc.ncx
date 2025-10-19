@@ -1,0 +1,467 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+    <head>
+       <meta name="dtb:uid" content="http://www.hxa7241.org/articles/content/epup-guide_hxa7241_2007_1.epub"/>
+    </head>
+    <docTitle>
+       <text>The Compound Effect</text>
+    </docTitle>
+    <navMap>
+	              <navPoint id="als" playOrder="1">
+		 <navLabel>
+			<text>Also by Darren Hardy</text>
+		 </navLabel>
+		 <content src="darr_9781593157142_oeb_als_r1.html"/>
+	  </navPoint>
+      <navPoint id="fm1" playOrder="2">
+		 <navLabel>
+			<text>Praise</text>
+		 </navLabel>
+		 <content src="darr_9781593157142_oeb_fm1_r1.html"/>
+	  </navPoint>
+      <navPoint id="tp" playOrder="3">
+         <navLabel>
+            <text>Title Page</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_tp_r1.html"/>
+      </navPoint>
+      <navPoint id="ded" playOrder="4">
+         <navLabel>
+            <text>Dedication</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_ded_r1.html"/>
+      </navPoint>
+      <navPoint id="ack" playOrder="5">
+         <navLabel>
+            <text>Acknowledgments</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_ack_r1.html"/>
+      </navPoint>
+      <navPoint id="fm4" playOrder="6">
+		 <navLabel>
+			<text>SPECIAL MESSAGE FROM ANTHONY ROBBINS</text>
+		 </navLabel>
+		 <content src="darr_9781593157142_oeb_fm4_r1.html"/>
+	  </navPoint>
+      <navPoint id="itr" playOrder="7">
+         <navLabel>
+            <text>Introduction</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_itr_r1.html"/>
+      </navPoint>
+      <navPoint id="c01" playOrder="8">
+         <navLabel>
+            <text>CHAPTER 1 - THE COMPOUND EFFECT IN ACTION</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c01_r1.html"/>
+      <navPoint id="c01_1" playOrder="9">
+         <navLabel>
+            <text>You Haven’t Experienced the Payoff of the Compound Effect</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c01_r1.html#h1"/>
+      </navPoint>
+      <navPoint id="c01_2" playOrder="10">
+         <navLabel>
+            <text>The Magic Penny</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c01_r1.html#h2"/>
+      </navPoint>
+      <navPoint id="c01_3" playOrder="11">
+         <navLabel>
+            <text>Three Friends</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c01_r1.html#h3"/>
+      </navPoint>
+      <navPoint id="c01_4" playOrder="12">
+         <navLabel>
+            <text>The Ripple Effect</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c01_r1.html#h4"/>
+      </navPoint>
+      <navPoint id="c01_5" playOrder="13">
+         <navLabel>
+            <text>Success, Old School</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c01_r1.html#h5"/>
+      </navPoint>
+      <navPoint id="c01_6" playOrder="14">
+         <navLabel>
+            <text>Microwave Mentality</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c01_r1.html#h6"/>
+      </navPoint>
+      <navPoint id="c01_7" playOrder="15">
+         <navLabel>
+            <text>Put the Compound Effect to Work for You</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c01_r1.html#h7"/>
+      </navPoint>
+</navPoint>
+                  <navPoint id="c02" playOrder="16">
+         <navLabel>
+            <text>CHAPTER 2 - CHOICES</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html"/>
+      <navPoint id="c02_1" playOrder="17">
+         <navLabel>
+            <text>Elephants Don’t Bite</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h1"/>
+      </navPoint>
+      <navPoint id="c02_2" playOrder="18">
+         <navLabel>
+            <text>Thanksgiving Year-Round</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h2"/>
+      </navPoint>
+      <navPoint id="c02_3" playOrder="19">
+         <navLabel>
+            <text>Owning 100 Percent</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h3"/>
+      </navPoint>
+      <navPoint id="c02_4" playOrder="20">
+         <navLabel>
+            <text>Getting Lucky</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h4"/>
+      </navPoint>
+      <navPoint id="c02_5" playOrder="21">
+         <navLabel>
+            <text>The (Complete) Formula for Getting Lucky:</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h5"/>
+      </navPoint>
+      <navPoint id="c02_6" playOrder="22">
+         <navLabel>
+            <text>The High Price of Tuition at UHK (University of Hard Knocks)</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h6"/>
+      </navPoint>
+      <navPoint id="c02_7" playOrder="23">
+         <navLabel>
+            <text>Your Secret Weapon—Your Scorecard</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h7"/>
+      </navPoint>
+      <navPoint id="c02_8" playOrder="24">
+         <navLabel>
+            <text>Money Trap</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h8"/>
+      </navPoint>
+      <navPoint id="c02_9" playOrder="25">
+         <navLabel>
+            <text>Keep It Slow and Easy</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h9"/>
+      </navPoint>
+      <navPoint id="c02_10" playOrder="26">
+         <navLabel>
+            <text>The Unsung, Unseen Hero</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h10"/>
+      </navPoint>
+      <navPoint id="c02_11" playOrder="27">
+         <navLabel>
+            <text>Take a Walk</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h11"/>
+      </navPoint>
+      <navPoint id="c02_12" playOrder="28">
+         <navLabel>
+            <text>Money Tree</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h12"/>
+      </navPoint>
+      <navPoint id="c02_13" playOrder="29">
+         <navLabel>
+            <text>Time Is of the Essence</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h13"/>
+      </navPoint>
+      <navPoint id="c02_14" playOrder="30">
+         <navLabel>
+            <text>Success Is a (Half-) Marathon</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h14"/>
+      </navPoint>
+      <navPoint id="c02_15" playOrder="31">
+         <navLabel>
+            <text>Put the Compound Effect to Work for You</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c02_r1.html#h15"/>
+      </navPoint>
+</navPoint>
+                  <navPoint id="c03" playOrder="32">
+         <navLabel>
+            <text>CHAPTER 3 - HABITS</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html"/>
+      <navPoint id="c03_1" playOrder="33">
+         <navLabel>
+            <text>Creatures of Habit</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h1"/>
+      </navPoint>
+      <navPoint id="c03_2" playOrder="34">
+         <navLabel>
+            <text>Start by Thinking Your Way Out of the Instant Gratification Trap</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h2"/>
+      </navPoint>
+      <navPoint id="c03_3" playOrder="35">
+         <navLabel>
+            <text>Finding Your Mojo—Your Why-Power</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h3"/>
+      </navPoint>
+      <navPoint id="c03_4" playOrder="36">
+         <navLabel>
+            <text>Why Everything’s Possible</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h4"/>
+      </navPoint>
+      <navPoint id="c03_5" playOrder="37">
+         <navLabel>
+            <text>Core Motivation</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h5"/>
+      </navPoint>
+      <navPoint id="c03_6" playOrder="38">
+         <navLabel>
+            <text>Find Your Fight</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h6"/>
+      </navPoint>
+      <navPoint id="c03_7" playOrder="39">
+         <navLabel>
+            <text>Goals</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h7"/>
+      </navPoint>
+      <navPoint id="c03_8" playOrder="40">
+         <navLabel>
+            <text>How Goal Setting Actually Works: The Mystery ‘Secret’ Revealed</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h8"/>
+      </navPoint>
+      <navPoint id="c03_9" playOrder="41">
+         <navLabel>
+            <text>Who You Have to Become</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h9"/>
+      </navPoint>
+      <navPoint id="c03_10" playOrder="42">
+         <navLabel>
+            <text>Behave Yourself</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h10"/>
+      </navPoint>
+      <navPoint id="c03_11" playOrder="43">
+         <navLabel>
+            <text>Game Changers: Five Strategies for Eliminating Bad Habits</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h11"/>
+      </navPoint>
+      <navPoint id="c03_12" playOrder="44">
+         <navLabel>
+            <text>Run a Vice Check</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h12"/>
+      </navPoint>
+      <navPoint id="c03_13" playOrder="45">
+         <navLabel>
+            <text>Game Changers: Six Techniques for Installing Good Habits</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h13"/>
+      </navPoint>
+      <navPoint id="c03_14" playOrder="46">
+         <navLabel>
+            <text>Change Is Hard: Yippee!</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h14"/>
+      </navPoint>
+      <navPoint id="c03_15" playOrder="47">
+         <navLabel>
+            <text>Be Patient</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h15"/>
+      </navPoint>
+      <navPoint id="c03_16" playOrder="48">
+         <navLabel>
+            <text>Put the Compound Effect to Work for You</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c03_r1.html#h16"/>
+      </navPoint>
+</navPoint>
+                  <navPoint id="c04" playOrder="49">
+         <navLabel>
+            <text>CHAPTER 4 - MOMENTUM</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c04_r1.html"/>
+      <navPoint id="c04_1" playOrder="50">
+         <navLabel>
+            <text>Harnessing the Power of Big Mo</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c04_r1.html#h1"/>
+      </navPoint>
+      <navPoint id="c04_2" playOrder="51">
+         <navLabel>
+            <text>Routine Power</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c04_r1.html#h2"/>
+      </navPoint>
+      <navPoint id="c04_3" playOrder="52">
+         <navLabel>
+            <text>Bookend Your Days</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c04_r1.html#h3"/>
+      </navPoint>
+      <navPoint id="c04_4" playOrder="53">
+         <navLabel>
+            <text>Rise &amp; Shine</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c04_r1.html#h4"/>
+      </navPoint>
+      <navPoint id="c04_5" playOrder="54">
+         <navLabel>
+            <text>Sweet Dreams</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c04_r1.html#h5"/>
+      </navPoint>
+      <navPoint id="c04_6" playOrder="55">
+         <navLabel>
+            <text>Shake It Up</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c04_r1.html#h6"/>
+      </navPoint>
+      <navPoint id="c04_7" playOrder="56">
+         <navLabel>
+            <text>Getting into a Rhythm: Finding Your New Groove</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c04_r1.html#h7"/>
+      </navPoint>
+      <navPoint id="c04_8" playOrder="57">
+         <navLabel>
+            <text>Registering Your Rhythm</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c04_r1.html#h8"/>
+      </navPoint>
+      <navPoint id="c04_9" playOrder="58">
+         <navLabel>
+            <text>The Rhythms of Life</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c04_r1.html#h9"/>
+      </navPoint>
+      <navPoint id="c04_10" playOrder="59">
+         <navLabel>
+            <text>The Power of Consistency</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c04_r1.html#h10"/>
+      </navPoint>
+      <navPoint id="c04_11" playOrder="60">
+         <navLabel>
+            <text>The Pump Well</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c04_r1.html#h11"/>
+      </navPoint>
+      <navPoint id="c04_12" playOrder="61">
+         <navLabel>
+            <text>Put the Compound Effect to Work for You</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c04_r1.html#h12"/>
+      </navPoint>
+</navPoint>
+                  <navPoint id="c05" playOrder="62">
+         <navLabel>
+            <text>CHAPTER 5 - INFLUENCES</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c05_r1.html"/>
+      <navPoint id="c05_1" playOrder="63">
+         <navLabel>
+            <text>I. Input: Garbage In, Garbage Out</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c05_r1.html#h1"/>
+      </navPoint>
+      <navPoint id="c05_2" playOrder="64">
+         <navLabel>
+            <text>II. Associations: Who’s Influencing You?</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c05_r1.html#h2"/>
+      </navPoint>
+      <navPoint id="c05_3" playOrder="65">
+         <navLabel>
+            <text>III. Environment: Changing Your View Changes Your Perspective</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c05_r1.html#h3"/>
+      </navPoint>
+</navPoint>
+                  <navPoint id="c06" playOrder="66">
+         <navLabel>
+            <text>CHAPTER 6 - ACCELERATION</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c06_r1.html"/>
+      <navPoint id="c06_1" playOrder="67">
+         <navLabel>
+            <text>Moments of Truth</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c06_r1.html#h1"/>
+      </navPoint>
+      <navPoint id="c06_2" playOrder="68">
+         <navLabel>
+            <text>Multiplying Your Results</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c06_r1.html#h2"/>
+      </navPoint>
+      <navPoint id="c06_3" playOrder="69">
+         <navLabel>
+            <text>Beat the Expectations</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c06_r1.html#h3"/>
+      </navPoint>
+      <navPoint id="c06_4" playOrder="70">
+         <navLabel>
+            <text>Do the Unexpected</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c06_r1.html#h4"/>
+      </navPoint>
+      <navPoint id="c06_5" playOrder="71">
+         <navLabel>
+            <text>Do Better Than Expected</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c06_r1.html#h5"/>
+      </navPoint>
+      <navPoint id="c06_6" playOrder="72">
+         <navLabel>
+            <text>Put the Compound Effect to Work for You</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_c06_r1.html#h6"/>
+      </navPoint>
+</navPoint>
+                  <navPoint id="bm1" playOrder="73">
+         <navLabel>
+            <text>CONCLUSION</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_bm1_r1.html"/>
+      </navPoint>
+      <navPoint id="bm2" playOrder="74">
+         <navLabel>
+            <text>RESOURCE GUIDE</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_bm2_r1.html"/>
+      </navPoint>
+      <navPoint id="bm3" playOrder="75">
+         <navLabel>
+            <text>THE COMPOUND EFFECT</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_bm3_r1.html"/>
+      </navPoint>
+      <navPoint id="cop" playOrder="76">
+         <navLabel>
+            <text>Copyright Page</text>
+         </navLabel>
+         <content src="darr_9781593157142_oeb_cop_r1.html"/>
+      </navPoint>
+</navMap>
+</ncx>

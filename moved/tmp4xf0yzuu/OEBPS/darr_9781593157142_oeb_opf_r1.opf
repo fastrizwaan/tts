@@ -1,0 +1,156 @@
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <dc:title>The Compound Effect</dc:title>
+      <dc:creator>Darren Hardy</dc:creator>
+      <dc:publisher>Vanguard Press</dc:publisher>
+      <dc:format/>
+      <dc:date>2011-10-18</dc:date>
+      <dc:subject/>
+      <dc:description>&lt;p&gt;No gimmicks. No Hyperbole. No Magic Bullet. &lt;I&gt;The Compound Effect&lt;/I&gt; is based on the principle that decisions shape your destiny. Little, everyday decisions will either take you to the life you desire or to disaster by default. Darren Hardy, publisher of &lt;I&gt;Success Magazine&lt;/I&gt;, presents &lt;I&gt;The Compound Effect&lt;/I&gt;, a distillation of the fundamental principles that have guided the most phenomenal achievements in business, relationships, and beyond. This easy-to-use, step-by-step operating system allows you to multiply your success, chart your progress, and achieve any desire. If you&amp;rsquo;re serious about living an extraordinary life, use the power of &lt;I&gt;The Compound Effect &lt;/I&gt;to create the success you want.</dc:description>
+      <dc:rights>Copyright © 2010 by SUCCESS Media</dc:rights>
+      <dc:identifier id="bookid">9781593157142</dc:identifier>
+      <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item href="page-template.xpgt" id="pt" media-type="application/vnd.adobe-page-template+xml"/>
+    <item href="darr_9781593157142_oeb_css_r1.css" id="style" media-type="text/css"/>
+    <item href="darr_9781593157142_msr_cvi_r1.jpg" id="coverimagestandard" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_msr_cvt_r1.jpg" id="thumbimagestandard" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_msr_ppl_r1.jpg" id="PPCthumbnailimage" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_cover_r1.html" id="cover" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_tp_r1.html" id="tp" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_toc_r1.html" id="toc" media-type="application/xhtml+xml"/>
+    <item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>
+    <item href="darr_9781593157142_oeb_als_r1.html" id="als" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_fm1_r1.html" id="fm1" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_ded_r1.html" id="ded" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_fm2_r1.html" id="fm2" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_ack_r1.html" id="ack" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_fm3_r1.html" id="fm3" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_fm4_r1.html" id="fm4" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_itr_r1.html" id="itr" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_c01_r1.html" id="c01" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_c02_r1.html" id="c02" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_c03_r1.html" id="c03" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_c04_r1.html" id="c04" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_c05_r1.html" id="c05" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_c06_r1.html" id="c06" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_bm1_r1.html" id="bm1" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_bm2_r1.html" id="bm2" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_bm3_r1.html" id="bm3" media-type="application/xhtml+xml"/>
+    <item href="darr_9781593157142_oeb_cop_r1.html" id="cop" media-type="application/xhtml+xml"/>
+      <item href="darr_9781593157142_oeb_001_r1.jpg" id="darr_9781593157142_oeb_001_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_008_r1.jpg" id="darr_9781593157142_oeb_008_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_017_r1.jpg" id="darr_9781593157142_oeb_017_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_018_r1.jpg" id="darr_9781593157142_oeb_018_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_019_r1.jpg" id="darr_9781593157142_oeb_019_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_020_r1.jpg" id="darr_9781593157142_oeb_020_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_027_r1.jpg" id="darr_9781593157142_oeb_027_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_028_r1.jpg" id="darr_9781593157142_oeb_028_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_030_r1.jpg" id="darr_9781593157142_oeb_030_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_035_r1.jpg" id="darr_9781593157142_oeb_035_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_036_r1.jpg" id="darr_9781593157142_oeb_036_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_037_r1.jpg" id="darr_9781593157142_oeb_037_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_047_r1.jpg" id="darr_9781593157142_oeb_047_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_050_r1.jpg" id="darr_9781593157142_oeb_050_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_052_r1.jpg" id="darr_9781593157142_oeb_052_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_061_r1.jpg" id="darr_9781593157142_oeb_061_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_062_r1.jpg" id="darr_9781593157142_oeb_062_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_063_r1.jpg" id="darr_9781593157142_oeb_063_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_064_r1.jpg" id="darr_9781593157142_oeb_064_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_065_r1.jpg" id="darr_9781593157142_oeb_065_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_066_r1.jpg" id="darr_9781593157142_oeb_066_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_067_r1.jpg" id="darr_9781593157142_oeb_067_r1" media-type="image/jpeg"/>
+    <item href="darr_9781593157142_oeb_001_tab.gif" id="darr_9781593157142_oeb_001_tab" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_002_r1.gif" id="darr_9781593157142_oeb_002_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_003_r1.gif" id="darr_9781593157142_oeb_003_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_004_r1.gif" id="darr_9781593157142_oeb_004_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_005_r1.gif" id="darr_9781593157142_oeb_005_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_006_r1.gif" id="darr_9781593157142_oeb_006_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_007_r1.gif" id="darr_9781593157142_oeb_007_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_009_r1.gif" id="darr_9781593157142_oeb_009_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_010_r1.gif" id="darr_9781593157142_oeb_010_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_011_r1.gif" id="darr_9781593157142_oeb_011_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_012_r1.gif" id="darr_9781593157142_oeb_012_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_013_r1.gif" id="darr_9781593157142_oeb_013_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_014_r1.gif" id="darr_9781593157142_oeb_014_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_015_r1.gif" id="darr_9781593157142_oeb_015_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_016_r1.gif" id="darr_9781593157142_oeb_016_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_021_r1.gif" id="darr_9781593157142_oeb_021_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_022_r1.gif" id="darr_9781593157142_oeb_022_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_023_r1.gif" id="darr_9781593157142_oeb_023_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_024_r1.gif" id="darr_9781593157142_oeb_024_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_025_r1.gif" id="darr_9781593157142_oeb_025_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_026_r1.gif" id="darr_9781593157142_oeb_026_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_029_r1.gif" id="darr_9781593157142_oeb_029_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_031_r1.gif" id="darr_9781593157142_oeb_031_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_032_r1.gif" id="darr_9781593157142_oeb_032_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_033_r1.gif" id="darr_9781593157142_oeb_033_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_034_r1.gif" id="darr_9781593157142_oeb_034_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_038_r1.gif" id="darr_9781593157142_oeb_038_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_039_r1.gif" id="darr_9781593157142_oeb_039_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_040_r1.gif" id="darr_9781593157142_oeb_040_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_041_r1.gif" id="darr_9781593157142_oeb_041_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_042_r1.gif" id="darr_9781593157142_oeb_042_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_043_r1.gif" id="darr_9781593157142_oeb_043_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_044_r1.gif" id="darr_9781593157142_oeb_044_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_045_r1.gif" id="darr_9781593157142_oeb_045_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_046_r1.gif" id="darr_9781593157142_oeb_046_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_048_r1.gif" id="darr_9781593157142_oeb_048_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_049_r1.gif" id="darr_9781593157142_oeb_049_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_051_r1.gif" id="darr_9781593157142_oeb_051_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_053_r1.gif" id="darr_9781593157142_oeb_053_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_054_r1.gif" id="darr_9781593157142_oeb_054_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_055_r1.gif" id="darr_9781593157142_oeb_055_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_056_r1.gif" id="darr_9781593157142_oeb_056_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_057_r1.gif" id="darr_9781593157142_oeb_057_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_058_r1.gif" id="darr_9781593157142_oeb_058_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_059_r1.gif" id="darr_9781593157142_oeb_059_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_060_r1.gif" id="darr_9781593157142_oeb_060_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_068_r1.gif" id="darr_9781593157142_oeb_068_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_069_r1.gif" id="darr_9781593157142_oeb_069_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_070_r1.gif" id="darr_9781593157142_oeb_070_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_071_r1.gif" id="darr_9781593157142_oeb_071_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_072_r1.gif" id="darr_9781593157142_oeb_072_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_073_r1.gif" id="darr_9781593157142_oeb_073_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_074_r1.gif" id="darr_9781593157142_oeb_074_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_075_r1.gif" id="darr_9781593157142_oeb_075_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_076_r1.gif" id="darr_9781593157142_oeb_076_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_077_r1.gif" id="darr_9781593157142_oeb_077_r1" media-type="image/gif"/>
+    <item href="darr_9781593157142_oeb_078_r1.gif" id="darr_9781593157142_oeb_078_r1" media-type="image/gif"/>
+	<item href="fonts/DejaVuSerif-BoldItalic.ttf" id="f01" media-type="application/octet-stream"/>
+	<item href="fonts/DejaVuSerif-Bold.ttf" id="f02" media-type="application/octet-stream"/>
+	<item href="fonts/DejaVuSerif-Italic.ttf" id="f03" media-type="application/octet-stream"/>
+	<item href="fonts/DejaVuSerif.ttf" id="f04" media-type="application/octet-stream"/>
+</manifest>
+  <spine toc="ncx">
+    <itemref idref="cover"/>
+    <itemref idref="tp"/>
+    <itemref idref="toc"/>
+    <itemref idref="als"/>
+    <itemref idref="fm1"/>
+    <itemref idref="ded"/>
+    <itemref idref="fm2"/>
+    <itemref idref="ack"/>
+    <itemref idref="fm3"/>
+    <itemref idref="fm4"/>
+    <itemref idref="itr"/>
+    <itemref idref="c01"/>
+    <itemref idref="c02"/>
+    <itemref idref="c03"/>
+    <itemref idref="c04"/>
+    <itemref idref="c05"/>
+    <itemref idref="c06"/>
+    <itemref idref="bm1"/>
+    <itemref idref="bm2"/>
+    <itemref idref="bm3"/>
+    <itemref idref="cop"/>
+  </spine>
+  <guide>
+    <reference href="darr_9781593157142_oeb_toc_r1.html" title="Table of Contents" type="toc"/>
+    <reference href="darr_9781593157142_msr_cvi_r1.jpg" title="Cover" type="other.ms-coverimage-standard"/>
+    <reference href="darr_9781593157142_msr_cvt_r1.jpg" title="ThumbImageStandard" type="other.ms-thumbimage-standard"/>
+    <reference href="darr_9781593157142_msr_ppl_r1.jpg" title="PPCThumbnailImage" type="other.ms-thumbimage"/>
+    <reference href="darr_9781593157142_oeb_cop_r1.html" title="Copyright" type="copyright"/>
+  </guide>
+</package>

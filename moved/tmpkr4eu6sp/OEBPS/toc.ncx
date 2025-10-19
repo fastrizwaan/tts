@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN"
+ "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd"><ncx version="2005-1" xml:lang="en-US" xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <head>
+    <meta content="1" name="dtb:depth"/>
+    <meta content="0" name="dtb:totalPageCount"/>
+    <meta content="0" name="dtb:maxPageNumber"/>
+    <meta content="9781631584947" name="dtb:uid"/>
+  </head>
+  <docTitle>
+    <text>Life Skills</text>
+  </docTitle>
+  <docAuthor>
+    <text>Julia Laflin</text>
+  </docAuthor>
+  <navMap>
+    <navPoint id="navPoint-1" playOrder="1">
+      <navLabel>
+        <text>Front Cover</text>
+      </navLabel>
+      <content src="Text/000_frontcover.xhtml"/>
+    </navPoint>
+    <navPoint id="navPoint-2" playOrder="2">
+      <navLabel>
+        <text>Title Page</text>
+      </navLabel>
+      <content src="Text/000a_Title.xhtml"/>
+    </navPoint>
+    <navPoint id="navPoint-3" playOrder="3">
+      <navLabel>
+        <text>Copyright Page</text>
+      </navLabel>
+      <content src="Text/000b_Copy.xhtml"/>
+    </navPoint>
+    <navPoint id="navPoint-4" playOrder="4">
+      <navLabel>
+        <text>Contents</text>
+      </navLabel>
+      <content src="Text/002_contents.xhtml"/>
+    </navPoint>
+    <navPoint id="navPoint-5" playOrder="5">
+      <navLabel>
+        <text>Introduction</text>
+      </navLabel>
+      <content src="Text/003_introduction.xhtml#int"/>
+    </navPoint>
+    <navPoint id="navPoint-6" playOrder="6">
+      <navLabel>
+        <text>Kitchen</text>
+      </navLabel>
+      <content src="Text/004_part_01.xhtml#ch1"/>
+    </navPoint>
+    <navPoint id="navPoint-7" playOrder="7">
+      <navLabel>
+        <text>Clothes</text>
+      </navLabel>
+      <content src="Text/031_part_02.xhtml#ch2"/>
+    </navPoint>
+    <navPoint id="navPoint-8" playOrder="8">
+      <navLabel>
+        <text>Cleaning</text>
+      </navLabel>
+      <content src="Text/043_part_03.xhtml#ch3"/>
+    </navPoint>
+    <navPoint id="navPoint-9" playOrder="9">
+      <navLabel>
+        <text>Household</text>
+      </navLabel>
+      <content src="Text/054_part_04.xhtml#ch4"/>
+    </navPoint>
+    <navPoint id="navPoint-10" playOrder="10">
+      <navLabel>
+        <text>Vehicles</text>
+      </navLabel>
+      <content src="Text/075_part_05.xhtml#ch5"/>
+    </navPoint>
+    <navPoint id="navPoint-11" playOrder="11">
+      <navLabel>
+        <text>The Great Outdoors</text>
+      </navLabel>
+      <content src="Text/086_part_06.xhtml#ch6"/>
+    </navPoint>
+    <navPoint id="navPoint-12" playOrder="12">
+      <navLabel>
+        <text>First Aid</text>
+      </navLabel>
+      <content src="Text/098_part_07.xhtml#ch7"/>
+    </navPoint>
+    <navPoint id="navPoint-13" playOrder="13">
+      <navLabel>
+        <text>Life Admin and Etiquette</text>
+      </navLabel>
+      <content src="Text/109_part_08.xhtml#ch8"/>
+    </navPoint>
+    <navPoint id="navPoint-14" playOrder="14">
+      <navLabel>
+        <text>The Art of Good Conversation</text>
+      </navLabel>
+      <content src="Text/134_part_09.xhtml#ch9"/>
+    </navPoint>
+    <navPoint id="navPoint-15" playOrder="15">
+      <navLabel>
+        <text>People Skills</text>
+      </navLabel>
+      <content src="Text/149_part_10.xhtml#ch10"/>
+    </navPoint>
+    <navPoint id="navPoint-16" playOrder="16">
+      <navLabel>
+        <text>Final Word</text>
+      </navLabel>
+      <content src="Text/166_final.xhtml#ch11"/>
+    </navPoint>
+    <navPoint id="navPoint-17" playOrder="17">
+      <navLabel>
+        <text>Index</text>
+      </navLabel>
+      <content src="Text/167_index.xhtml#ind"/>
+    </navPoint>
+  </navMap>
+</ncx>
