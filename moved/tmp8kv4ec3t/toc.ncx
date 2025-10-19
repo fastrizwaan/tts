@@ -1,0 +1,206 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ncx version="2005-1" xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <head>
+    <meta content="1" name="dtb:depth"/>
+    <meta content="0" name="dtb:totalPageCount"/>
+    <meta content="0" name="dtb:maxPageNumber"/>
+  </head>
+  <docTitle>
+    <text>The Invisible Man</text>
+  </docTitle>
+  <docAuthor>
+    <text>H.G. Wells</text>
+  </docAuthor>
+  <navMap>
+    <navPoint id="title" playOrder="1">
+      <navLabel>
+        <text>Title page</text>
+      </navLabel>
+      <content src="title.xhtml"/>
+    </navPoint>
+    <navPoint id="c0_The_Invisible_Man__1897_" playOrder="2">
+      <navLabel>
+        <text>The Invisible Man</text>
+      </navLabel>
+      <content src="c0_The_Invisible_Man__1897_.xhtml"/>
+    </navPoint>
+    <navPoint id="c1_The_Invisible_Man_Chapter_1" playOrder="3">
+      <navLabel>
+        <text>The Strange Man's Arrival</text>
+      </navLabel>
+      <content src="c1_The_Invisible_Man_Chapter_1.xhtml"/>
+    </navPoint>
+    <navPoint id="c2_The_Invisible_Man_Chapter_2" playOrder="4">
+      <navLabel>
+        <text>Mr. Teddy Henfrey's First Impressions</text>
+      </navLabel>
+      <content src="c2_The_Invisible_Man_Chapter_2.xhtml"/>
+    </navPoint>
+    <navPoint id="c3_The_Invisible_Man_Chapter_3" playOrder="5">
+      <navLabel>
+        <text>The Thousand and One Bottles</text>
+      </navLabel>
+      <content src="c3_The_Invisible_Man_Chapter_3.xhtml"/>
+    </navPoint>
+    <navPoint id="c4_The_Invisible_Man_Chapter_4" playOrder="6">
+      <navLabel>
+        <text>Mr. Cuss Interviews the Stranger</text>
+      </navLabel>
+      <content src="c4_The_Invisible_Man_Chapter_4.xhtml"/>
+    </navPoint>
+    <navPoint id="c5_The_Invisible_Man_Chapter_5" playOrder="7">
+      <navLabel>
+        <text>The Burglary at the Vicarage</text>
+      </navLabel>
+      <content src="c5_The_Invisible_Man_Chapter_5.xhtml"/>
+    </navPoint>
+    <navPoint id="c6_The_Invisible_Man_Chapter_6" playOrder="8">
+      <navLabel>
+        <text>The Furniture that went Mad</text>
+      </navLabel>
+      <content src="c6_The_Invisible_Man_Chapter_6.xhtml"/>
+    </navPoint>
+    <navPoint id="c7_The_Invisible_Man_Chapter_7" playOrder="9">
+      <navLabel>
+        <text>The Unveiling of the Stranger</text>
+      </navLabel>
+      <content src="c7_The_Invisible_Man_Chapter_7.xhtml"/>
+    </navPoint>
+    <navPoint id="c8_The_Invisible_Man_Chapter_8" playOrder="10">
+      <navLabel>
+        <text>In Transit</text>
+      </navLabel>
+      <content src="c8_The_Invisible_Man_Chapter_8.xhtml"/>
+    </navPoint>
+    <navPoint id="c9_The_Invisible_Man_Chapter_9" playOrder="11">
+      <navLabel>
+        <text>Mr. Thomas Marvel</text>
+      </navLabel>
+      <content src="c9_The_Invisible_Man_Chapter_9.xhtml"/>
+    </navPoint>
+    <navPoint id="c10_The_Invisible_Man_Chapter_10" playOrder="12">
+      <navLabel>
+        <text>Mr. Marvel's Visit to Iping</text>
+      </navLabel>
+      <content src="c10_The_Invisible_Man_Chapter_10.xhtml"/>
+    </navPoint>
+    <navPoint id="c11_The_Invisible_Man_Chapter_11" playOrder="13">
+      <navLabel>
+        <text>In the Coach and Horses</text>
+      </navLabel>
+      <content src="c11_The_Invisible_Man_Chapter_11.xhtml"/>
+    </navPoint>
+    <navPoint id="c12_The_Invisible_Man_Chapter_12" playOrder="14">
+      <navLabel>
+        <text>The Invisible Man loses his Temper</text>
+      </navLabel>
+      <content src="c12_The_Invisible_Man_Chapter_12.xhtml"/>
+    </navPoint>
+    <navPoint id="c13_The_Invisible_Man_Chapter_13" playOrder="15">
+      <navLabel>
+        <text>Mr. Marvel discusses his Resignation</text>
+      </navLabel>
+      <content src="c13_The_Invisible_Man_Chapter_13.xhtml"/>
+    </navPoint>
+    <navPoint id="c14_The_Invisible_Man_Chapter_14" playOrder="16">
+      <navLabel>
+        <text>At Port Stowe</text>
+      </navLabel>
+      <content src="c14_The_Invisible_Man_Chapter_14.xhtml"/>
+    </navPoint>
+    <navPoint id="c15_The_Invisible_Man_Chapter_15" playOrder="17">
+      <navLabel>
+        <text>The Man who was Running</text>
+      </navLabel>
+      <content src="c15_The_Invisible_Man_Chapter_15.xhtml"/>
+    </navPoint>
+    <navPoint id="c16_The_Invisible_Man_Chapter_16" playOrder="18">
+      <navLabel>
+        <text>In the Jolly Cricketers</text>
+      </navLabel>
+      <content src="c16_The_Invisible_Man_Chapter_16.xhtml"/>
+    </navPoint>
+    <navPoint id="c17_The_Invisible_Man_Chapter_17" playOrder="19">
+      <navLabel>
+        <text>Doctor Kemp's Visitor</text>
+      </navLabel>
+      <content src="c17_The_Invisible_Man_Chapter_17.xhtml"/>
+    </navPoint>
+    <navPoint id="c18_The_Invisible_Man_Chapter_18" playOrder="20">
+      <navLabel>
+        <text>The Invisible Man Sleeps</text>
+      </navLabel>
+      <content src="c18_The_Invisible_Man_Chapter_18.xhtml"/>
+    </navPoint>
+    <navPoint id="c19_The_Invisible_Man_Chapter_19" playOrder="21">
+      <navLabel>
+        <text>Certain First Principles</text>
+      </navLabel>
+      <content src="c19_The_Invisible_Man_Chapter_19.xhtml"/>
+    </navPoint>
+    <navPoint id="c20_The_Invisible_Man_Chapter_20" playOrder="22">
+      <navLabel>
+        <text>At the House in Great Portland Street</text>
+      </navLabel>
+      <content src="c20_The_Invisible_Man_Chapter_20.xhtml"/>
+    </navPoint>
+    <navPoint id="c21_The_Invisible_Man_Chapter_21" playOrder="23">
+      <navLabel>
+        <text>In Oxford Street</text>
+      </navLabel>
+      <content src="c21_The_Invisible_Man_Chapter_21.xhtml"/>
+    </navPoint>
+    <navPoint id="c22_The_Invisible_Man_Chapter_22" playOrder="24">
+      <navLabel>
+        <text>In the Emporium</text>
+      </navLabel>
+      <content src="c22_The_Invisible_Man_Chapter_22.xhtml"/>
+    </navPoint>
+    <navPoint id="c23_The_Invisible_Man_Chapter_23" playOrder="25">
+      <navLabel>
+        <text>In Drury Lane</text>
+      </navLabel>
+      <content src="c23_The_Invisible_Man_Chapter_23.xhtml"/>
+    </navPoint>
+    <navPoint id="c24_The_Invisible_Man_Chapter_24" playOrder="26">
+      <navLabel>
+        <text>The Plan that Failed</text>
+      </navLabel>
+      <content src="c24_The_Invisible_Man_Chapter_24.xhtml"/>
+    </navPoint>
+    <navPoint id="c25_The_Invisible_Man_Chapter_25" playOrder="27">
+      <navLabel>
+        <text>The Hunting of the Invisible Man</text>
+      </navLabel>
+      <content src="c25_The_Invisible_Man_Chapter_25.xhtml"/>
+    </navPoint>
+    <navPoint id="c26_The_Invisible_Man_Chapter_26" playOrder="28">
+      <navLabel>
+        <text>The Wicksteed Murder</text>
+      </navLabel>
+      <content src="c26_The_Invisible_Man_Chapter_26.xhtml"/>
+    </navPoint>
+    <navPoint id="c27_The_Invisible_Man_Chapter_27" playOrder="29">
+      <navLabel>
+        <text>The Siege of Kemp's House</text>
+      </navLabel>
+      <content src="c27_The_Invisible_Man_Chapter_27.xhtml"/>
+    </navPoint>
+    <navPoint id="c28_The_Invisible_Man_Chapter_28" playOrder="30">
+      <navLabel>
+        <text>The Hunter Hunted</text>
+      </navLabel>
+      <content src="c28_The_Invisible_Man_Chapter_28.xhtml"/>
+    </navPoint>
+    <navPoint id="c29_The_Invisible_Man_Epilogue" playOrder="31">
+      <navLabel>
+        <text>The Epilogue</text>
+      </navLabel>
+      <content src="c29_The_Invisible_Man_Epilogue.xhtml"/>
+    </navPoint>
+    <navPoint id="about" playOrder="32">
+      <navLabel>
+      </navLabel>
+    </navPoint>
+  </navMap>
+</ncx>

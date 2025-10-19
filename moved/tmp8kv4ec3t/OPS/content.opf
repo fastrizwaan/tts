@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package version="3.0" unique-identifier="uid" prefix="cc: http://creativecommons.org/ns#" xml:lang="en" xmlns="http://www.idpf.org/2007/opf">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:language>en</dc:language>
+    <dc:title id="meta-title">The Invisible Man</dc:title>
+    <dc:source>https://en.wikisource.org</dc:source>
+    <dc:creator id="meta-aut">H.G. Wells</dc:creator>
+    <dc:publisher>https://www.aliceandbooks.com</dc:publisher>
+    <dc:date>2022-02-25</dc:date>
+    <dc:date>1897</dc:date>
+    <link href="http://creativecommons.org/licenses/by-sa/3.0/" rel="cc:license"/>
+    <link href="http://www.gnu.org/copyleft/fdl.html" rel="cc:license"/>
+    <meta name="cover" content="cover.png"/>
+    <meta content="1.8.0" name="Sigil version"/>
+    <meta property="dcterms:modified">2022-02-25T12:23:14Z</meta>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="title" href="title.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c0_The_Invisible_Man__1897_" href="c0_The_Invisible_Man__1897_.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c1_The_Invisible_Man_Chapter_1" href="c1_The_Invisible_Man_Chapter_1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2_The_Invisible_Man_Chapter_2" href="c2_The_Invisible_Man_Chapter_2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c3_The_Invisible_Man_Chapter_3" href="c3_The_Invisible_Man_Chapter_3.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c4_The_Invisible_Man_Chapter_4" href="c4_The_Invisible_Man_Chapter_4.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c5_The_Invisible_Man_Chapter_5" href="c5_The_Invisible_Man_Chapter_5.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c6_The_Invisible_Man_Chapter_6" href="c6_The_Invisible_Man_Chapter_6.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c7_The_Invisible_Man_Chapter_7" href="c7_The_Invisible_Man_Chapter_7.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c8_The_Invisible_Man_Chapter_8" href="c8_The_Invisible_Man_Chapter_8.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c9_The_Invisible_Man_Chapter_9" href="c9_The_Invisible_Man_Chapter_9.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c10_The_Invisible_Man_Chapter_10" href="c10_The_Invisible_Man_Chapter_10.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c11_The_Invisible_Man_Chapter_11" href="c11_The_Invisible_Man_Chapter_11.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c12_The_Invisible_Man_Chapter_12" href="c12_The_Invisible_Man_Chapter_12.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c13_The_Invisible_Man_Chapter_13" href="c13_The_Invisible_Man_Chapter_13.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c14_The_Invisible_Man_Chapter_14" href="c14_The_Invisible_Man_Chapter_14.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c15_The_Invisible_Man_Chapter_15" href="c15_The_Invisible_Man_Chapter_15.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c16_The_Invisible_Man_Chapter_16" href="c16_The_Invisible_Man_Chapter_16.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c17_The_Invisible_Man_Chapter_17" href="c17_The_Invisible_Man_Chapter_17.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c18_The_Invisible_Man_Chapter_18" href="c18_The_Invisible_Man_Chapter_18.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c19_The_Invisible_Man_Chapter_19" href="c19_The_Invisible_Man_Chapter_19.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c20_The_Invisible_Man_Chapter_20" href="c20_The_Invisible_Man_Chapter_20.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c21_The_Invisible_Man_Chapter_21" href="c21_The_Invisible_Man_Chapter_21.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c22_The_Invisible_Man_Chapter_22" href="c22_The_Invisible_Man_Chapter_22.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c23_The_Invisible_Man_Chapter_23" href="c23_The_Invisible_Man_Chapter_23.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c24_The_Invisible_Man_Chapter_24" href="c24_The_Invisible_Man_Chapter_24.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c25_The_Invisible_Man_Chapter_25" href="c25_The_Invisible_Man_Chapter_25.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c26_The_Invisible_Man_Chapter_26" href="c26_The_Invisible_Man_Chapter_26.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c27_The_Invisible_Man_Chapter_27" href="c27_The_Invisible_Man_Chapter_27.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c28_The_Invisible_Man_Chapter_28" href="c28_The_Invisible_Man_Chapter_28.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c29_The_Invisible_Man_Epilogue" href="c29_The_Invisible_Man_Epilogue.xhtml" media-type="application/xhtml+xml"/>
+    <item id="logo2.png" href="images/logo2.png" media-type="image/png"/>
+    <item id="cover.xhtml" href="cover.xhtml" media-type="application/xhtml+xml" properties="svg"/>
+    <item id="cover.png" href="images/cover.png" media-type="image/png" properties="cover-image"/>
+    <item id="core.css" href="core.css" media-type="text/css"/>
+    <item id="se.css" href="se.css" media-type="text/css"/>
+    <item id="logo.png" href="images/logo.png" media-type="image/png"/>
+  </manifest>
+  <spine toc="ncx">
+    <itemref idref="cover.xhtml"/>
+    <itemref idref="title" linear="yes"/>
+    <itemref idref="c0_The_Invisible_Man__1897_" linear="yes"/>
+    <itemref idref="c1_The_Invisible_Man_Chapter_1" linear="yes"/>
+    <itemref idref="c2_The_Invisible_Man_Chapter_2" linear="yes"/>
+    <itemref idref="c3_The_Invisible_Man_Chapter_3" linear="yes"/>
+    <itemref idref="c4_The_Invisible_Man_Chapter_4" linear="yes"/>
+    <itemref idref="c5_The_Invisible_Man_Chapter_5" linear="yes"/>
+    <itemref idref="c6_The_Invisible_Man_Chapter_6" linear="yes"/>
+    <itemref idref="c7_The_Invisible_Man_Chapter_7" linear="yes"/>
+    <itemref idref="c8_The_Invisible_Man_Chapter_8" linear="yes"/>
+    <itemref idref="c9_The_Invisible_Man_Chapter_9" linear="yes"/>
+    <itemref idref="c10_The_Invisible_Man_Chapter_10" linear="yes"/>
+    <itemref idref="c11_The_Invisible_Man_Chapter_11" linear="yes"/>
+    <itemref idref="c12_The_Invisible_Man_Chapter_12" linear="yes"/>
+    <itemref idref="c13_The_Invisible_Man_Chapter_13" linear="yes"/>
+    <itemref idref="c14_The_Invisible_Man_Chapter_14" linear="yes"/>
+    <itemref idref="c15_The_Invisible_Man_Chapter_15" linear="yes"/>
+    <itemref idref="c16_The_Invisible_Man_Chapter_16" linear="yes"/>
+    <itemref idref="c17_The_Invisible_Man_Chapter_17" linear="yes"/>
+    <itemref idref="c18_The_Invisible_Man_Chapter_18" linear="yes"/>
+    <itemref idref="c19_The_Invisible_Man_Chapter_19" linear="yes"/>
+    <itemref idref="c20_The_Invisible_Man_Chapter_20" linear="yes"/>
+    <itemref idref="c21_The_Invisible_Man_Chapter_21" linear="yes"/>
+    <itemref idref="c22_The_Invisible_Man_Chapter_22" linear="yes"/>
+    <itemref idref="c23_The_Invisible_Man_Chapter_23" linear="yes"/>
+    <itemref idref="c24_The_Invisible_Man_Chapter_24" linear="yes"/>
+    <itemref idref="c25_The_Invisible_Man_Chapter_25" linear="yes"/>
+    <itemref idref="c26_The_Invisible_Man_Chapter_26" linear="yes"/>
+    <itemref idref="c27_The_Invisible_Man_Chapter_27" linear="yes"/>
+    <itemref idref="c28_The_Invisible_Man_Chapter_28" linear="yes"/>
+    <itemref idref="c29_The_Invisible_Man_Epilogue" linear="yes"/>
+    <itemref idref="nav"/>
+  </spine>
+</package>
