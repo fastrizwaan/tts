@@ -88,6 +88,19 @@ _css = """
 }
 .book-title { font-weight: 600; margin-bottom: 2px; }
 .book-author { color: rgba(0,0,0,0.6); font-size: 12px; }
+
+@keyframes subtle-blink {
+  from { opacity: 1.0; }
+  50% { opacity: 0.4; }
+  to { opacity: 1.0; }
+}
+
+.blink-hint {
+  animation-name: subtle-blink;
+  animation-duration: 1s;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: 3;
+}
 """
 _css_provider = Gtk.CssProvider()
 _css_provider.load_from_data(_css.encode("utf-8"))
@@ -96,6 +109,7 @@ Gtk.StyleContext.add_provider_for_display(
     _css_provider,
     Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
 )
+
 
 _LIBRARY_CSS = b"""
 .library-grid { padding: 1px; }
@@ -1197,6 +1211,10 @@ class EPubViewer(Adw.ApplicationWindow):
                                         self._on_console_log_received)
                 content_manager.register_script_message_handler("consoleLog")
                 print("✓ Console log handler registered")
+                content_manager.connect("script-message-received::scrollBoundary", 
+                            self._on_scroll_boundary_received)
+                content_manager.register_script_message_handler("scrollBoundary")
+                print("✓ Scroll boundary handler registered")
             except Exception as e:
                 print(f"⚠ Could not register console handler: {e}")
             # after creating self.webview (inside __init__), add:
@@ -1282,6 +1300,92 @@ class EPubViewer(Adw.ApplicationWindow):
         except Exception as e:
             print(f"[JS Error] Could not read message: {e}")
 
+    def _on_scroll_boundary_received(self, content_manager, js_result):
+        """Handle scroll boundary events from JavaScript"""
+        try:
+            import json
+            data = json.loads(js_result.to_string())
+            
+            at_start = data.get('atStart', False)
+            at_end = data.get('atEnd', False)
+            is_single_column = data.get('isSingleColumn', False)
+            
+            # DEBUG: Print what we received
+            print(f"🔍 Scroll boundary: at_start={at_start}, at_end={at_end}, single_col={is_single_column}")
+            
+            # Check if we're at first/last chapter (for blinking hint)
+            toc_items = self._get_all_toc_items_flat()
+            current_item = self._find_current_toc_item()
+            
+            is_first_chapter = False
+            is_last_chapter = False
+            
+            if toc_items:
+                if current_item:
+                    try:
+                        current_idx = toc_items.index(current_item)
+                        is_first_chapter = (current_idx == 0)
+                        is_last_chapter = (current_idx == len(toc_items) - 1)
+                    except ValueError:
+                        pass
+                else:
+                    # No TOC match - check by item index
+                    is_first_chapter = (self.current_index == 0)
+                    is_last_chapter = (self.current_index >= len(self.items) - 1)
+            else:
+                # No TOC - use item index
+                is_first_chapter = (self.current_index == 0)
+                is_last_chapter = (self.current_index >= len(self.items) - 1)
+            
+            # Update page button states
+            # Page buttons are inactive when at scroll boundaries
+            try:
+                prev_enabled = not at_start
+                next_enabled = not at_end
+                
+                print(f"🔘 Setting buttons: prev={prev_enabled}, next={next_enabled}")
+                
+                self.prev_btn.set_sensitive(prev_enabled)
+                self.next_btn.set_sensitive(next_enabled)
+            except Exception as e:
+                print(f"Button update error: {e}")
+            
+            # Blink chapter buttons when at chapter scroll boundaries
+            # (but only if there's actually a prev/next chapter to go to)
+            if at_start and not is_single_column:
+                if not is_first_chapter:
+                    print("💫 Blinking prev chapter button")
+                    self._blink_button(self.prev_chapter_btn)
+            elif at_end and not is_single_column:
+                if not is_last_chapter:
+                    print("💫 Blinking next chapter button")
+                    self._blink_button(self.next_chapter_btn)
+                
+        except Exception as e:
+            print(f"Scroll boundary handler error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _blink_button(self, button):
+        """Add subtle blink animation to a button"""
+        try:
+            if not button:
+                return
+            
+            # Add blink CSS class
+            button.add_css_class("blink-hint")
+            
+            # Remove class after animation completes (3 blinks × 1.0s = 3s)
+            def remove_blink():
+                try:
+                    button.remove_css_class("blink-hint")
+                except Exception:
+                    pass
+                return False
+            
+            GLib.timeout_add(3000, remove_blink)
+        except Exception as e:
+            print(f"Blink button error: {e}")
     # ---------- minimal TTS control methods ----------
     def _update_tts_button_states(self):
         # enable play if webview + there is content
@@ -3547,21 +3651,138 @@ class EPubViewer(Adw.ApplicationWindow):
             }}
         }}, {{passive: false, capture: true}});
         
-        // Window resize handler - maintain column position
+        // Window resize handler - maintain column position AND recheck boundaries
         let resizeTimer;
         window.addEventListener('resize', function() {{
             clearTimeout(resizeTimer);
             resizeTimer = setTimeout(function() {{
                 const metrics = getContainerMetrics();
-                if (metrics && metrics.colCount > 1) {{
+                if(metrics && metrics.colCount > 1) {{
                     const currentCol = getCurrentColumnIndex();
                     console.log('🔄 Resize - staying at column ' + currentCol);
                     // Force recalculation after resize
                     console.log('  New actual cols: ' + metrics.colCount + ', pageW: ' + metrics.pageWidth.toFixed(1) + 'px');
                     scrollToColumnIndex(currentCol, false);  // Instant, no animation
                 }}
+                
+                // Recheck scroll boundaries after resize
+                console.log('🔄 Resize - rechecking boundaries');
+                checkScrollBoundary();
             }}, 400);  // Wait for sidebar animation
         }});
+        
+        // ===============================================================
+        // SCROLL BOUNDARY DETECTION
+        // ===============================================================
+        function checkScrollBoundary() {{
+            const container = document.querySelector('.ebook-content');
+            if(!container) return;
+            
+            const metrics = getContainerMetrics();
+            if(!metrics) return;
+            
+            let atStart = false;
+            let atEnd = false;
+            
+            if(metrics.colCount === 1) {{
+                // Single column: vertical boundaries
+                atStart = container.scrollTop <= 5;
+                atEnd = container.scrollTop >= (container.scrollHeight - container.clientHeight - 5);
+            }} else {{
+                // Multi-column: horizontal boundaries
+                atStart = container.scrollLeft <= 5;
+                atEnd = container.scrollLeft >= (container.scrollWidth - container.clientWidth - 5);
+            }}
+            
+            // Send boundary info to Python
+            if(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.scrollBoundary) {{
+                window.webkit.messageHandlers.scrollBoundary.postMessage(JSON.stringify({{
+                    atStart: atStart,
+                    atEnd: atEnd,
+                    isSingleColumn: metrics.colCount === 1
+                }}));
+            }}
+        }}
+
+        // Check boundaries on scroll (with debounce)
+        const scrollBoundaryContainer = document.querySelector('.ebook-content');
+        if(scrollBoundaryContainer) {{
+            let boundaryCheckTimer;
+            scrollBoundaryContainer.addEventListener('scroll', function() {{
+                clearTimeout(boundaryCheckTimer);
+                boundaryCheckTimer = setTimeout(checkScrollBoundary, 100);
+            }});
+        }}
+
+
+        // ===============================================================
+        // SCROLL BOUNDARY DETECTION (place this BEFORE the initial setTimeout)
+        // ===============================================================
+        function checkScrollBoundary() {{
+            const container = document.querySelector('.ebook-content');
+            if(!container) return;
+            
+            const metrics = getContainerMetrics();
+            if(!metrics) return;
+            
+            let atStart = false;
+            let atEnd = false;
+            
+            if(metrics.colCount === 1) {{
+                // Single column: vertical boundaries
+                atStart = container.scrollTop <= 5;
+                atEnd = container.scrollTop >= (container.scrollHeight - container.clientHeight - 5);
+                console.log('📊 V-Boundary: scrollTop=' + container.scrollTop.toFixed(0) + 
+                            '/' + (container.scrollHeight - container.clientHeight) + 
+                            ' → start=' + atStart + ', end=' + atEnd);
+            }} else {{
+                // Multi-column: horizontal boundaries
+                atStart = container.scrollLeft <= 5;
+                atEnd = container.scrollLeft >= (container.scrollWidth - container.clientWidth - 5);
+                console.log('📊 H-Boundary: scrollLeft=' + container.scrollLeft.toFixed(0) + 
+                            '/' + (container.scrollWidth - container.clientWidth) + 
+                            ' → start=' + atStart + ', end=' + atEnd);
+            }}
+            
+            // Send boundary info to Python
+            if(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.scrollBoundary) {{
+                window.webkit.messageHandlers.scrollBoundary.postMessage(JSON.stringify({{
+                    atStart: atStart,
+                    atEnd: atEnd,
+                    isSingleColumn: metrics.colCount === 1
+                }}));
+            }}
+        }}
+
+        // Attach scroll listener with logging
+        function setupScrollBoundaryListener() {{
+            const container = document.querySelector('.ebook-content');
+            if(!container) {{
+                console.log('⚠️ No container for scroll boundary listener');
+                return;
+            }}
+            
+            let boundaryCheckTimer;
+            container.addEventListener('scroll', function(e) {{
+                console.log('🎯 Scroll event fired: ' + container.scrollTop.toFixed(0));
+                clearTimeout(boundaryCheckTimer);
+                boundaryCheckTimer = setTimeout(checkScrollBoundary, 100);
+            }}, {{passive: true}});
+            
+            console.log('✅ Scroll boundary listener attached');
+        }}
+
+        // Set up listener after DOM is ready
+        if(document.readyState === 'loading') {{
+            document.addEventListener('DOMContentLoaded', setupScrollBoundaryListener);
+        }} else {{
+            setupScrollBoundaryListener();
+        }}
+        // Initial boundary check
+        setTimeout(() => {{
+            checkScrollBoundary();
+        }}, 500);
+        
         
         // Initial metrics logging
         setTimeout(() => {{
@@ -4650,6 +4871,11 @@ class EPubViewer(Adw.ApplicationWindow):
                 );
                 container.scrollTo({top: target, behavior: 'smooth'});
             }
+            
+            // Check boundaries after scroll animation
+            setTimeout(function() {
+                if(window.checkScrollBoundary) checkScrollBoundary();
+            }, 400);
         })();
         """
         try:
@@ -4699,6 +4925,11 @@ class EPubViewer(Adw.ApplicationWindow):
                 var target = Math.max(0, container.scrollTop - container.clientHeight);
                 container.scrollTo({top: target, behavior: 'smooth'});
             }
+            
+            // Check boundaries after scroll animation
+            setTimeout(function() {
+                if(window.checkScrollBoundary) checkScrollBoundary();
+            }, 400);
         })();
         """
         try:
