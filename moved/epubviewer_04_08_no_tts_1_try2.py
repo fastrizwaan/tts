@@ -1,39 +1,39 @@
 #!/usr/bin/env python3
 
-import gi, os, tempfile, traceback, shutil, urllib.parse, glob, re, json, hashlib
+# --- Standard Library Imports ---
+import glob, hashlib, json, os, pathlib, re, shutil, tempfile, threading, time, traceback, urllib.parse, zipfile
+
+# --- GTK and related Imports ---
+import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gio, GLib, Pango, PangoCairo, GObject, Gdk, GdkPixbuf
+gi.require_version("WebKit", "6.0")
+from gi.repository import Gtk, Adw, Gio, GLib, Pango, PangoCairo, GObject, Gdk, GdkPixbuf, WebKit
+
+# --- Graphics Imports ---
 import cairo
 
+# --- EPUB and Parsing Imports ---
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup, NavigableString, Tag, ProcessingInstruction, element, Comment
-import re
 
-import zipfile, pathlib
-import threading, time, tempfile as _tempfile
-
-# Optional TTS deps
+# --- Optional TTS Dependencies ---
 TTS_AVAILABLE = False
+Kokoro = None
+Gst = None
 try:
-    from kokoro_onnx import Kokoro
+    from kokoro_onnx import Kokoro as _Kokoro
     import gi as _gi2
     _gi2.require_version('Gst', '1.0')
-    from gi.repository import Gst
+    from gi.repository import Gst as _Gst
     TTS_AVAILABLE = True
-    Kokoro = Kokoro
-    Gst = Gst
-except Exception as e:
-    Kokoro = None
-    Gst = None
-    # not fatal; engine will still be created but kokoro may be None
+    Kokoro = _Kokoro
+    Gst = _Gst
+except ImportError as e:
+    print(f"TTS dependencies not found: {e}. TTS features will be disabled.")
+    # TTS features will be handled gracefully later if not available.
 
-# --- Safe NCX monkey-patch (avoid crashes on some EPUBs) ---
-import ebooklib.epub
-def _safe_parse_ncx(self, ncxFile):
-    self.book.toc = []
-ebooklib.epub.EpubReader._parse_ncx = _safe_parse_ncx
 
 APP_NAME = "EPUB Viewer"
 os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
@@ -3717,8 +3717,26 @@ class EPubViewer(Adw.ApplicationWindow):
             try: self.cleanup()
             except Exception: pass
 
-            self.book_path = path
+            def _safe_parse_ncx(reader_self, ncxFile): 
+                """Local safe patch to avoid crashes on problematic NCX files."""
+                print(f"[DEBUG] Applying safe NCX patch for {path}") # Optional debug print
+                # Use 'reader_self' (the EpubReader instance) to modify its book's TOC
+                reader_self.book.toc = [] 
+
+            # Store the original method to restore it later
+            import ebooklib.epub # Ensure ebooklib is imported in this scope if not at module level for the getattr
+            original_parse_ncx = getattr(ebooklib.epub.EpubReader, '_parse_ncx', None) 
+
+            # Apply the patch to the CLASS just before reading
+            ebooklib.epub.EpubReader._parse_ncx = _safe_parse_ncx
+
+            # Now read the EPUB - the internal EpubReader will use the patched method
             self.book = epub.read_epub(path)
+
+            # Restore the original method immediately after reading
+            # This limits the scope of the patch to just this one read_epub call.
+            if original_parse_ncx is not None:
+                ebooklib.epub.EpubReader._parse_ncx = original_parse_ncx
             docs = list(self.book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
             id_map = {}
             for it in docs:
