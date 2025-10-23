@@ -1,0 +1,13 @@
+app-id: com.example.WhisperSpeechApp
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: main.py
+modules:
+  - name: python3-whisperspeech
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=${FLATPAK_DEST} whisperspeech
+    sources:
+      - type: pypi
+        dest-filename: whisperspeech
