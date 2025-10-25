@@ -1,0 +1,368 @@
+app-id: io.github.fastrizwaan.pipertts_asr
+runtime: org.gnome.Platform
+runtime-version: "48"
+sdk: org.gnome.Sdk
+#rename-icon: dsnote
+command: pipertts_asr
+build-options:
+  strip: false
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --device=all # AMD ROCm (/dev/kfd)
+  - --filesystem=xdg-desktop
+  - --filesystem=xdg-download
+  - --filesystem=xdg-music
+  - --filesystem=xdg-documents
+  - --filesystem=xdg-videos
+  - --env=PYTORCH_TENSOREXPR=0
+  - --share=ipc
+  - --device=all
+
+modules:
+
+  - name: python3-torch-deps
+    buildsystem: simple
+    cleanup:
+      - /bin/isympy
+    build-options:
+      strip: true
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+        --prefix=${FLATPAK_DEST} Jinja2 filelock fsspec mpmath networkx sympy hf_xet typing_extensions MarkupSafe
+        --no-build-isolation
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl
+        sha256: 85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
+      - type: file
+        url: https://files.pythonhosted.org/packages/4d/36/2a115987e2d8c300a974597416d9de88f2444426de9571f4b59b2cca3acc/filelock-3.18.0-py3-none-any.whl
+        sha256: c401f4f8377c4464e6db25fff06205fd89bdd83b65eb0488ed1b160f780e21de
+      - type: file
+        url: https://files.pythonhosted.org/packages/44/4b/e0cfc1a6f17e990f3e64b7d941ddc4acdc7b19d6edd51abf495f32b1a9e4/fsspec-2025.3.2-py3-none-any.whl
+        sha256: 2daf8dc3d1dfa65b6aa37748d112773a7a08416f6c70d96b264c96476ecaf711
+      - type: file
+        url: https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl
+        sha256: a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c
+      - type: file
+        url: https://files.pythonhosted.org/packages/b9/54/dd730b32ea14ea797530a4479b2ed46a6fb250f682a9cfb997e968bf0261/networkx-3.4.2-py3-none-any.whl
+        sha256: df5d4365b724cf81b8c6a7312509d0c22386097011ad1abe274afd5e9d3bbc5f
+      - type: file
+        url: https://files.pythonhosted.org/packages/b2/fe/81695a1aa331a842b582453b605175f419fe8540355886031328089d840a/sympy-1.13.1-py3-none-any.whl
+        sha256: db36cdc64bf61b9b24578b6f7bab1ecdd2452cf008f34faa33776680c26d66f8
+      - type: file
+        url: https://files.pythonhosted.org/packages/83/9a/d40d2a57b132d609d8a4ccc29e59ed69749021610616749cabcda2532158/hf_xet-1.1.0-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 995eeffb119636ea617b96c7d7bf3c3f5ea8727fa57974574e25d700b8532d48        
+      - type: file
+        url: https://files.pythonhosted.org/packages/8b/54/b1ae86c0973cc6f0210b53d508ca3641fb6d0c56823f288d108bc7ab3cc8/typing_extensions-4.13.2-py3-none-any.whl
+        sha256: a439e7c04b49fec3e5d3e2beaa21755cadbbdc391694e28ccdd36ca4a1408f8c
+      - type: file
+        url: https://files.pythonhosted.org/packages/f3/f0/89e7aadfb3749d0f52234a0c8c7867877876e0a20b60e2188e9850794c17/MarkupSafe-3.0.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: e17c96c14e19278594aa4841ec148115f9c7615a47382ecb6b82bd8fea3ab0c8
+
+
+
+
+
+  - name: python3-common-deps
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+        --prefix=${FLATPAK_DEST} numpy packaging urllib3 requests pyyaml charset-normalizer idna certifi
+        --no-build-isolation
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/0f/50/de23fde84e45f5c4fda2488c759b69990fd4512387a8632860f3ac9cd225/numpy-1.26.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 675d61ffbfa78604709862923189bad94014bef562cc35cf61d3a07bba02a7ed
+      - type: file
+        url: https://files.pythonhosted.org/packages/20/12/38679034af332785aac8774540895e234f4d07f7545804097de4b666afd8/packaging-25.0-py3-none-any.whl
+        sha256: 29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24b0e69331a484
+      - type: file
+        url: https://files.pythonhosted.org/packages/6b/11/cc635220681e93a0183390e26485430ca2c7b5f9d33b15c74c2861cb8091/urllib3-2.4.0-py3-none-any.whl
+        sha256: 4e16665048960a0900c702d4a66415956a584919c03361cac9f1df5c5dd7e813        
+      - type: file
+        url: https://files.pythonhosted.org/packages/f9/9b/335f9764261e915ed497fcdeb11df5dfd6f7bf257d4a6a2a686d80da4d54/requests-2.32.3-py3-none-any.whl
+        sha256: 70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6
+      - type: file
+        url: https://files.pythonhosted.org/packages/b9/2b/614b4752f2e127db5cc206abc23a8c19678e92b23c3db30fc86ab731d3bd/PyYAML-6.0.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 80bab7bfc629882493af4aa31a4cfa43a4c57c83813253626916b8c7ada83476
+      - type: file
+        url: https://files.pythonhosted.org/packages/8c/73/6ede2ec59bce19b3edf4209d70004253ec5f4e319f9a2e3f2f15601ed5f7/charset_normalizer-3.4.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 4e594135de17ab3866138f496755f302b72157d115086d100c3f19370839dd3a
+      - type: file
+        url: https://files.pythonhosted.org/packages/76/c6/c88e154df9c4e1a2a66ccf0005a88dfb2650c1dffb6f5ce603dfbd452ce3/idna-3.10-py3-none-any.whl
+        sha256: 946d195a0d259cbba61165e88e65941f16e9b36ea6ddb97f00452bae8b1287d3
+      - type: file
+        url: https://files.pythonhosted.org/packages/4a/7e/3db2bd1b1f9e95f7cddca6d6e75e2f2bd9f51b1246e546d88addca0106bd/certifi-2025.4.26-py3-none-any.whl
+        sha256: 30350364dfe371162649852c63336a15c70c6510c2ad5015b21c2345311805f3
+
+  - name: python3-whisperspeech-specific-deps
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+        --prefix=${FLATPAK_DEST} transformers huggingface_hub tokenizers regex tqdm platformdirs pooch lazy_loader msgpack librosa pycparser cffi soundfile
+        soxr numba llvmlite audioread decorator joblib scipy threadpoolctl scikit-learn einops ruamel.yaml ruamel.yaml.clib  HyperPyYAML sentencepiece speechbrain vocos braceexpand
+        webdataset --no-build-isolation
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/a6/f8/dae3421624fcc87a89d42e1898a798bc7ff72c61f38973a65d60df8f124c/safetensors-0.5.3-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl    
+        sha256: cead1fa41fc54b1e61089fa57452e8834f798cb1dc7a09ba3524f1eb08e0317a
+      - type: file
+        url: https://files.pythonhosted.org/packages/75/d5/294a09a62bdd88da9a1007a341d4f8fbfc43be520c101e6afb526000e9f4/transformers-4.46.1-py3-none-any.whl
+        sha256: f77b251a648fd32e3d14b5e7e27c913b7c29154940f519e4c8c3aa6061df0f05
+      - type: file
+        url: https://files.pythonhosted.org/packages/3a/bf/6002da17ec1c7a47bedeb216812929665927c70b6e7500b3c7bf36f01bdd/huggingface_hub-0.31.1-py3-none-any.whl
+        sha256: 43f73124819b48b42d140cbc0d7a2e6bd15b2853b1b9d728d4d55ad1750cac5b
+      - type: file
+        url: https://files.pythonhosted.org/packages/9e/65/c83cb3545a65a9eaa2e13b22c93d5e00bd7624b354a44adbdc93d5d9bd91/tokenizers-0.20.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: f2b7cb962564785a83dafbba0144ecb7f579f1d57d8c406cdaa7f32fe32f18ad
+      - type: file
+        url: https://files.pythonhosted.org/packages/fb/13/e3b075031a738c9598c51cfbc4c7879e26729c53aa9cca59211c44235314/regex-2024.11.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 70b7fa6606c2881c1db9479b0eaa11ed5dfa11c8d60a474ff0e095099f39d98e
+      - type: file
+        url: https://files.pythonhosted.org/packages/d0/30/dc54f88dd4a2b5dc8a0279bdd7270e735851848b762aeb1c1184ed1f6b14/tqdm-4.67.1-py3-none-any.whl
+        sha256: 26445eca388f82e72884e0d580d5464cd801a3ea01e63e5601bdff9ba6a48de2
+
+      - type: file
+        url: https://files.pythonhosted.org/packages/fe/39/979e8e21520d4e47a0bbe349e2713c0aac6f3d853d0e5b34d76206c439aa/platformdirs-4.3.8-py3-none-any.whl
+        sha256: ff7059bb7eb1179e2685604f4aaf157cfd9535242bd23742eadc3c13542139b4
+      - type: file
+        url: https://files.pythonhosted.org/packages/a8/87/77cc11c7a9ea9fd05503def69e3d18605852cd0d4b0d3b8f15bbeb3ef1d1/pooch-1.8.2-py3-none-any.whl
+        sha256: 3529a57096f7198778a5ceefd5ac3ef0e4d06a6ddaf9fc2d609b806f25302c47        
+      - type: file
+        url: https://files.pythonhosted.org/packages/83/60/d497a310bde3f01cb805196ac61b7ad6dc5dcf8dce66634dc34364b20b4f/lazy_loader-0.4-py3-none-any.whl
+        sha256: 342aa8e14d543a154047afb4ba8ef17f5563baad3fc610d7b15b213b0f119efc
+      - type: file
+        url: https://files.pythonhosted.org/packages/f1/54/65af8de681fa8255402c80eda2a501ba467921d5a7a028c9c22a2c2eedb5/msgpack-1.1.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 17fb65dd0bec285907f68b15734a993ad3fc94332b5bb21b0435846228de1f39
+      - type: file
+        url: https://files.pythonhosted.org/packages/b5/ba/c63c5786dfee4c3417094c4b00966e61e4a63efecee22cb7b4c0387dda83/librosa-0.11.0-py3-none-any.whl
+        sha256: 0b6415c4fd68bff4c29288abe67c6d80b587e0e1e2cfb0aad23e4559504a7fa1
+      - type: file
+        url: https://files.pythonhosted.org/packages/13/a3/a812df4e2dd5696d1f351d58b8fe16a405b234ad2886a0dab9183fb78109/pycparser-2.22-py3-none-any.whl
+        sha256: c3702b6d3dd8c7abc1afa565d7e63d53a1d0bd86cdc24edd75470f4de499cfcc        
+      - type: file
+        url: https://files.pythonhosted.org/packages/b2/d5/da47df7004cb17e4955df6a43d14b3b4ae77737dff8bf7f8f333196717bf/cffi-1.17.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: b62ce867176a75d03a665bad002af8e6d54644fad99a3c70905c543130e39d93
+      - type: file
+        url: https://files.pythonhosted.org/packages/57/5e/70bdd9579b35003a489fc850b5047beeda26328053ebadc1fb60f320f7db/soundfile-0.13.1-py2.py3-none-manylinux_2_28_x86_64.whl
+        sha256: 03267c4e493315294834a0870f31dbb3b28a95561b80b134f0bd3cf2d5f0e618
+      - type: file
+        url: https://files.pythonhosted.org/packages/e1/1a/569ea0420a0c4801c2c8dd40d8d544989522f6014d51def689125f3f2935/soxr-0.5.0.post1-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: a3f16810dd649ab1f433991d2a9661e9e6a116c2b4101039b53b3c3e90a094fc
+      - type: file
+        url: https://files.pythonhosted.org/packages/8b/41/ac11cf33524def12aa5bd698226ae196a1185831c05ed29dc0c56eaa308b/numba-0.60.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+        sha256: 0ebaa91538e996f708f1ab30ef4d3ddc344b64b5227b67a57aa74f401bb68b9d
+      - type: file
+        url: https://files.pythonhosted.org/packages/00/5f/323c4d56e8401c50185fd0e875fcf06b71bf825a863699be1eb10aa2a9cb/llvmlite-0.43.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: df6509e1507ca0760787a199d19439cc887bfd82226f5af746d6977bd9f66844
+      - type: file
+        url: https://files.pythonhosted.org/packages/57/8d/30aa32745af16af0a9a650115fbe81bde7c610ed5c21b381fca0196f3a7f/audioread-3.0.1-py3-none-any.whl
+        sha256: 4cdce70b8adc0da0a3c9e0d85fb10b3ace30fbdf8d1670fd443929b61d117c33
+      - type: file
+        url: https://files.pythonhosted.org/packages/4e/8c/f3147f5c4b73e7550fe5f9352eaa956ae838d5c51eb58e7a25b9f3e2643b/decorator-5.2.1-py3-none-any.whl
+        sha256: d316bb415a2d9e2d2b3abcc4084c6502fc09240e292cd76a76afc106a1c8e04a
+      - type: file
+        url: https://files.pythonhosted.org/packages/da/d3/13ee227a148af1c693654932b8b0b02ed64af5e1f7406d56b088b57574cd/joblib-1.5.0-py3-none-any.whl
+        sha256: 206144b320246485b712fc8cc51f017de58225fa8b414a1fe1764a7231aca491
+      - type: file
+        url: https://files.pythonhosted.org/packages/0b/1f/03f52c282437a168ee2c7c14a1a0d0781a9a4a8962d84ac05c06b4c5b555/scipy-1.15.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 271e3713e645149ea5ea3e97b57fdab61ce61333f97cfae392c28ba786f9bb49
+      - type: file
+        url: https://files.pythonhosted.org/packages/32/d5/f9a850d79b0851d1d4ef6456097579a9005b31fea68726a4ae5f2d82ddd9/threadpoolctl-3.6.0-py3-none-any.whl
+        sha256: 43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb        
+      - type: file
+        url: https://files.pythonhosted.org/packages/29/7a/8bce8968883e9465de20be15542f4c7e221952441727c4dad24d534c6d99/scikit_learn-1.6.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 2e69fab4ebfc9c9b580a7a80111b43d214ab06250f8a7ef590a4edf72464dd86
+      - type: file
+        url: https://files.pythonhosted.org/packages/87/62/9773de14fe6c45c23649e98b83231fffd7b9892b6cf863251dc2afa73643/einops-0.8.1-py3-none-any.whl
+        sha256: 919387eb55330f5757c6bea9165c5ff5cfe63a642682ea788a6d472576d81737
+      - type: file
+        url: https://files.pythonhosted.org/packages/c2/36/dfc1ebc0081e6d39924a2cc53654497f967a084a436bb64402dfce4254d9/ruamel.yaml-0.18.10-py3-none-any.whl
+        sha256: 30f22513ab2301b3d2b577adc121c6471f28734d3d9728581245f1e76468b4f1
+      - type: file
+        url: https://files.pythonhosted.org/packages/44/d0/3f68a86e006448fb6c005aee66565b9eb89014a70c491d70c08de597f8e4/ruamel.yaml.clib-0.2.12-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: 95c3829bb364fdb8e0332c9931ecf57d9be3519241323c5274bd82f709cebc0c        
+      - type: file
+        url: https://files.pythonhosted.org/packages/33/c9/751b6401887f4b50f9307cc1e53d287b3dc77c375c126aeb6335aff73ccb/HyperPyYAML-1.2.2-py3-none-any.whl
+        sha256: 3c5864bdc8864b2f0fbd7bc495e7e8fdf2dfd5dd80116f72da27ca96a128bdeb       
+      - type: file
+        url: https://files.pythonhosted.org/packages/4f/d2/18246f43ca730bb81918f87b7e886531eda32d835811ad9f4657c54eee35/sentencepiece-0.2.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: f295105c6bdbb05bd5e1b0cafbd78ff95036f5d3641e7949455a3f4e5e7c3109         
+      - type: file
+        url: https://files.pythonhosted.org/packages/30/ff/9629de25786cf6ce38b7754b352a9904ce8c90b22a127d9d0d9c45ef5693/speechbrain-0.5.16-py3-none-any.whl
+        sha256: 3b400b077d5b9c260c54ceadd4a1ae8e06d6f0b768e8e552bc0448b816f9050d
+      - type: file
+        url: https://download.pytorch.org/whl/cpu/torch-2.5.1%2Bcpu-cp312-cp312-linux_x86_64.whl
+        dest-filename: torch-2.5.1+cpu-cp312-cp312-linux_x86_64.whl
+        sha256: 4856f9d6925121d13c2df07aa7580b767f449dfe71ae5acde9c27535d5da4840
+      - type: file
+        url: https://download.pytorch.org/whl/cpu/torchaudio-2.5.1%2Bcpu-cp312-cp312-linux_x86_64.whl
+        dest-filename: torchaudio-2.5.1+cpu-cp312-cp312-linux_x86_64.whl
+        sha256: b7fbd9c264dcbe28efb061364c76d3770eb13ae692d2982949b583edfb9ed7f5
+      - type: file
+        url: https://files.pythonhosted.org/packages/62/59/e47bbd0542d0e6f4ce9983d5eb458a01d4b42c81e5c410cb9e159b1061ae/encodec-0.1.1.tar.gz
+        sha256: 36dde98ccfe6c51a15576476cadfcb3b35a63507b8b8555abd69889a6fba6772        
+      - type: file
+        url: https://files.pythonhosted.org/packages/0a/45/82fe9b5696eb5dd4f84632f75b549b48bed0c33a5920b6309fbafd7e3477/vocos-0.1.0-py3-none-any.whl
+        sha256: 0ac13eaef68596074301e912d781399b3defa4b4ca60b6bc52c8a4b9209ca235
+      - type: file
+        url: https://files.pythonhosted.org/packages/fa/93/e8c04e80e82391a6e51f218ca49720f64236bc824e92152a2633b74cf7ab/braceexpand-0.1.7-py2.py3-none-any.whl
+        sha256: 91332d53de7828103dcae5773fb43bc34950b0c8160e35e0f44c4427a3b85014
+      - type: file
+        url: https://files.pythonhosted.org/packages/6e/e1/c1140ab6533668930895512ac5cbf07972fa41ebab275f5f5cdd432bc3c7/webdataset-0.2.111-py3-none-any.whl
+        sha256: 57a70eb5d7029303ce2262d900ee3f16443bb5e9cf25f634775ce972859bcee4
+
+
+
+  - name: Openai-Whisper
+    buildsystem: simple
+    cleanup:
+      - /bin
+    build-options:
+      no-debuginfo: true
+      env:
+        PYTHONPATH: /app/extensions/cpu/lib/python3.12/site-packages:/app/lib/python3.12/site-packages
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+        --prefix=${FLATPAK_DEST} fastcore fastprogress more_itertools tiktoken triton openai_whisper --no-build-isolation
+    sources:
+
+      - type: file
+        url: https://files.pythonhosted.org/packages/a7/8f/213223fdee199c55db81e2d0c669f30e8285c5be2526c4ed924de39247da/fastprogress-1.0.3-py3-none-any.whl
+        sha256: 6dfea88f7a4717b0a8d6ee2048beae5dbed369f932a368c5dd9caff34796f7c5
+      - type: file
+        url: https://files.pythonhosted.org/packages/54/56/5ea99d5057146e273c90175e7fb40e52b803739c961e50a1dd0fe2dfa645/fastcore-1.8.2-py3-none-any.whl
+        sha256: 8e66134d9acc411ffdddde64e080e46814e24011c6368b5c9d50165ee8140e8b
+      - type: file
+        url: https://files.pythonhosted.org/packages/a4/8e/469e5a4a2f5855992e425f3cb33804cc07bf18d48f2db061aec61ce50270/more_itertools-10.8.0-py3-none-any.whl
+        sha256: 52d4362373dcf7c52546bc4af9a86ee7c4579df9a8dc268be0a2f949d376cc9b
+      - type: file
+        url: https://files.pythonhosted.org/packages/ea/a4/e66cbd7befaf44a84cfb367b00a0331735cd56d4b2076533dec9b0b255fe/triton-2.3.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+        sha256: eaf80e8761a9e3498aa92e7bf83a085b31959c61f5e8ac14eedd018df6fccd10
+      - type: file
+        url: https://files.pythonhosted.org/packages/f4/90/3dae6cc5436137ebd38944d396b5849e167896fc2073da643a49f372dc4f/tiktoken-0.12.0-cp312-cp312-manylinux_2_28_x86_64.whl
+        sha256: edde1ec917dfd21c1f2f8046b86348b0f54a2c0547f68149d8600859598769ad
+      - type: file
+        url: https://files.pythonhosted.org/packages/35/8e/d36f8880bcf18ec026a55807d02fe4c7357da9f25aebd92f85178000c0dc/openai_whisper-20250625.tar.gz
+        sha256: 37a91a3921809d9f44748ffc73c0a55c9f366c85a3ef5c2ae0cc09540432eb96
+
+  - name: flatbuffers
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app flatbuffers*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/b8/25/155f9f080d5e4bc0082edfda032ea2bc2b8fab3f4d25d46c1e9dd22a1a89/flatbuffers-25.2.10-py2.py3-none-any.whl
+      sha256: ebba5f4d5ea615af3f7fd70fc310636fbb2bbd1f566ac0a23d98dd412de50051
+      x-checker-data:
+        type: pypi
+        name: flatbuffers
+        packagetype: bdist_wheel
+        
+  - name: humanfriendly
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app humanfriendly*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/f0/0f/310fb31e39e2d734ccaa2c0fb981ee41f7bd5056ce9bc29b2248bd569169/humanfriendly-10.0-py2.py3-none-any.whl
+      sha256: 1697e1a8a8f550fd43c2865cd84542fc175a61dcb779b6fee18cf6b6ccba1477
+      x-checker-data:
+        type: pypi
+        name: humanfriendly
+        packagetype: bdist_wheel
+        
+  - name: coloredlogs
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app coloredlogs*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/a7/06/3d6badcf13db419e25b07041d9c7b4a2c331d3f4e7134445ec5df57714cd/coloredlogs-15.0.1-py2.py3-none-any.whl
+      sha256: 612ee75c546f53e92e70049c9dbfcc18c935a2b9a53b66085ce9ef6a6e5c0934
+      x-checker-data:
+        type: pypi
+        name: coloredlogs
+        packagetype: bdist_wheel
+
+  - name: protobuf
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app protobuf*.whl
+    sources:
+    - type: file
+      url: https://files.pythonhosted.org/packages/9c/f2/80ffc4677aac1bc3519b26bc7f7f5de7fce0ee2f7e36e59e27d8beb32dd1/protobuf-6.32.0-py3-none-any.whl
+      sha256: ba377e5b67b908c8f3072a57b63e2c6a4cbd18aea4ed98d2584350dbf46f2783
+      x-checker-data:
+        type: pypi
+        name: protobuf
+        packagetype: bdist_wheel
+
+
+  - name: onnxruntime
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app onnxruntime*.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/0a/50/519828a5292a6ccd8d5cd6d2f72c6b36ea528a2ef68eca69647732539ffa/onnxruntime-1.22.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+        sha256: 2d39a530aff1ec8d02e365f35e503193991417788641b184f5b1e8c9a6d5ce8d
+        only-arches:
+          - x86_64
+        x-checker-data:
+          type: pypi
+          name: onnxruntime
+          packagetype: bdist_wheel
+      - type: file
+        url: https://files.pythonhosted.org/packages/29/e5/00b099b4d4f6223b610421080d0eed9327ef9986785c9141819bbba0d396/onnxruntime-1.22.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl
+        sha256: 984cea2a02fcc5dfea44ade9aca9fe0f7a8a2cd6f77c258fc4388238618f3928
+        only-arches:
+          - aarch64
+        x-checker-data:
+          type: pypi
+          name: onnxruntime
+          packagetype: bdist_wheel
+          
+  - name: piper-tts
+    buildsystem: simple
+    build-commands: 
+    - pip3 install --prefix=/app piper_tts*.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/2b/73/3d29175cfd93e791baaef3335819778d3f8c8898e2fe16cd0cc8b8163f84/piper_tts-1.3.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux_2_28_x86_64.whl
+        sha256: 234c25474655b26f3418b84522c815c43e9b1bc8a1fdb13c2b28514290c165f0
+        only-arches:
+          - x86_64
+        x-checker-data:
+          type: pypi
+          name: piper_tts
+          packagetype: bdist_wheel
+      - type: file
+        url: https://files.pythonhosted.org/packages/8c/92/f37e5111440fc6c6336f42f8dab88afaa545394784dc930f808a68883c48/piper_tts-1.3.0-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.manylinux_2_28_aarch64.whl
+        sha256: 8d39f85c3f4b6ade512976849579344fc72595ec613f374dbcf8521716398907
+        only-arches:
+          - aarch64
+        x-checker-data:
+          type: pypi
+          name: piper_tts
+          packagetype: bdist_wheel
+          
+  - name: python3
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 tts.sh /app/bin/pipertts_asr
+      - install -Dm755 wspeech9.py /app/bin/wspeech9.py        
+      - install -Dm755 io.github.fastrizwaan.pipertts_asr.desktop /app/share/applications/io.github.fastrizwaan.pipertts_asr.desktop
+    sources:
+
+      - type: file
+        path: tts.sh
+      - type: file
+        path: wspeech9.py
+      - type: file
+        path: io.github.fastrizwaan.pipertts_asr.desktop
+                

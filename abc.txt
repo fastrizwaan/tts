@@ -1,0 +1,9 @@
+Looking for matches…
+Remotes found with refs similar to ‘org.gnome.Platform.Locale//48’:
+
+   1) ‘flathub’ (system)
+   2) ‘flathub’ (user)
+
+Which do you want to use (0 to abort)? [0-2]: 0
+Looking for matches…
+Looking for matches…

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Whisper TTS
+Exec=dsnote
+Icon=io.github.fastrizwaan.wispertts
+Categories=Utility;
