@@ -1,0 +1,38 @@
+/* Separator colors */
+.sep-blue    { background-color: blue;     min-height: 2px; }
+.sep-green   { background-color: green;    min-height: 2px; }
+.sep-purple  { background-color: purple;   min-height: 2px; }
+.sep-orange  { background-color: orange;   min-height: 2px; }
+.sep-red     { background-color: red;      min-height: 2px; }
+.sep-teal    { background-color: teal;     min-height: 2px; }
+.sep-pink    { background-color: pink;     min-height: 2px; }
+.sep-yellow  { background-color: goldenrod;min-height: 2px; }
+.sep-gray    { background-color: gray;     min-height: 2px; }
+
+/* Dictionary name colors (GTK4 uses label.node) */
+label.dictname-blue    { color: blue; }
+label.dictname-green   { color: green; }
+label.dictname-purple  { color: purple; }
+label.dictname-orange  { color: orange; }
+label.dictname-red     { color: red; }
+label.dictname-teal    { color: teal; }
+label.dictname-pink    { color: pink; }
+label.dictname-yellow  { color: goldenrod; }
+label.dictname-gray    { color: gray; }
+
+.dictionary-name {
+    border: 1px solid #a4bee3;
+    border-radius: 1px;
+    padding: 3px;
+    background-color: #cfddf0;
+    color: #141387;
+}
+
+
+.result-block {
+    border: 1px solid alpha(@fg_color, 0.15);
+    border-radius: 1px;
+    padding: 3px;
+    background-color: (255, 254, 242, 0.05);
+}
+
