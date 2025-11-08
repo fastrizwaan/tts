@@ -373,7 +373,7 @@ class MainWindow(Adw.ApplicationWindow):
 
                 # --- Definitions ---
                 clean_defs = []
-                for d in defs[:50]:
+                for d in defs:
                     c = self.dict_manager._clean_definition(d)
                     if c:
                         clean_defs.append(c)

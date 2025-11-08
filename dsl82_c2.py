@@ -10,14 +10,13 @@ from pathlib import Path
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Gtk, Adw, Gio, GLib, Gdk
+from gi.repository import Gtk, Adw, Gio, GLib, Gdk, Pango
 
 
 APP_NAME = "DSL Dictionary"
 CONFIG_DIR = Path(GLib.get_user_config_dir()) / "dsl-dictionary"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
 
-# Updated color list with "default"
 SEPARATOR_COLORS = {
     "Default": "default",
     "Blue": "blue",
@@ -31,7 +30,6 @@ SEPARATOR_COLORS = {
     "Gray": "gray",
 }
 
-
 # ------------------------------------------------------------
 # DICTIONARY MANAGER
 # ------------------------------------------------------------
@@ -42,61 +40,35 @@ class DictionaryManager:
         self.entries = {}
 
     def decode_dsl_bytes(self, raw):
-        """
-        Reliable DSL decoding:
-        - Detects BOM
-        - Detects UTF-16-LE/BE without BOM using byte pattern analysis
-        - Falls back to UTF-8 safely
-        """
-
-        # 1. --- BOM based decoding -------------------------------------
         if raw.startswith(b"\xef\xbb\xbf"):
             print("Detected UTF-8 BOM")
             return raw[3:].decode("utf-8", errors="strict")
-
         if raw.startswith(b"\xff\xfe"):
             print("Detected UTF-16-LE BOM")
             return raw.decode("utf-16-le", errors="strict")
-
         if raw.startswith(b"\xfe\xff"):
             print("Detected UTF-16-BE BOM")
             return raw.decode("utf-16-be", errors="strict")
 
-        # 2. --- UTF-16 detection without BOM ----------------------------
-        # Examine first 256 bytes (like a mini-hexdump)
         sample = raw[:256]
-
-        # UTF-16-LE looks like: ASCII byte followed by 00
-        le_score = 0
-        be_score = 0
+        le_score = be_score = 0
         pairs = len(sample) // 2
-
         for i in range(pairs):
             a = sample[2*i]
             b = sample[2*i + 1]
-
             if a != 0 and b == 0:
                 le_score += 1
             if a == 0 and b != 0:
                 be_score += 1
 
-        # Heuristic: at least 70% of pairs match
         if pairs > 8:
             if le_score / pairs >= 0.7:
                 print("Detected UTF-16-LE (heuristic)")
-                try:
-                    return raw.decode("utf-16-le", errors="strict")
-                except UnicodeDecodeError:
-                    return raw.decode("utf-16-le", errors="ignore")
-
+                return raw.decode("utf-16-le", errors="ignore")
             if be_score / pairs >= 0.7:
                 print("Detected UTF-16-BE (heuristic)")
-                try:
-                    return raw.decode("utf-16-be", errors="strict")
-                except UnicodeDecodeError:
-                    return raw.decode("utf-16-be", errors="ignore")
+                return raw.decode("utf-16-be", errors="ignore")
 
-        # 3. --- Default to UTF-8 ----------------------------------------
         print("Assuming UTF-8")
         try:
             return raw.decode("utf-8", errors="strict")
@@ -114,9 +86,7 @@ class DictionaryManager:
                 raw = gzip.open(path, "rb").read()
             else:
                 raw = open(path, "rb").read()
-
             content = self.decode_dsl_bytes(raw)
-
         except Exception as e:
             print("Decode error:", e)
             return False
@@ -138,74 +108,45 @@ class DictionaryManager:
             "color": color
         }
 
-        # Build global entry index
         for w, defs in entries.items():
             lw = w.lower()
             if lw not in self.entries:
                 self.entries[lw] = []
             self.entries[lw].append((w, dict_name, defs, color))
-
         return True
 
     def _parse_dsl(self, content):
         entries = {}
-        headwords = []
-        defs = []
+        headwords, defs = [], []
         in_def = False
-
-        lines = content.splitlines()
-        print("Processing", len(lines), "lines")
 
         def flush():
             if headwords and defs:
                 for w in headwords:
-                    if w not in entries:
-                        entries[w] = []
-                    entries[w].extend(defs)
+                    entries.setdefault(w, []).extend(defs)
 
-        for raw in lines:
+        for raw in content.splitlines():
             line = raw.rstrip()
-
-            # Skip comments
             if not line or line.startswith("#"):
                 continue
-
-            # Entry separator "-" starts a new entry
             if line == "-":
                 flush()
-                headwords = []
-                defs = []
-                in_def = False
+                headwords, defs, in_def = [], [], False
                 continue
-
-            # Definition line (any leading whitespace)
             if raw[:1].isspace():
                 in_def = True
                 cleaned = raw.lstrip()
                 if cleaned:
                     defs.append(cleaned)
                 continue
-
-            # Headword line
-            # If we were collecting definitions, this begins a new entry
             if in_def:
                 flush()
-                headwords = []
-                defs = []
-                in_def = False
-
-            # Clean headword
+                headwords, defs, in_def = [], [], False
             w = self._clean_word(line)
             if w:
                 headwords.append(w)
-
-        # Flush last entry
         flush()
-
-        print("Parsed", len(entries), "entries")
         return entries
-
-
 
     def _clean_word(self, w):
         w = re.sub(r"\[/?[^\]]*\]", "", w)
@@ -222,25 +163,17 @@ class DictionaryManager:
         q = q.lower().strip()
         if not q:
             return []
-
         res = {}
         for lw, lst in self.entries.items():
             if q in lw:
                 for orig, dn, defs, color in lst:
-                    if orig not in res:
-                        res[orig] = []
-                    res[orig].append((dn, defs, color))
-
+                    res.setdefault(orig, []).append((dn, defs, color))
         def order(x):
             w = x[0].lower()
-            if w == q:
-                return (0, w)
-            if w.startswith(q):
-                return (1, w)
+            if w == q: return (0, w)
+            if w.startswith(q): return (1, w)
             return (2, w)
-
         return sorted(res.items(), key=order)
-
 
 # ------------------------------------------------------------
 # MAIN WINDOW
@@ -251,7 +184,6 @@ class MainWindow(Adw.ApplicationWindow):
         super().__init__(application=app, title=APP_NAME)
         self.set_default_size(800, 600)
         self.dict_manager = DictionaryManager()
-
         self._load_css()
         self._build_ui()
         self._load_settings()
@@ -268,7 +200,6 @@ class MainWindow(Adw.ApplicationWindow):
     def _build_ui(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_content(box)
-
         header = Adw.HeaderBar()
         box.append(header)
 
@@ -288,13 +219,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.listbox = Gtk.ListBox()
         self.listbox.set_selection_mode(Gtk.SelectionMode.NONE)
         self.scrolled.set_child(self.listbox)
-
         self.show_placeholder("Load a dictionary to start searching")
 
     def show_placeholder(self, text):
         while (c := self.listbox.get_first_child()):
             self.listbox.remove(c)
-
         lbl = Gtk.Label(label=text)
         lbl.set_wrap(True)
         lbl.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
@@ -306,22 +235,42 @@ class MainWindow(Adw.ApplicationWindow):
         lbl.add_css_class("dim-label")
         self.listbox.append(lbl)
 
-    # ------------------------------------------------------------
-    # SEARCH HANDLER
-    # ------------------------------------------------------------
+    # ------------------- patched card layout ----------------------
 
     def on_search(self, entry):
-        q = entry.get_text()
+        from gi.repository import Pango
 
-        # Clear listbox
+        def render_dsl_text(raw_text):
+            text = raw_text
+            text = re.sub(r"\[b\](.*?)\[/b\]", r"<b>\1</b>", text, flags=re.DOTALL)
+            text = re.sub(r"\[i\](.*?)\[/i\]", r"<i>\1</i>", text, flags=re.DOTALL)
+            text = re.sub(r"\[u\](.*?)\[/u\]", r"<u>\1</u>", text, flags=re.DOTALL)
+            text = re.sub(r"\[p\](.*?)\[/p\]", r'<span color="#005bbb" size="smaller"><i>\1</i></span>', text)
+            text = re.sub(r"\[ex\](.*?)\[/ex\]", r'<span color="#228B22"><i>\1</i></span>', text)
+            text = re.sub(r"\[c ([^\]]+)\](.*?)\[/c\]", r'<span color="\1">\2</span>', text)
+            text = re.sub(r"\[/?[*]\]", "", text)
+            text = re.sub(r"\{.*?\}", "", text)
+            text = re.sub(r"\s+", " ", text)
+
+            # Escape <<links>>
+            text = re.sub(r"<<(.*?)>>", r"«\1»", text)
+
+            # Handle [m1]/[m2]/[m3] indentation
+            def margin_replacer(match):
+                level = int(match.group(1))
+                content = match.group(2).strip()
+                spaces = "\u00A0" * (level * 3)
+                return f"{spaces}{content}"
+            text = re.sub(r"\[m(\d+)\](.*?)\[/m\]", margin_replacer, text, flags=re.DOTALL)
+            return text.strip()
+
+        q = entry.get_text().strip()
         while (c := self.listbox.get_first_child()):
             self.listbox.remove(c)
 
-        if not q.strip():
+        if not q:
             self.show_placeholder(
-                "Enter a search term"
-                if self.dict_manager.entries else
-                "Load a dictionary to start searching"
+                "Enter a search term" if self.dict_manager.entries else "Load a dictionary to start searching"
             )
             return
 
@@ -330,63 +279,61 @@ class MainWindow(Adw.ApplicationWindow):
             self.show_placeholder("No results found")
             return
 
-        # ------------------------------------------------------------
-        # New layout:
-        # [ Dictionary Name ]
-        # Word
-        # Definition(s)
-        # ------------------------------------------------------------
-
         for word, dict_data in results[:100]:
-
             for dname, defs, color in dict_data:
+                card_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                card_box.set_margin_top(10)
+                card_box.set_margin_bottom(10)
+                card_box.set_margin_start(12)
+                card_box.set_margin_end(12)
+                card_box.set_hexpand(True)
+                card_box.set_halign(Gtk.Align.FILL)
+                card_box.add_css_class("dict-card")
 
-                # Outer block
-                block = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-                block.set_margin_start(12)
-                block.set_margin_end(12)
-                block.set_margin_top(12)
-                self.listbox.append(block)
+                # Header: lemma + dictionary name (same line)
+                header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                header_box.set_hexpand(True)
+                header_box.set_halign(Gtk.Align.FILL)
 
-                # --- Separator + Dictionary Name ---
-                sep_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-                block.append(sep_row)
-                name_lbl = Gtk.Label(label=" 📖 " + dname) 
-                name_lbl.set_wrap(True)
-                name_lbl.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-                name_lbl.set_xalign(0)
-                name_lbl.set_width_chars(20)
-                name_lbl.set_max_width_chars(20)                                    
-                name_lbl.add_css_class(f"dictionary-name")
-                sep_row.append(name_lbl)
+                lemma_lbl = Gtk.Label(label=word)
+                lemma_lbl.add_css_class("lemma")
+                lemma_lbl.set_xalign(0)
+                lemma_lbl.set_wrap(True)
+                lemma_lbl.set_max_width_chars(40)
+                lemma_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                lemma_lbl.set_halign(Gtk.Align.START)
+                lemma_lbl.set_hexpand(True)
 
+                dict_lbl = Gtk.Label(label=f"📖 {dname}")
+                dict_lbl.add_css_class("dict-name")
+                dict_lbl.set_xalign(1)
+                dict_lbl.set_wrap(True)
+                dict_lbl.set_max_width_chars(40)
+                dict_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                dict_lbl.set_halign(Gtk.Align.END)
 
-                # --- Word Label ---
-                wl = Gtk.Label(label=word)
-                wl.add_css_class("title-3")
-                wl.set_margin_start(10)
-                wl.set_wrap(True)
-                wl.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-                wl.set_xalign(0)
-                block.append(wl)
-                block.add_css_class(f"result-block")
+                header_box.append(lemma_lbl)
+                header_box.append(dict_lbl)
+                card_box.append(header_box)
 
-                # --- Definitions ---
-                clean_defs = []
-                for d in defs[:50]:
-                    c = self.dict_manager._clean_definition(d)
-                    if c:
-                        clean_defs.append(c)
+                # --- Render formatted definitions ---
+                formatted_defs = []
+                for d in defs:
+                    formatted_defs.append(render_dsl_text(d))
 
-                if clean_defs:
-                    wrap = Gtk.Box()
-                    lbl = Gtk.Label(label="\n".join(clean_defs))
-                    lbl.set_wrap(True)
-                    lbl.set_margin_start(10)
-                    lbl.set_xalign(0)
-                    lbl.set_selectable(True)
-                    wrap.append(lbl)
-                    block.append(wrap)
+                def_lbl = Gtk.Label()
+                def_lbl.set_use_markup(True)
+                def_lbl.set_wrap(True)
+                def_lbl.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+                def_lbl.set_xalign(0)
+                def_lbl.set_halign(Gtk.Align.FILL)
+                def_lbl.set_hexpand(True)
+                def_lbl.set_selectable(True)
+                def_lbl.set_max_width_chars(90)
+                def_lbl.set_markup("\n".join(formatted_defs))
+
+                card_box.append(def_lbl)
+                self.listbox.append(card_box)
 
 
     # ------------------------------------------------------------
@@ -396,10 +343,6 @@ class MainWindow(Adw.ApplicationWindow):
     def on_settings(self, btn):
         dlg = SettingsDialog(self, self.dict_manager.dictionaries.keys())
         dlg.present()
-
-    # ------------------------------------------------------------
-    # SETTINGS LOAD/SAVE
-    # ------------------------------------------------------------
 
     def _load_settings(self):
         if not CONFIG_FILE.exists():
@@ -416,11 +359,9 @@ class MainWindow(Adw.ApplicationWindow):
 
     def save_settings(self):
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        arr = []
-        for p, info in self.dict_manager.dictionaries.items():
-            arr.append({"path": p, "color": info["color"]})
+        arr = [{"path": p, "color": info["color"]}
+               for p, info in self.dict_manager.dictionaries.items()]
         json.dump({"dictionaries": arr}, open(CONFIG_FILE, "w"))
-
 
 # ------------------------------------------------------------
 # SETTINGS DIALOG
@@ -430,10 +371,8 @@ class SettingsDialog(Adw.PreferencesWindow):
     def __init__(self, parent, paths):
         super().__init__(transient_for=parent, modal=True, title="Settings")
         self.parent = parent
-
         page = Adw.PreferencesPage()
         self.add(page)
-
         group = Adw.PreferencesGroup(title="Dictionaries")
         page.add(group)
 
@@ -445,7 +384,6 @@ class SettingsDialog(Adw.PreferencesWindow):
 
         for path in paths:
             info = parent.dict_manager.dictionaries[path]
-
             row = Adw.ActionRow(
                 title=info["name"],
                 subtitle=f"{len(info['entries'])} entries • {os.path.basename(path)}"
@@ -453,7 +391,6 @@ class SettingsDialog(Adw.PreferencesWindow):
 
             names = list(SEPARATOR_COLORS.keys())
             model = Gtk.StringList.new(names)
-
             dd = Gtk.DropDown(model=model)
             dd.set_selected(list(SEPARATOR_COLORS.values()).index(info["color"]))
             dd.connect("notify::selected", self.color_changed, path)
@@ -463,10 +400,7 @@ class SettingsDialog(Adw.PreferencesWindow):
             rm.add_css_class("destructive-action")
             rm.connect("clicked", self.remove_dictionary, path)
             row.add_suffix(rm)
-
             group.add(row)
-
-    # ------------------------------------------------------------
 
     def add_dictionary(self, *_):
         dlg = Gtk.FileDialog()
@@ -489,36 +423,26 @@ class SettingsDialog(Adw.PreferencesWindow):
     def color_changed(self, dd, _spec, path):
         new_color = list(SEPARATOR_COLORS.values())[dd.get_selected()]
         self.parent.dict_manager.dictionaries[path]["color"] = new_color
-
-        # rebuild global entries
         self.parent.dict_manager.entries = {}
         for p, info in self.parent.dict_manager.dictionaries.items():
             for w, defs in info["entries"].items():
                 wl = w.lower()
-                if wl not in self.parent.dict_manager.entries:
-                    self.parent.dict_manager.entries[wl] = []
-                self.parent.dict_manager.entries[wl].append(
+                self.parent.dict_manager.entries.setdefault(wl, []).append(
                     (w, info["name"], defs, info["color"])
                 )
-
         self.parent.save_settings()
         self.parent.on_search(self.parent.search_entry)
 
     def remove_dictionary(self, *_args):
         path = _args[-1]
         self.parent.dict_manager.dictionaries.pop(path, None)
-
-        # rebuild global entries
         self.parent.dict_manager.entries = {}
         for p, info in self.parent.dict_manager.dictionaries.items():
             for w, defs in info["entries"].items():
                 wl = w.lower()
-                if wl not in self.parent.dict_manager.entries:
-                    self.parent.dict_manager.entries[wl] = []
-                self.parent.dict_manager.entries[wl].append(
+                self.parent.dict_manager.entries.setdefault(wl, []).append(
                     (w, info["name"], defs, info["color"])
                 )
-
         self.parent.save_settings()
         self.close()
         if self.parent.dict_manager.dictionaries:
@@ -526,7 +450,6 @@ class SettingsDialog(Adw.PreferencesWindow):
                 self.parent,
                 self.parent.dict_manager.dictionaries.keys()
             ).present()
-
 
 # ------------------------------------------------------------
 # APPLICATION
@@ -543,11 +466,9 @@ class DictionaryApp(Adw.Application):
             win = MainWindow(self)
         win.present()
 
-
 def main():
     app = DictionaryApp()
     return app.run(None)
-
 
 if __name__ == "__main__":
     main()

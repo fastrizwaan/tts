@@ -1,38 +1,100 @@
-/* Separator colors */
-.sep-blue    { background-color: blue;     min-height: 2px; }
-.sep-green   { background-color: green;    min-height: 2px; }
-.sep-purple  { background-color: purple;   min-height: 2px; }
-.sep-orange  { background-color: orange;   min-height: 2px; }
-.sep-red     { background-color: red;      min-height: 2px; }
-.sep-teal    { background-color: teal;     min-height: 2px; }
-.sep-pink    { background-color: pink;     min-height: 2px; }
-.sep-yellow  { background-color: goldenrod;min-height: 2px; }
-.sep-gray    { background-color: gray;     min-height: 2px; }
-
-/* Dictionary name colors (GTK4 uses label.node) */
-label.dictname-blue    { color: blue; }
-label.dictname-green   { color: green; }
-label.dictname-purple  { color: purple; }
-label.dictname-orange  { color: orange; }
-label.dictname-red     { color: red; }
-label.dictname-teal    { color: teal; }
-label.dictname-pink    { color: pink; }
-label.dictname-yellow  { color: goldenrod; }
-label.dictname-gray    { color: gray; }
-
+/* Style for the dictionary name separator */
 .dictionary-name {
-    border: 1px solid #a4bee3;
-    border-radius: 1px;
-    padding: 3px;
-    background-color: #cfddf0;
-    color: #141387;
+    font-weight: bold;
+    color: #555;
 }
 
+/* Style for the main word heading */
+.title-3 {
+    font-size: 1.2em;
+    font-weight: bold;
+    margin-top: 8px;
+}
 
+/* Style for the result block */
 .result-block {
-    border: 1px solid alpha(@fg_color, 0.15);
-    border-radius: 1px;
-    padding: 3px;
-    background-color: (255, 254, 242, 0.05);
+    padding: 8px;
+    border-radius: 8px;
+    background-color: rgba(255, 255, 255, 0.05);
 }
+
+/* Style for bold labels (Synonyms:, Antonyms:, etc.) */
+.bold-label {
+    font-weight: bold;
+    color: #333;
+    margin-right: 4px;
+}
+
+/* Style for example buttons */
+.example-button {
+    color: #007BFF;
+    text-decoration: underline;
+    padding: 0 4px;
+    margin: 0 2px;
+    border: none;
+    background: none;
+    font-style: italic;
+}
+
+.example-button:hover {
+    color: #0056b3;
+    text-decoration: none;
+}
+
+/* Style for definition text */
+.definition-text {
+    font-style: italic;
+    color: #555;
+}
+
+.dict-card {
+  border-radius: 8px;
+  border: 1px solid @borders;
+  background-color: @theme_bg_color;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  padding: 8px 12px;
+}
+
+.lemma {
+  font-weight: 700;
+  font-size: 1rem;
+  color: #4c1d95;
+}
+
+.dict-name {
+  color: #f97316;
+  font-weight: 500;
+  font-size: smaller;
+}
+
+.def-label {
+  line-height: 1.12;
+  margin-top: 1px;
+  margin-bottom: 1px;
+  padding-left: 8px;
+}
+
+
+/* Lemma styling: bold, normal-sized */
+.lemma {
+  font-weight: 700;
+  font-size: 1rem; /* normal text size */
+  color: #4c1d95;  /* deep indigo for clarity */
+}
+
+/* Make POS and synonym labels visually lighter */
+.pos-label,
+.small-label {
+  font-size: smaller;
+  color: #005bbb;
+  font-style: italic;
+}
+
+.dict-name {
+  color: #f97316;
+  font-weight: 600;
+}
+
+
+@define-color theme_bg_color @view_bg_color;
 

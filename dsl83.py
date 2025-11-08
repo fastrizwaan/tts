@@ -330,13 +330,6 @@ class MainWindow(Adw.ApplicationWindow):
             self.show_placeholder("No results found")
             return
 
-        # ------------------------------------------------------------
-        # New layout:
-        # [ Dictionary Name ]
-        # Word
-        # Definition(s)
-        # ------------------------------------------------------------
-
         for word, dict_data in results[:100]:
 
             for dname, defs, color in dict_data:
@@ -371,23 +364,65 @@ class MainWindow(Adw.ApplicationWindow):
                 block.append(wl)
                 block.add_css_class(f"result-block")
 
-                # --- Definitions ---
-                clean_defs = []
-                for d in defs[:50]:
-                    c = self.dict_manager._clean_definition(d)
-                    if c:
-                        clean_defs.append(c)
+                # --- Definitions - Rich Format wrapped in a box ---
+                # Create the wrap box as a container for definition elements
+                wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2) # Changed to vertical for stacking lines
+                wrap.set_margin_start(10) # Apply margin here
+                block.append(wrap) # Add the wrap box to the main block
 
-                if clean_defs:
-                    wrap = Gtk.Box()
-                    lbl = Gtk.Label(label="\n".join(clean_defs))
-                    lbl.set_wrap(True)
-                    lbl.set_margin_start(10)
-                    lbl.set_xalign(0)
-                    lbl.set_selectable(True)
-                    wrap.append(lbl)
-                    block.append(wrap)
+                for d in defs:
+                    # Clean the raw DSL line
+                    cleaned_line = self.dict_manager._clean_definition(d)
 
+                    # Create a box for this definition line
+                    def_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+                    # No margin here, wrap box handles it
+                    wrap.append(def_box) # Add def_box to the wrap box
+
+                    # Check for specific patterns
+                    if cleaned_line.startswith("[b]") and cleaned_line.endswith("[/b]"):
+                        # It's a bold label like "Synonyms:", "Antonyms:", etc.
+                        label_text = cleaned_line[3:-4].strip()  # Remove [b] and [/b]
+                        label_widget = Gtk.Label(label=label_text + ":")
+                        label_widget.add_css_class("bold-label")
+                        label_widget.set_xalign(0)
+                        def_box.append(label_widget)
+
+                    elif cleaned_line.startswith("[i]") and cleaned_line.endswith("[/i]"):
+                        # It's an example
+                        example_text = cleaned_line[3:-4].strip()
+                        # Create a clickable link-like button for the example
+                        example_btn = Gtk.Button(label=example_text)
+                        example_btn.add_css_class("example-button")
+                        example_btn.set_relief(Gtk.ReliefStyle.NONE)
+                        example_btn.set_halign(Gtk.Align.START)
+                        example_btn.set_valign(Gtk.Align.CENTER)
+                        # Optional: Add tooltip or make it do something when clicked
+                        example_btn.connect("clicked", lambda btn, ex=example_text: print(f"Clicked example: {ex}"))
+                        def_box.append(example_btn)
+
+                    elif cleaned_line.startswith(" ") or cleaned_line.startswith("\t"):
+                        # It's likely a numbered sense definition (e.g., "1. the state...")
+                        # Create a label for the definition itself
+                        def_label = Gtk.Label(label=cleaned_line.strip())
+                        def_label.set_xalign(0)
+                        def_label.set_wrap(True)
+                        def_label.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+                        def_label.add_css_class("definition-text")
+                        def_box.append(def_label)
+
+                    else:
+                        # Default case: plain text
+                        plain_label = Gtk.Label(label=cleaned_line)
+                        plain_label.set_xalign(0)
+                        plain_label.set_wrap(True)
+                        plain_label.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+                        def_box.append(plain_label)
+
+                # Optional: Make the wrap box's content selectable if needed
+                # This requires adding TextView widgets, which is more complex
+                # For now, individual labels/buttons within def_box are not selectable by default
+                # unless explicitly set (like the example button if needed)
 
     # ------------------------------------------------------------
     # SETTINGS

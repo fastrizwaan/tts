@@ -291,6 +291,83 @@ class MainWindow(Adw.ApplicationWindow):
 
         self.show_placeholder("Load a dictionary to start searching")
 
+    def _process_dsl_tags(self, text):
+        """Convert DSL tags to Pango markup for GTK labels."""
+        # Escape Pango special characters first
+        text = text.replace("&", "&amp;")
+        text = text.replace("<", "<")
+        text = text.replace(">", ">")
+
+        # Color tags: [c colorname]text[/c]
+        # Matches [c colorname] or [c=red] style tags
+        text = re.sub(
+            r'\[c\s+([^\]]+)\](.*?)\[/c\]',
+            lambda m: f'<span foreground="{m.group(1).strip()}">{m.group(2)}</span>',
+            text,
+            flags=re.DOTALL
+        )
+
+        # Bold: [b]text[/b]
+        text = re.sub(r'\[b\](.*?)\[/b\]', r'<b>\1</b>', text, flags=re.DOTALL)
+
+        # Italic: [i]text[/i]
+        text = re.sub(r'\[i\](.*?)\[/i\]', r'<i>\1</i>', text, flags=re.DOTALL)
+
+        # Underline: [u]text[/u]
+        text = re.sub(r'\[u\](.*?)\[/u\]', r'<u>\1</u>', text, flags=re.DOTALL)
+
+        # Superscript: [sup]text[/sup]
+        text = re.sub(r'\[sup\](.*?)\[/sup\]', r'<sup>\1</sup>', text, flags=re.DOTALL)
+
+        # Subscript: [sub]text[/sub]
+        text = re.sub(r'\[sub\](.*?)\[/sub\]', r'<sub>\1</sub>', text, flags=re.DOTALL)
+
+        # Labels: [p]text[/p]
+        text = re.sub(r'\[p\](.*?)\[/p\]', r'<b>\1</b>', text, flags=re.DOTALL)
+
+        # Examples: [ex]text[/ex]
+        text = re.sub(r'\[ex\](.*?)\[/ex\]', r'<i>\1</i>', text, flags=re.DOTALL)
+
+        # Indents: [m0] to [m9] with corresponding [/m]
+        # We replace with a proportional number of non-breaking spaces
+        # Using 2 spaces per indent level for better visibility
+        def replace_indent(match):
+            level = match.group(1)
+            content = match.group(2)
+            # Use Unicode non-breaking space (U+00A0) to ensure spacing
+            spaces = '\u00A0' * (int(level) * 2)
+            return f'{spaces}{content}'
+
+        text = re.sub(r'\[m([0-9])\](.*?)\[/m\]', replace_indent, text, flags=re.DOTALL)
+
+        # Str[']e[/']ssed vowels: str[']e[/']ss -> <span font_weight="bold">e</span>
+        # This is a common DSL tag for stressed vowels
+        text = re.sub(r'\[/?\'\]', '', text) # For now, just remove them as they are not commonly styled
+
+        # Links: <<target>>, [ref]target[/ref], [url]url[/url]
+        # For now, just remove link tags and keep the text
+        text = re.sub(r'<<([^>]*)>>', r'\1', text)
+        text = re.sub(r'\[ref[^\]]*\](.*?)\[/ref\]', r'\1', text)
+        text = re.sub(r'\[url[^\]]*\](.*?)\[/url\]', r'\1', text)
+
+        # Zones: [s]filename[/s] (multimedia) - remove for now
+        text = re.sub(r'\[s[^\]]*\](.*?)\[/s\]', r'\1', text)
+
+        # Comments: {{comment}} - remove them
+        text = re.sub(r'\{\{.*?\}\}', '', text)
+
+        # Lingvo examples: [*][ex]...[/ex][/*] -> just the example content
+        text = re.sub(r'\[\*\](.*?)\[/\*\]', r'\1', text, flags=re.DOTALL)
+
+        # Language tags: [lang id=1033]text[/lang] - remove for now
+        text = re.sub(r'\[lang[^\]]*\](.*?)\[/lang\]', r'\1', text)
+
+        # Unescape special DSL characters that were escaped in the source
+        # e.g., \~ becomes ~, \@ becomes @, etc.
+        text = re.sub(r'\\([~@\\\[\]{}])', r'\1', text)
+
+        return text
+        
     def show_placeholder(self, text):
         while (c := self.listbox.get_first_child()):
             self.listbox.remove(c)
@@ -334,7 +411,7 @@ class MainWindow(Adw.ApplicationWindow):
         # New layout:
         # [ Dictionary Name ]
         # Word
-        # Definition(s)
+        # Definition(s) with formatting
         # ------------------------------------------------------------
 
         for word, dict_data in results[:100]:
@@ -343,23 +420,22 @@ class MainWindow(Adw.ApplicationWindow):
 
                 # Outer block
                 block = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-                block.set_margin_start(12)
-                block.set_margin_end(12)
-                block.set_margin_top(12)
+                block.set_margin_start(32)
+                block.set_margin_end(32)
+                block.set_margin_top(32)
                 self.listbox.append(block)
 
                 # --- Separator + Dictionary Name ---
                 sep_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
                 block.append(sep_row)
-                name_lbl = Gtk.Label(label=" 📖 " + dname) 
+                name_lbl = Gtk.Label(label=" 📖 " + dname)
                 name_lbl.set_wrap(True)
                 name_lbl.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
                 name_lbl.set_xalign(0)
                 name_lbl.set_width_chars(20)
-                name_lbl.set_max_width_chars(20)                                    
-                name_lbl.add_css_class(f"dictionary-name")
+                name_lbl.set_max_width_chars(20)
+                #name_lbl.add_css_class(f"dictionary-name")
                 sep_row.append(name_lbl)
-
 
                 # --- Word Label ---
                 wl = Gtk.Label(label=word)
@@ -369,24 +445,21 @@ class MainWindow(Adw.ApplicationWindow):
                 wl.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
                 wl.set_xalign(0)
                 block.append(wl)
-                block.add_css_class(f"result-block")
+                #block.add_css_class(f"result-block")
 
-                # --- Definitions ---
-                clean_defs = []
-                for d in defs[:50]:
-                    c = self.dict_manager._clean_definition(d)
-                    if c:
-                        clean_defs.append(c)
+                # --- Definitions with formatting ---
+                for d in defs:
+                    # Process DSL tags
+                    formatted_text = self._process_dsl_tags(d)
 
-                if clean_defs:
-                    wrap = Gtk.Box()
-                    lbl = Gtk.Label(label="\n".join(clean_defs))
+                    # Create label with markup
+                    lbl = Gtk.Label()
+                    lbl.set_markup(formatted_text)
                     lbl.set_wrap(True)
                     lbl.set_margin_start(10)
                     lbl.set_xalign(0)
                     lbl.set_selectable(True)
-                    wrap.append(lbl)
-                    block.append(wrap)
+                    block.append(lbl)
 
 
     # ------------------------------------------------------------
