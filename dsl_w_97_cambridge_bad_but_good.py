@@ -24,39 +24,17 @@ class DictionaryManager:
         self.dictionaries = {}
         self.entries = {}
 
-    def decode_dsl_bytes(self, raw: bytes) -> str:
-        """Robustly detect and decode DSL file encoding."""
-        # Byte Order Marks (BOM)
+    def decode_dsl_bytes(self, raw):
         if raw.startswith(b"\xef\xbb\xbf"):
-            text = raw[3:].decode("utf-8", errors="ignore")
-        elif raw.startswith(b"\xff\xfe"):
-            text = raw.decode("utf-16-le", errors="ignore")
-        elif raw.startswith(b"\xfe\xff"):
-            text = raw.decode("utf-16-be", errors="ignore")
-        else:
-            # Try UTF-8 first (most common)
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                # Try UTF-16 (some DSLs omit BOM)
-                try:
-                    text = raw.decode("utf-16-le")
-                except UnicodeDecodeError:
-                    # Fallback to Windows encodings used for Arabic/Russian DSLs
-                    for enc in ("cp1251", "cp1256", "latin1"):
-                        try:
-                            text = raw.decode(enc)
-                            break
-                        except UnicodeDecodeError:
-                            continue
-                    else:
-                        # As last resort, decode ignoring errors
-                        text = raw.decode("utf-8", errors="ignore")
-
-        # Clean up nulls and extra BOM characters
-        text = text.replace("\x00", "")
-        return text
-
+            return raw[3:].decode("utf-8", errors="ignore")
+        if raw.startswith(b"\xff\xfe"):
+            return raw.decode("utf-16-le", errors="ignore")
+        if raw.startswith(b"\xfe\xff"):
+            return raw.decode("utf-16-be", errors="ignore")
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw.decode("utf-8", errors="ignore")
 
     def load_dictionary(self, path, color="default"):
         path = Path(path)
@@ -83,54 +61,61 @@ class DictionaryManager:
             lw = w.lower()
             self.entries.setdefault(lw, []).append((w, dict_name, defs, color))
         print(f"Loaded {len(entries)} entries from {dict_name}")
-        # Debug: show first few entries
-        for i, (word, defs) in enumerate(list(entries.items())[:3]):
-            print(f"  '{word}' -> {len(defs)} definitions")
         return True
 
-
     def _parse_dsl(self, content):
-        entries, headwords, defs = {}, [], []
-        in_def = False
+        """
+        DSL parser that supports:
+        - Multiple headwords per entry (Cambridge-style)
+        - Tag-based structures [m0]-[m9]
+        - Indentation-based legacy formats
+        """
+        entries = {}
+        headwords = []
+        defs = []
 
         def flush():
             if headwords and defs:
-                for w in headwords:
-                    if w.strip():  # Only add non-empty headwords
-                        entries.setdefault(w, []).extend(defs)
+                clean_defs = [d for d in defs if d.strip()]
+                if clean_defs:
+                    for w in headwords:
+                        entries.setdefault(w.strip(), []).extend(clean_defs)
 
         for raw in content.splitlines():
             line = raw.rstrip()
-            
-            # Skip empty lines and all header lines (starting with #)
             if not line or line.startswith("#"):
                 continue
-                
-            # Entry separator
-            if line == "-":
-                flush()
-                headwords, defs, in_def = [], [], False
+
+            # --- Headword line: no indent, no [mX] tag ---
+            if not raw[:1].isspace() and not re.match(r"^\[m\d+\]", line):
+                # Flush previous entry before starting new group
+                if defs:
+                    flush()
+                    defs = []
+
+                # Either a continuation of headwords or a fresh one
+                if headwords and not defs:
+                    # If previous entry had only headwords (Cambridge multiword forms)
+                    headwords.append(line.strip())
+                else:
+                    headwords = [line.strip()]
                 continue
-                
-            # Definition line (starts with whitespace)
-            if raw and raw[0] in (' ', '\t'):
-                in_def = True
-                cleaned = raw.lstrip()
-                if cleaned:
-                    defs.append(cleaned)
+
+            # --- Structured tag-based definition ([m0]-[m9]) ---
+            if re.match(r"^\[m\d+\]", line):
+                defs.append(line.strip())
                 continue
-                
-            # Non-indented line after definitions = new entry
-            if in_def:
-                flush()
-                headwords, defs, in_def = [], [], False
-                
-            # Accumulate headwords (non-indented, non-header lines)
-            if line.strip():  # Only add non-empty lines
-                headwords.append(line)
-                
+
+            # --- Indentation-based definition (WordBook-style) ---
+            if raw[:1].isspace():
+                defs.append(line.strip())
+                continue
+
         flush()
         return entries
+
+
+
 
     def search(self, q):
         q = q.lower().strip()
@@ -169,6 +154,46 @@ class MainWindow(Adw.ApplicationWindow):
         self._apply_theme_to_webview()
         self._load_settings()
 
+    def _build_theme_css(self):
+        dark = self.style_manager.get_dark()
+        bg = "#1e1e1e" if dark else "#ffffff"
+        fg = "#dddddd" if dark else "#222222"
+        link = "#89b4ff" if dark else "#005bbb"
+        border = "#444" if dark else "#ccc"
+        pos = "#9ae59a" if dark else "#228B22"
+        example = "#9ae59a" if dark else "#228B22"
+
+        return f"""
+        body {{
+            font-family: system-ui, sans-serif;
+            background-color: {bg};
+            color: {fg};
+            margin: 12px;
+        }}
+        .lemma {{ font-size: 1.3em; font-weight: bold; color: {link}; }}
+        .dict {{ float: right; font-size: 0.9em; color: #888; }}
+        .pos {{ color: {pos}; font-style: italic; }}
+        .example {{ color: {example}; font-style: italic; }}
+        .dict-link {{ color: {link}; text-decoration: none; cursor: pointer; }}
+        .dict-link:hover {{ text-decoration: underline; }}
+        ol {{ margin: 0.5em 0; padding-left: 2em; line-height: 1.6; list-style-position: outside; }}
+        li {{ margin-bottom: 0.8em; }}
+        .sub-item {{
+            margin-left: 1.5em;
+            color: {example};
+            font-style: italic;
+            line-height: 1.4;
+        }}
+        .standalone {{ margin: 0.3em 0; line-height: 1.4; font-weight: 500; }}
+        hr {{ border: none; border-top: 1px solid {border}; margin: 10px 0; }}
+        .def-text {{
+            color: {fg};
+            font-weight: 500;
+            font-style: normal;
+
+        }}
+        """
+
     def lighten(self, color: str, factor: float = 1.5) -> str:
         """Brighten a CSS color name or hex color safely for dark mode."""
 
@@ -199,7 +224,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         
     def on_theme_changed(self, *_):
-        """Called when theme changes – recolor spans live without reload."""
+        """Called when theme changes — recolor spans live without reload."""
         dark = self.style_manager.get_dark()
         
         # Build the updated theme CSS with actual colors
@@ -210,25 +235,8 @@ class MainWindow(Adw.ApplicationWindow):
         pos = "#9ae59a" if dark else "#228B22"
         example = "#9ae59a" if dark else "#228B22"
         
-        theme_css = f"""
-        body {{
-            font-family: system-ui, sans-serif;
-            background-color: {bg};
-            color: {fg};
-            margin: 12px;
-        }}
-        .lemma {{ font-size: 1.3em; font-weight: bold; color: {link}; }}
-        .dict {{ float: right; font-size: 0.9em; color: #888; }}
-        .pos {{ color: {pos}; font-style: italic; }}
-        .example {{ color: {example}; font-style: italic; }}
-        .dict-link {{ color: {link}; text-decoration: none; cursor: pointer; }}
-        .dict-link:hover {{ text-decoration: underline; }}
-        ol {{ margin: 0.5em 0; padding-left: 2em; line-height: 1.6; list-style-position: outside; }}
-        li {{ margin-bottom: 0.8em; }}
-        .sub-item {{ margin-left: 0; margin-top: 0.3em; line-height: 1.4; }}
-        .standalone {{ margin: 0.3em 0; line-height: 1.4; font-weight: 500; }}
-        hr {{ border: none; border-top: 1px solid {border}; margin: 10px 0; }}
-        """
+        theme_css = self._build_theme_css()
+
         
         # Combined script: update theme CSS AND recolor spans in one go
         js = f"""
@@ -291,25 +299,8 @@ class MainWindow(Adw.ApplicationWindow):
         pos = "#9ae59a" if dark else "#228B22"
         example = "#9ae59a" if dark else "#228B22"
         
-        theme_css = f"""
-        body {{
-            font-family: system-ui, sans-serif;
-            background-color: {bg};
-            color: {fg};
-            margin: 12px;
-        }}
-        .lemma {{ font-size: 1.3em; font-weight: bold; color: {link}; }}
-        .dict {{ float: right; font-size: 0.9em; color: #888; }}
-        .pos {{ color: {pos}; font-style: italic; }}
-        .example {{ color: {example}; font-style: italic; }}
-        .dict-link {{ color: {link}; text-decoration: none; cursor: pointer; }}
-        .dict-link:hover {{ text-decoration: underline; }}
-        ol {{ margin: 0.5em 0; padding-left: 2em; line-height: 1.6; list-style-position: outside; }}
-        li {{ margin-bottom: 0.8em; }}
-        .sub-item {{ margin-left: 0; margin-top: 0.3em; line-height: 1.4; }}
-        .standalone {{ margin: 0.3em 0; line-height: 1.4; font-weight: 500; }}
-        hr {{ border: none; border-top: 1px solid {border}; margin: 10px 0; }}
-        """
+        theme_css = self._build_theme_css()
+
 
         # Inject live theme update into the webview
         script = f"""
@@ -368,14 +359,8 @@ class MainWindow(Adw.ApplicationWindow):
         bg = "#1e1e1e" if dark else "#ffffff"
         fg = "#dddddd" if dark else "#222222"
         
-        theme_css = f"""
-        body {{
-            font-family: system-ui, sans-serif;
-            background-color: {bg};
-            color: {fg};
-            margin: 12px;
-        }}
-        """
+        theme_css = self._build_theme_css()
+
 
         html = f"""
         <html>
@@ -474,84 +459,114 @@ class MainWindow(Adw.ApplicationWindow):
         body = ""
         for word, dict_data in results[:100]:
             for dname, defs, color in dict_data:
-                defs_html = ""
-                in_list = False
-                current_li_content = []
+                sections = []  # list of (m0_title, [(pos, [defs])])
+                current_section = None
+                current_pos = None
+                current_defs = []
 
-                for i, d in enumerate(defs):
-                    d_stripped = d.strip()
+                def flush_pos():
+                    nonlocal current_pos, current_defs, current_section
+                    if current_pos and current_defs:
+                        if not current_section:
+                            current_section = ("", [])
+                        current_section[1].append((current_pos, current_defs))
+                        current_pos, current_defs = None, []
 
-                    # Identify DSL level: [m1], [m2], ...
-                    lvl_match = re.match(r'^\[m(\d+)\]', d_stripped)
-                    lvl = int(lvl_match.group(1)) if lvl_match else None
+                def flush_section():
+                    nonlocal current_section
+                    if current_section:
+                        sections.append(current_section)
+                        current_section = None
 
-                    # Detect "separator" like ——— (after removing [mX]...[/m])
-                    sep_check = re.sub(r'^\[m\d+\](.*?)\[/m\]$', r'\1', d_stripped, flags=re.DOTALL).strip()
-                    is_separator = bool(re.fullmatch(r'[—\-]{3,}', sep_check))
-
-                    # New top-level header or separator closes any open list
-                    if lvl == 1 or is_separator:
-                        if current_li_content:
-                            defs_html += "<li>" + "".join(current_li_content) + "</li>"
-                            current_li_content = []
-                        if in_list:
-                            defs_html += "</ol>"
-                            in_list = False
-
-                        if not is_separator:
-                            defs_html += f"<div class='standalone'>{self.render_dsl_text(d, headword=word)}</div>"
-                        else:
-                            defs_html += "<hr>"
+                for line in defs:
+                    line = line.strip()
+                    if not line:
                         continue
 
-                    # Numbering detection inside [mX] ... [/m]
-                    m_content = re.search(r'\[m\d+\](.*?)\[/m\]', d_stripped, re.DOTALL)
-                    if m_content:
-                        inner = m_content.group(1).strip()
-                        is_numbered_m = (
-                            re.match(r'^\d+[\.\)》]\s', inner) or
-                            re.match(r'^\[([biu])\]\d+[\.\)》]\[/\1\]\s*', inner) or
-                            ('■ ' in inner[:10])
-                        )
-                    else:
-                        is_numbered_m = False
+                    # detect single-tag form [mX]... (Cambridge)
+                    m_tag = re.match(r'\[(m\d+)\](.*)', line)
+                    if m_tag:
+                        tag, content = m_tag.groups()
+                        content = content.strip()
 
-                    is_numbered = bool(re.match(r'^\d+[\.\)》]\s', d_stripped))
+                        # [m0] — section header (USE VEHICLE, FORCE, etc.)
+                        if tag == "m0":
+                            flush_pos()
+                            flush_section()
+                            title = self.render_dsl_text(content)
+                            current_section = (title, [])
+                            continue
 
-                    if is_numbered_m or is_numbered:
-                        if current_li_content:
-                            defs_html += "<li>" + "".join(current_li_content) + "</li>"
-                            current_li_content = []
-                        if not in_list:
-                            defs_html += "<ol>"
-                            in_list = True
-                        current_li_content.append(self.render_dsl_text(d, is_main=True, headword=word))
-                    else:
-                        if in_list:
-                            current_li_content.append(
-                                f"<div class='sub-item'>{self.render_dsl_text(d, headword=word)}</div>"
-                            )
+                        # [m1] — new sense or POS
+                        if tag == "m1":
+                            flush_pos()
+                            current_pos = self.render_dsl_text(content)
+                            current_defs = []
+                            # Detect whether this is a numbered sense or a phrase heading
+                            self._in_numbered_sense = bool(re.match(r'^\s*\d+[\.\)]', content))
+                            continue
+
+
+                        # [m2] — standard meaning
+                        if tag == "m2":
+                            html = self.render_dsl_text(content, is_main=self._in_numbered_sense, headword=word)
+                            # If it's a phrase/idiom (non-numbered), mark it standalone
+                            if not self._in_numbered_sense:
+                                html = f"<div class='standalone'>{html}</div>"
+                            current_defs.append(html)
+                            continue
+
+
+                        # [m3] — example or subexample
+                        if tag == "m3":
+                            current_defs.append(f"<div class='sub-item'>{self.render_dsl_text(content, headword=word)}</div>")
+                            continue
+
+                        # [m4] — extra example
+                        if tag == "m4":
+                            current_defs.append(f"<div class='sub-item'>{self.render_dsl_text(content, headword=word)}</div>")
+                            continue
+
+                        # fallback
+                        current_defs.append(self.render_dsl_text(content, headword=word))
+                        continue
+
+                    # lines without any [mX] — fallback (still allow inlined definitions)
+                    if current_pos:
+                        current_defs.append(self.render_dsl_text(line, headword=word))
+
+
+            flush_pos()
+            flush_section()
+
+            # now render all sections
+            defs_html = ""
+            for title, pos_blocks in sections:
+                if title:
+                    defs_html += f"<div class='m0-title'><b>{title}</b></div>"
+                for pos, items in pos_blocks:
+                    defs_html += f"<div class='pos-block'><div class='pos'>{pos}</div><ol>"
+                    for item in items:
+                        # Examples are already <div class='sub-item'>
+                        if "<div class='sub-item'>" in item:
+                            defs_html += f"{item}"
                         else:
-                            defs_html += f"<div class='standalone'>{self.render_dsl_text(d, headword=word)}</div>"
+                            defs_html += f"<li>{item}</li>"
+                    defs_html += "</ol></div>"
 
-                # Close any remaining list item / list
-                if current_li_content:
-                    defs_html += "<li>" + "".join(current_li_content) + "</li>"
-                if in_list:
-                    defs_html += "</ol>"
 
-                clean_word = self._unescape_dsl_text(word)
-                block = f"""
-                <div class="entry">
-                  <div class="header">
-                    <span class="lemma">{clean_word}</span>
-                    <span class="dict">📖 {dname}</span>
-                  </div>
-                  {defs_html}
-                  <hr>
-                </div>
-                """
-                body += block
+            clean_word = self._unescape_dsl_text(word)
+            body += f"""
+            <div class="entry">
+              <div class="header">
+                <span class="lemma">{clean_word}</span>
+                <span class="dict">📖 {dname}</span>
+              </div>
+              {defs_html}
+              <hr>
+            </div>
+            """
+
 
         # Theme CSS (same variables as _apply_theme_to_webview / show_placeholder)
         dark = self.style_manager.get_dark()
@@ -562,25 +577,8 @@ class MainWindow(Adw.ApplicationWindow):
         pos = "#9ae59a" if dark else "#228B22"
         example = "#9ae59a" if dark else "#228B22"
         
-        theme_css = f"""
-        body {{
-            font-family: system-ui, sans-serif;
-            background-color: {bg};
-            color: {fg};
-            margin: 12px;
-        }}
-        .lemma {{ font-size: 1.3em; font-weight: bold; color: {link}; }}
-        .dict {{ float: right; font-size: 0.9em; color: #888; }}
-        .pos {{ color: {pos}; font-style: italic; }}
-        .example {{ color: {example}; font-style: italic; }}
-        .dict-link {{ color: {link}; text-decoration: none; cursor: pointer; }}
-        .dict-link:hover {{ text-decoration: underline; }}
-        ol {{ margin: 0.5em 0; padding-left: 2em; line-height: 1.6; list-style-position: outside; }}
-        li {{ margin-bottom: 0.8em; }}
-        .sub-item {{ margin-left: 0; margin-top: 0.3em; line-height: 1.4; }}
-        .standalone {{ margin: 0.3em 0; line-height: 1.4; font-weight: 500; }}
-        hr {{ border: none; border-top: 1px solid {border}; margin: 10px 0; }}
-        """
+        theme_css = self._build_theme_css()
+
 
         # Cache the final rendered HTML so it can be reused by on_theme_changed()
         self._last_html = f"""
@@ -645,7 +643,9 @@ class MainWindow(Adw.ApplicationWindow):
         t = re.sub(r"\[ex\](.*?)\[/ex\]", r'<span class="example">\1</span>', t, flags=re.DOTALL)
         t = re.sub(r"\[trn\](.*?)\[/trn\]", r'\1', t, flags=re.DOTALL)
         t = re.sub(r"\[com\](.*?)\[/com\]", r'\1', t, flags=re.DOTALL)
-        
+        t = re.sub(r"\[ref\](.*?)\[/ref\]", r'<a href="dict://\1" class="dict-link">\1</a>', t, flags=re.DOTALL)
+
+
         # Handle color tags [c color]text[/c]
         def apply_color_tag(match):
             color = match.group(1).strip()
@@ -669,11 +669,51 @@ class MainWindow(Adw.ApplicationWindow):
 
         t = re.sub(r"\[c\s+([^\]]+)\](.*?)\[/c\]", apply_color_tag, t, flags=re.DOTALL)
         
-        # Handle links <<word>> - use custom dict:// URI scheme
-        t = re.sub(r"<<(.*?)>>", r'<a href="dict://\1" class="dict-link">\1</a>', t)
-        
+        # Handle dictionary cross-links <<word>> but skip {{...}} definitions
+        t = re.sub(r"(?<!\{)\<\<([^\>]+)\>\>(?!\})", r'<a href="dict://\1" class="dict-link">\1</a>', t)
+
+  
+          # ---------------- Cambridge-style placeholders ----------------
+
+        # Handle {{def}}...{{/def}} → plain text in normal color
+        t = re.sub(
+            r"\{\{def\}\}(.*?)\{\{\/def\}\}",
+            r"<span class='def-text'>\1</span>",
+            t,
+            flags=re.DOTALL
+        )
+
+
+
+        # Handle {{phrase}}...{{/phrase}} → bold for phrase names
+        t = re.sub(r"\{\{phrase\}\}(.*?)\{\{\/phrase\}\}", r"<b>\1</b>", t, flags=re.DOTALL)
+
+        # Handle {{pos}}...{{/pos}} → same as <span class='pos'>
+        t = re.sub(r"\{\{pos\}\}(.*?)\{\{\/pos\}\}", r"<span class='pos'>\1</span>", t, flags=re.DOTALL)
+
+        # Handle {{inf}}...{{/inf}} → italic (inflected forms)
+        t = re.sub(r"\{\{inf\}\}(.*?)\{\{\/inf\}\}", r"<i>\1</i>", t, flags=re.DOTALL)
+
+        # Handle {{usage}}...{{/usage}} and {{region}}...{{/region}}
+        t = re.sub(r"\{\{usage\}\}(.*?)\{\{\/usage\}\}", r"<span class='example'>\1</span>", t, flags=re.DOTALL)
+        t = re.sub(r"\{\{region\}\}(.*?)\{\{\/region\}\}", r"<span class='example'>\1</span>", t, flags=re.DOTALL)
+
+        # Remove any remaining unused Cambridge placeholders ({{xxx}} or {{/xxx}})
+        t = re.sub(r"\{\{/?[a-zA-Z0-9_]+\}\}", "", t)
+
+        # Convert [s]soundfile.wav[/s] → small speaker icon
+        t = re.sub(r"\[s\](.*?)\[/s\]", r"<span title='\1'>🔊</span>", t)
+
+        # Handle Cambridge-style <?word> → <a href="dict://word">
+        t = re.sub(r"<<\?(.*?)>>", r'<a href="dict://\1" class="dict-link">\\1</a>', t)
+
+
+        # Ensure [ref] also works like << >> (done earlier, but redundant safety)
+        t = re.sub(r"\[ref\](.*?)\[/ref\]", r'<a href="dict://\1" class="dict-link">\1</a>', t)
+      
         # Handle arrows
-        t = t.replace('→', '→')
+        t = t.replace('↑', '↑')
+
         
         return t
 
