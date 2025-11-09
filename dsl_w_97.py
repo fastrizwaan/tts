@@ -169,7 +169,48 @@ class MainWindow(Adw.ApplicationWindow):
         self._apply_theme_to_webview()
         self._load_settings()
 
-    def lighten(self, color: str, factor: float = 1.5) -> str:
+
+    def _build_theme_css(self):
+        dark = self.style_manager.get_dark()
+        bg = "#1e1e1e" if dark else "#ffffff"
+        fg = "#dddddd" if dark else "#222222"
+        link = "#89b4ff" if dark else "#005bbb"
+        border = "#444" if dark else "#ccc"
+        pos = "#9ae59a" if dark else "#228B22"
+        example = "#9ae59a" if dark else "#228B22"
+
+        return f"""
+        body {{
+            font-family: system-ui, sans-serif;
+            background-color: {bg};
+            color: {fg};
+            margin: 12px;
+        }}
+        .lemma {{ font-size: 1.3em; font-weight: bold; color: {link}; }}
+        .dict {{ float: right; font-size: 0.9em; color: #888; }}
+        .pos {{ color: {pos}; font-style: italic; }}
+        .example {{ color: {example}; font-style: italic; }}
+        .dict-link {{ color: {link}; text-decoration: none; cursor: pointer; }}
+        .dict-link:hover {{ text-decoration: underline; }}
+        ol {{ margin: 0.5em 0; padding-left: 2em; line-height: 1.6; list-style-position: outside; }}
+        li {{ margin-bottom: 0.8em; }}
+        .sub-item {{
+            margin-left: 1.5em;
+            color: {example};
+            font-style: italic;
+            line-height: 1.4;
+        }}
+        .standalone {{ margin: 0.3em 0; line-height: 1.4; font-weight: 500; }}
+        hr {{ border: none; border-top: 1px solid {border}; margin: 10px 0; }}
+        .def-text {{
+            color: {fg};
+            font-weight: 500;
+            font-style: normal;
+
+        }}
+        """
+        
+    def lighten(self, color: str, factor: float = 1.3) -> str:
         """Brighten a CSS color name or hex color safely for dark mode."""
 
         # Normalize color name → hex using Gdk.RGBA if available
@@ -210,25 +251,7 @@ class MainWindow(Adw.ApplicationWindow):
         pos = "#9ae59a" if dark else "#228B22"
         example = "#9ae59a" if dark else "#228B22"
         
-        theme_css = f"""
-        body {{
-            font-family: system-ui, sans-serif;
-            background-color: {bg};
-            color: {fg};
-            margin: 12px;
-        }}
-        .lemma {{ font-size: 1.3em; font-weight: bold; color: {link}; }}
-        .dict {{ float: right; font-size: 0.9em; color: #888; }}
-        .pos {{ color: {pos}; font-style: italic; }}
-        .example {{ color: {example}; font-style: italic; }}
-        .dict-link {{ color: {link}; text-decoration: none; cursor: pointer; }}
-        .dict-link:hover {{ text-decoration: underline; }}
-        ol {{ margin: 0.5em 0; padding-left: 2em; line-height: 1.6; list-style-position: outside; }}
-        li {{ margin-bottom: 0.8em; }}
-        .sub-item {{ margin-left: 0; margin-top: 0.3em; line-height: 1.4; }}
-        .standalone {{ margin: 0.3em 0; line-height: 1.4; font-weight: 500; }}
-        hr {{ border: none; border-top: 1px solid {border}; margin: 10px 0; }}
-        """
+        theme_css = self._build_theme_css()
         
         # Combined script: update theme CSS AND recolor spans in one go
         js = f"""
@@ -291,25 +314,7 @@ class MainWindow(Adw.ApplicationWindow):
         pos = "#9ae59a" if dark else "#228B22"
         example = "#9ae59a" if dark else "#228B22"
         
-        theme_css = f"""
-        body {{
-            font-family: system-ui, sans-serif;
-            background-color: {bg};
-            color: {fg};
-            margin: 12px;
-        }}
-        .lemma {{ font-size: 1.3em; font-weight: bold; color: {link}; }}
-        .dict {{ float: right; font-size: 0.9em; color: #888; }}
-        .pos {{ color: {pos}; font-style: italic; }}
-        .example {{ color: {example}; font-style: italic; }}
-        .dict-link {{ color: {link}; text-decoration: none; cursor: pointer; }}
-        .dict-link:hover {{ text-decoration: underline; }}
-        ol {{ margin: 0.5em 0; padding-left: 2em; line-height: 1.6; list-style-position: outside; }}
-        li {{ margin-bottom: 0.8em; }}
-        .sub-item {{ margin-left: 0; margin-top: 0.3em; line-height: 1.4; }}
-        .standalone {{ margin: 0.3em 0; line-height: 1.4; font-weight: 500; }}
-        hr {{ border: none; border-top: 1px solid {border}; margin: 10px 0; }}
-        """
+        theme_css = self._build_theme_css()
 
         # Inject live theme update into the webview
         script = f"""
@@ -368,14 +373,7 @@ class MainWindow(Adw.ApplicationWindow):
         bg = "#1e1e1e" if dark else "#ffffff"
         fg = "#dddddd" if dark else "#222222"
         
-        theme_css = f"""
-        body {{
-            font-family: system-ui, sans-serif;
-            background-color: {bg};
-            color: {fg};
-            margin: 12px;
-        }}
-        """
+        theme_css = self._build_theme_css()
 
         html = f"""
         <html>
@@ -562,25 +560,7 @@ class MainWindow(Adw.ApplicationWindow):
         pos = "#9ae59a" if dark else "#228B22"
         example = "#9ae59a" if dark else "#228B22"
         
-        theme_css = f"""
-        body {{
-            font-family: system-ui, sans-serif;
-            background-color: {bg};
-            color: {fg};
-            margin: 12px;
-        }}
-        .lemma {{ font-size: 1.3em; font-weight: bold; color: {link}; }}
-        .dict {{ float: right; font-size: 0.9em; color: #888; }}
-        .pos {{ color: {pos}; font-style: italic; }}
-        .example {{ color: {example}; font-style: italic; }}
-        .dict-link {{ color: {link}; text-decoration: none; cursor: pointer; }}
-        .dict-link:hover {{ text-decoration: underline; }}
-        ol {{ margin: 0.5em 0; padding-left: 2em; line-height: 1.6; list-style-position: outside; }}
-        li {{ margin-bottom: 0.8em; }}
-        .sub-item {{ margin-left: 0; margin-top: 0.3em; line-height: 1.4; }}
-        .standalone {{ margin: 0.3em 0; line-height: 1.4; font-weight: 500; }}
-        hr {{ border: none; border-top: 1px solid {border}; margin: 10px 0; }}
-        """
+        theme_css = self._build_theme_css()
 
         # Cache the final rendered HTML so it can be reused by on_theme_changed()
         self._last_html = f"""
