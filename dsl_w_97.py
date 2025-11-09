@@ -671,6 +671,8 @@ class MainWindow(Adw.ApplicationWindow):
         
         # Handle links <<word>> - use custom dict:// URI scheme
         t = re.sub(r"<<(.*?)>>", r'<a href="dict://\1" class="dict-link">\1</a>', t)
+        # Ensure [ref] also works like << >> (done earlier, but redundant safety)
+        t = re.sub(r"\[ref\](.*?)\[/ref\]", r'<a href="dict://\1" class="dict-link">\1</a>', t)
         
         # Handle arrows
         t = t.replace('→', '→')
