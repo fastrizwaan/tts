@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+ol { counter-reset: item; list-style: none; }
+li { counter-increment: item; padding-left: 2em; position: relative; }
+li::before { content: counter(item) '\300B'; position: relative; left: 0; }
+</style>
+</head>
+<body>
+<ol>
+  <li>item 1</li>
+  <li>Item 2</li>
+</ol>
+</body>
+</html>

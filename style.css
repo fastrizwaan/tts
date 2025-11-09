@@ -61,12 +61,6 @@
   color: #4c1d95;
 }
 
-.dict-name {
-  color: #f97316;
-  font-weight: 500;
-  font-size: smaller;
-}
-
 .def-label {
   line-height: 1.12;
   margin-top: 1px;
@@ -93,6 +87,21 @@
 .dict-name {
   color: #f97316;
   font-weight: 600;
+}
+ol {
+    margin-left: 1.5em;
+    padding-left: 0.5em;
+    line-height: 1.4;
+}
+li {
+    margin-bottom: 0.3em;
+}
+p {
+    margin: 0.2em 0;
+}
+.example {
+    color: #228B22;
+    font-style: italic;
 }
 
 
