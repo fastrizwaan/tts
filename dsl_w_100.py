@@ -100,11 +100,12 @@ class DictionaryManager:
                         entries.setdefault(w, []).extend(defs)
 
         for raw in content.splitlines():
-            line = raw.rstrip()
+            line = raw 
             
             # Skip empty lines and all header lines (starting with #)
-            if not line or line.startswith("#"):
+            if line.startswith("#") or line.startswith("\ufeff#"):
                 continue
+
                 
             # Entry separator
             if line == "-":
@@ -115,7 +116,7 @@ class DictionaryManager:
             # Definition line (starts with whitespace)
             if raw and raw[0] in (' ', '\t'):
                 in_def = True
-                cleaned = raw.lstrip()
+                cleaned = raw
                 if cleaned:
                     defs.append(cleaned)
                 continue
@@ -169,6 +170,18 @@ class MainWindow(Adw.ApplicationWindow):
         self._apply_theme_to_webview()
         self._load_settings()
 
+    def _dir_attr(self, text: str) -> str:
+        """
+        Return ' dir="rtl"' when the line is predominantly RTL (Arabic/Hebrew family)
+        and contains no Latin letters; otherwise return ''.
+        Works on raw DSL text (before HTML tag insertion).
+        """
+        # Ignore DSL tags to inspect the actual text content
+        s = re.sub(r'\[[^\]]+\]', '', text)  # strip [tag]… style DSL tokens quickly
+        # detect RTL scripts; allow digits/punct; exclude Latin letters if present
+        has_rtl = re.search(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u0590-\u05FF]', s)
+        has_latin = re.search(r'[A-Za-z\u00C0-\u024F]', s)
+        return ' dir="rtl"' if has_rtl and not has_latin else ''
 
     def _build_theme_css(self):
         dark = self.style_manager.get_dark()
@@ -180,45 +193,103 @@ class MainWindow(Adw.ApplicationWindow):
         example = "#9ae59a" if dark else "#228B22"
 
         return f"""
+        :root {{
+            --base-indent: 0.4em;
+        }}
+
         body {{
             font-family: system-ui, sans-serif;
             background-color: {bg};
             color: {fg};
             margin: 12px;
         }}
-        .lemma {{ font-size: 1.3em; font-weight: bold; color: {link}; }}
-        .dict {{ float: right; font-size: 0.9em; color: #888; }}
-        .pos {{ color: {pos}; font-style: italic; }}
-        .example {{ color: {example}; font-style: italic; }}
-        .dict-link {{ color: {link}; text-decoration: none; cursor: pointer; }}
-        .dict-link:hover {{ text-decoration: underline; }}
-        ol {{ margin: 0.5em 0; padding-left: 2em; line-height: 1.6; list-style-position: outside; }}
-        li {{ margin-bottom: 0.8em; }}
-        .sub-item {{
-            font-style: italic;
-            line-height: 1.4;
-            color: {example};
+
+        .lemma {{
+            font-size: 1.3em;
+            font-weight: bold;
+            color: {link};
         }}
 
-        /* Tight proportional indentation for nested [mX] levels */
-        .sub-item[data-level="2"] {{ margin-left: 1.0em; }}
-        .sub-item[data-level="3"] {{ margin-left: 1.5em; }}
-        .sub-item[data-level="4"] {{ margin-left: 2.0em; }}
-        .sub-item[data-level="5"] {{ margin-left: 2.5em; }}
-        .sub-item[data-level="6"] {{ margin-left: 3.0em; }}
-        .sub-item[data-level="7"] {{ margin-left: 3.5em; }}
-        .sub-item[data-level="8"] {{ margin-left: 4.0em; }}
-        .sub-item[data-level="9"] {{ margin-left: 4.5em; }}
+        .dict {{
+            float: right;
+            font-size: 0.9em;
+            color: #888;
+        }}
 
-        .standalone {{ margin: 0.3em 0; line-height: 1.4; font-weight: 500; }}
-        hr {{ border: none; border-top: 1px solid {border}; margin: 10px 0; }}
+        .pos {{
+            color: {pos};
+            font-style: italic;
+            margin-left: 0 !important;
+            padding-left: 0 !important;
+            margin-top: 0.2em;
+            margin-bottom: 0.2em;
+        }}
+
+        .example {{
+            color: {example};
+            font-style: italic;
+        }}
+
+        .dict-link {{
+            color: {link};
+            text-decoration: none;
+            cursor: pointer;
+        }}
+        .dict-link:hover {{
+            text-decoration: underline;
+        }}
+        [data-level] {{
+            white-space: pre-wrap;
+            display: block;
+            line-height: 1.5;
+        }}
+
+        /* GoldenDict-like indentation: about 0.6em per level */
+        [data-level="0"] {{ margin-left: 0.0em !important; }}
+        [data-level="1"] {{ margin-left: 0.4em !important; }}
+        [data-level="2"] {{ margin-left: 0.8em !important; }}
+        [data-level="3"] {{ margin-left: 1.2em !important; }}
+        [data-level="4"] {{ margin-left: 1.6em !important; }}
+        [data-level="5"] {{ margin-left: 2.0em !important; }}
+        [data-level="6"] {{ margin-left: 2.4em !important; }}
+        [data-level="7"] {{ margin-left: 2.8em !important; }}
+        [data-level="8"] {{ margin-left: 3.2em !important; }}
+        [data-level="9"] {{ margin-left: 3.6em !important; }}
+
+        .standalone, .pos, .sub-item {{
+            padding-left: 0;
+            margin-left: 0;
+        }}
+
+        hr {{
+            border: none;
+            border-top: 1px solid {border};
+            margin: 10px 0;
+        }}
+
         .def-text {{
             color: {fg};
             font-weight: 500;
             font-style: normal;
-
         }}
+        /* --- Bidirectional language fix --- */
+        [dir="rtl"], .rtl, span[lang="ar"], span[lang="fa"], span[lang="ur"], span[lang="he"] {{
+            direction: rtl;
+            text-align: right;
+            unicode-bidi: isolate-override; /* stronger than isolate for WebKit */
+        }}
+
+        [dir="ltr"], .ltr {{
+            direction: ltr;
+            text-align: left;
+            unicode-bidi: isolate;
+        }}
+
         """
+
+
+
+
         
     def lighten(self, color: str, factor: float = 1.3) -> str:
         """Brighten a CSS color name or hex color safely for dark mode."""
@@ -446,36 +517,6 @@ class MainWindow(Adw.ApplicationWindow):
         self.perform_search(q)
 
 
-    def _get_base_css(self):
-        """Unified base CSS used by all HTML renderers."""
-        return """
-        :root {
-            --bg: VAR_BG;
-            --fg: VAR_FG;
-            --link: VAR_LINK;
-            --border: VAR_BORDER;
-            --pos: VAR_POS;
-            --example: VAR_EXAMPLE;
-        }
-        body {
-            font-family: system-ui, sans-serif;
-            background-color: var(--bg);
-            color: var(--fg);
-            margin: 12px;
-        }
-        .lemma { font-size: 1.3em; font-weight: bold; color: var(--link); }
-        .dict { float: right; font-size: 0.9em; color: #888; }
-        .pos { color: var(--pos); font-style: italic; }
-        .example { color: var(--example); font-style: italic; }
-        .dict-link { color: var(--link); text-decoration: none; cursor: pointer; }
-        .dict-link:hover { text-decoration: underline; }
-        ol { margin: 0.5em 0; padding-left: 2em; line-height: 1.6; list-style-position: outside; }
-        li { margin-bottom: 0.8em; }
-        .sub-item { margin-left: 0; margin-top: 0.3em; line-height: 1.4; }
-        .standalone { margin: 0.3em 0; line-height: 1.4; font-weight: 500; }
-        hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
-        """
-
     # ------------------- HTML rendering ----------------------
 
     def build_html(self, results):
@@ -485,77 +526,35 @@ class MainWindow(Adw.ApplicationWindow):
         for word, dict_data in results[:100]:
             for dname, defs, color in dict_data:
                 defs_html = ""
-                in_list = False
-                current_li_content = []
 
                 for raw in defs:
-                    line = raw.strip()
-                    lvl_match = re.match(r'^\[m(\d+)\]', line)
-                    lvl = int(lvl_match.group(1)) if lvl_match else None
-                    inner = re.sub(r'^\[m\d+\](.*?)\[/m\d*\]\s*$', r'\1', line, flags=re.DOTALL).strip()
+                    # strip non-visual DSL wrappers first
+                    raw = re.sub(r'\[/?com\]', '', raw)
+                    raw = re.sub(r'\[\*\]|\[/\*\]|\[\*/?\]', '', raw)
 
-                    is_pos_header = (lvl == 1) and ("[p]" in inner or "■" in inner)
-                    is_numbered = bool(num_pat.match(inner))
+                    line = raw
+                    # detect [mX] even if there's leading tabs/spaces
+                    lvl_match = re.match(r'^\s*\[m(\d+)\]', line)
+                    lvl = int(lvl_match.group(1)) if lvl_match else 0
+
+                    # strip just the m-tags (tolerate optional leading spaces)
+                    inner = re.sub(r'^\s*\[m\d+\]', '', line)
+                    inner = re.sub(r'\[/m\d*\]\s*$', '', inner)
+
+                    is_pos_header = (lvl == 1) and ("[p]" in inner or "■" in inner or "[b]" in inner)
+                    is_numbered  = bool(num_pat.match(inner))
                     is_separator = bool(re.fullmatch(r'[—\-]{3,}', inner))
 
-                    # ---------------- POS / sense headers ----------------
                     if is_pos_header:
-                        # Close any running list before a new part of speech or section
-                        if current_li_content:
-                            defs_html += "<li>" + "".join(current_li_content) + "</li>"
-                            current_li_content = []
-                        if in_list:
-                            defs_html += "</ol>"
-                            in_list = False
-
-                        defs_html += f"<div class='pos'>{self.render_dsl_text(inner)}</div>"
+                        defs_html += f"<div class='pos' data-level='{lvl}'{self._dir_attr(inner)}>{self.render_dsl_text(inner)}</div>"
                         continue
 
-                    # ---------------- Separator (horizontal rule) ----------------
                     if is_separator:
-                        if current_li_content:
-                            defs_html += "<li>" + "".join(current_li_content) + "</li>"
-                            current_li_content = []
-                        if in_list:
-                            defs_html += "</ol>"
-                            in_list = False
                         defs_html += "<hr>"
                         continue
 
-                    # ---------------- Numbered definitions (1. 2. 3. etc.) ----------------
-                    if is_numbered and lvl in (1, 2):
-                        # Close any pending li before starting new
-                        if current_li_content:
-                            defs_html += "<li>" + "".join(current_li_content) + "</li>"
-                            current_li_content = []
-                        # If list not open, start a new one (numbering restarts here)
-                        if not in_list:
-                            defs_html += "<ol>"
-                            in_list = True
-                        current_li_content.append(self.render_dsl_text(inner, is_main=True, headword=word))
-                        continue
+                    defs_html += f"<div class='standalone' data-level='{lvl}'{self._dir_attr(inner)}>{self.render_dsl_text(inner, headword=word)}</div>"
 
-                    # ---------------- Sub-items ([m3+] notes etc.) ----------------
-                    if lvl and lvl >= 3:
-                        current_li_content.append(
-                            f"<div class='sub-item' data-level='{lvl}'>{self.render_dsl_text(inner, headword=word)}</div>"
-                        )
-                        continue
-
-                    # ---------------- Standalone fallback ----------------
-                    if in_list:
-                        # Append inline note below current li
-                        current_li_content.append(
-                            f"<div class='sub-item' data-level='{lvl or 2}'>{self.render_dsl_text(inner, headword=word)}</div>"
-                        )
-                    else:
-                        defs_html += f"<div class='standalone'>{self.render_dsl_text(inner, headword=word)}</div>"
-
-                # Close any remaining items/lists
-                if current_li_content:
-                    defs_html += "<li>" + "".join(current_li_content) + "</li>"
-                if in_list:
-                    defs_html += "</ol>"
 
                 clean_word = self._unescape_dsl_text(word)
                 body += f"""
@@ -588,6 +587,10 @@ class MainWindow(Adw.ApplicationWindow):
 
 
 
+
+
+
+
     def _unescape_dsl_text(self, text: str) -> str:
         """Unescape DSL literal escapes like \\(, \\), \\[, \\] for display."""
         return (text
@@ -610,14 +613,14 @@ class MainWindow(Adw.ApplicationWindow):
         t = re.sub(r'\[m\d+\](.*?)\[/m\d*\]', r'\1', t, flags=re.DOTALL)
         t = re.sub(r'\[/?m\d+\]', '', t)
 
-        # --- CRUCIAL: remove leading numbering BEFORE converting [b]/[i]/[u] to HTML ---
+        # --- Remove leading numbering or bullets before formatting ---
         if is_main:
             # optional wrappers [b]/[i]/[u], then number token (1. / 1) / 1》), optional closing wrappers
             t = re.sub(r'^\s*(?:\[(?:b|i|u)\]\s*)*\d+[\.\)》]\s*(?:\[/[biu]\]\s*)*', '', t)
             # bullets like "■ "
             t = re.sub(r'^\s*■\s*', '', t)
 
-        # Formatting (run AFTER number stripping)
+        # --- Formatting tags ---
         t = re.sub(r"\[b\](.*?)\[/b\]", r"<b>\1</b>", t, flags=re.DOTALL)
         t = re.sub(r"\[i\](.*?)\[/i\]", r"<i>\1</i>", t, flags=re.DOTALL)
         t = re.sub(r"\[u\](.*?)\[/u\]", r"<u>\1</u>", t, flags=re.DOTALL)
@@ -630,7 +633,7 @@ class MainWindow(Adw.ApplicationWindow):
         t = re.sub(r"\[trn\](.*?)\[/trn\]", r"\1", t, flags=re.DOTALL)
         t = re.sub(r"\[com\](.*?)\[/com\]", r"\1", t, flags=re.DOTALL)
 
-        # Color tags
+        # --- Color tags ---
         def apply_color_tag(match):
             color = match.group(1).strip()
             text = match.group(2)
@@ -646,11 +649,22 @@ class MainWindow(Adw.ApplicationWindow):
 
         t = re.sub(r"\[c\s+([^\]]+)\](.*?)\[/c\]", apply_color_tag, t, flags=re.DOTALL)
 
-        # Links
+        # --- Links ---
         t = re.sub(r"<<(.*?)>>", r'<a href="dict://\1" class="dict-link">\1</a>', t)
         t = re.sub(r"\[ref\](.*?)\[/ref\]", r'<a href="dict://\1" class="dict-link">\1</a>', t)
 
-        return t.strip()
+        # --- Preserve leading spaces visually ---
+        t = re.sub(r'^( +)', lambda m: '&nbsp;' * len(m.group(1)), t)
+
+        # --- Auto-wrap right-to-left text sequences ---
+        # Detect Arabic, Persian, Urdu, Hebrew, etc.
+        def wrap_rtl(match):
+            return f'<span dir="rtl">{match.group(0)}</span>'
+
+        t = re.sub(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u0590-\u05FF]+', wrap_rtl, t)
+
+        return t
+
 
 
 

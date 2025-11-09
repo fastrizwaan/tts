@@ -1,0 +1,67 @@
+--- dsl_w_99.py.orig	2025-01-01 00:00:00.000000000 +0000
++++ dsl_w_99.py	2025-01-01 00:00:01.000000000 +0000
+@@ -142,22 +142,13 @@
+             margin-bottom: 0.2em;
+         }}
+ 
+-        /* Base indentation */
++        /* Base indentation - all [m3] content should align */
+         [data-level="0"] {{ margin-left: 0.0em; }}
+         [data-level="1"] {{ margin-left: 0.0em; }}
+         [data-level="2"] {{ margin-left: 1.0em; }}
+-        [data-level="3"] {{ margin-left: 1.4em; }}
+-        [data-level="4"] {{ margin-left: 2.0em; }}
+-        [data-level="5"] {{ margin-left: 2.6em; }}
+-        [data-level="6"] {{ margin-left: 3.2em; }}
+-        [data-level="7"] {{ margin-left: 3.8em; }}
+-        [data-level="8"] {{ margin-left: 4.4em; }}
+-        [data-level="9"] {{ margin-left: 5.0em; }}
+-
+-        /* Slight indent for example lines ("— he went...") */
+-        [data-level][data-example="true"] {{
+-            margin-left: calc((var(--base-indent) * 1.4) + (0.5em * var(--level, 0)));
+-        }}
+-
+-        /* Deeper indent for bullet lines ("• Syn:") */
+-        [data-level][data-bullet="true"] {{
+-            margin-left: calc((var(--base-indent) * 2.2) + (0.7em * var(--level, 0)));
+-        }}
++        [data-level="3"] {{ margin-left: 2.0em; }}
++        [data-level="4"] {{ margin-left: 3.0em; }}
++        [data-level="5"] {{ margin-left: 4.0em; }}
++        [data-level="6"] {{ margin-left: 5.0em; }}
++        [data-level="7"] {{ margin-left: 6.0em; }}
++        [data-level="8"] {{ margin-left: 7.0em; }}
++        [data-level="9"] {{ margin-left: 8.0em; }}
+ 
+@@ -489,13 +480,7 @@
+                     is_numbered  = bool(num_pat.match(inner))
+                     is_separator = bool(re.fullmatch(r'[—\-]{3,}', inner))
+ 
+-                    # detect example lines (dash/en dash/arrow) even if a tag follows
+-                    is_example_line = bool(re.match(r'^\s*[-—→]\s*(?:\[|[^\s])', inner))
+-                    # bullet-style comment headers (• …), not examples
+-                    is_bullet_line  = ("•" in inner) and not is_example_line
+-
+-                    attr_bullet  = " data-bullet='true'"  if is_bullet_line  else ""
+-                    attr_example = " data-example='true'" if is_example_line else ""
++                    # No special attributes needed - rely purely on data-level
+ 
+                     if is_pos_header:
+-                        defs_html += f"<div class='pos' data-level='{lvl}'{attr_bullet}{attr_example}>{self.render_dsl_text(inner)}</div>"
++                        defs_html += f"<div class='pos' data-level='{lvl}'>{self.render_dsl_text(inner)}</div>"
+                         continue
+@@ -506,11 +491,11 @@
+ 
+                     if is_numbered and lvl <= 2:
+-                        defs_html += f"<div class='def-num' data-level='{lvl}'{attr_bullet}{attr_example}>{self.render_dsl_text(inner, headword=word)}</div>"
++                        defs_html += f"<div class='def-num' data-level='{lvl}'>{self.render_dsl_text(inner, headword=word)}</div>"
+                         continue
+ 
+                     if lvl >= 3:
+-                        defs_html += f"<div class='sub-item' data-level='{lvl}'{attr_bullet}{attr_example}>{self.render_dsl_text(inner, headword=word)}</div>"
++                        defs_html += f"<div class='sub-item' data-level='{lvl}'>{self.render_dsl_text(inner, headword=word)}</div>"
+                         continue
+ 
+-                    defs_html += f"<div class='standalone' data-level='{lvl}'{attr_bullet}{attr_example}>{self.render_dsl_text(inner, headword=word)}</div>"
++                    defs_html += f"<div class='standalone' data-level='{lvl}'>{self.render_dsl_text(inner, headword=word)}</div>"

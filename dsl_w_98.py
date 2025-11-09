@@ -195,20 +195,18 @@ class MainWindow(Adw.ApplicationWindow):
         ol {{ margin: 0.5em 0; padding-left: 2em; line-height: 1.6; list-style-position: outside; }}
         li {{ margin-bottom: 0.8em; }}
         .sub-item {{
-            font-style: italic;
-            line-height: 1.4;
-            color: {example};
+          font-style: italic;
+          line-height: 1.25;
+          color: {example};
         }}
 
-        /* Tight proportional indentation for nested [mX] levels */
-        .sub-item[data-level="2"] {{ margin-left: 1.0em; }}
-        .sub-item[data-level="3"] {{ margin-left: 1.5em; }}
-        .sub-item[data-level="4"] {{ margin-left: 2.0em; }}
-        .sub-item[data-level="5"] {{ margin-left: 2.5em; }}
-        .sub-item[data-level="6"] {{ margin-left: 3.0em; }}
-        .sub-item[data-level="7"] {{ margin-left: 3.5em; }}
-        .sub-item[data-level="8"] {{ margin-left: 4.0em; }}
-        .sub-item[data-level="9"] {{ margin-left: 4.5em; }}
+        .sub-item[data-level="3"] {{ margin-left: 1.1em; }}
+        .sub-item[data-level="4"] {{ margin-left: 1.3em; }}
+        .sub-item[data-level="5"] {{ margin-left: 1.5em; }}
+        .sub-item[data-level="6"] {{ margin-left: 1.7em; }}
+        .sub-item[data-level="7"] {{ margin-left: 1.9em; }}
+        .sub-item[data-level="8"] {{ margin-left: 2.1em; }}
+        .sub-item[data-level="9"] {{ margin-left: 2.4em; }}
 
         .standalone {{ margin: 0.3em 0; line-height: 1.4; font-weight: 500; }}
         hr {{ border: none; border-top: 1px solid {border}; margin: 10px 0; }}
@@ -485,8 +483,6 @@ class MainWindow(Adw.ApplicationWindow):
         for word, dict_data in results[:100]:
             for dname, defs, color in dict_data:
                 defs_html = ""
-                in_list = False
-                current_li_content = []
 
                 for raw in defs:
                     line = raw.strip()
@@ -494,68 +490,35 @@ class MainWindow(Adw.ApplicationWindow):
                     lvl = int(lvl_match.group(1)) if lvl_match else None
                     inner = re.sub(r'^\[m\d+\](.*?)\[/m\d*\]\s*$', r'\1', line, flags=re.DOTALL).strip()
 
-                    is_pos_header = (lvl == 1) and ("[p]" in inner or "■" in inner)
+                    # detect section / part-of-speech headers
+                    is_pos_header = (lvl == 1) and (
+                        "[p]" in inner or "■" in inner or "[b]" in inner
+                    )
+                    # detect numbered entries like "1." "2)" "3》"
                     is_numbered = bool(num_pat.match(inner))
+                    # detect horizontal separator
                     is_separator = bool(re.fullmatch(r'[—\-]{3,}', inner))
 
-                    # ---------------- POS / sense headers ----------------
                     if is_pos_header:
-                        # Close any running list before a new part of speech or section
-                        if current_li_content:
-                            defs_html += "<li>" + "".join(current_li_content) + "</li>"
-                            current_li_content = []
-                        if in_list:
-                            defs_html += "</ol>"
-                            in_list = False
-
                         defs_html += f"<div class='pos'>{self.render_dsl_text(inner)}</div>"
                         continue
 
-                    # ---------------- Separator (horizontal rule) ----------------
                     if is_separator:
-                        if current_li_content:
-                            defs_html += "<li>" + "".join(current_li_content) + "</li>"
-                            current_li_content = []
-                        if in_list:
-                            defs_html += "</ol>"
-                            in_list = False
                         defs_html += "<hr>"
                         continue
 
-                    # ---------------- Numbered definitions (1. 2. 3. etc.) ----------------
-                    if is_numbered and lvl in (1, 2):
-                        # Close any pending li before starting new
-                        if current_li_content:
-                            defs_html += "<li>" + "".join(current_li_content) + "</li>"
-                            current_li_content = []
-                        # If list not open, start a new one (numbering restarts here)
-                        if not in_list:
-                            defs_html += "<ol>"
-                            in_list = True
-                        current_li_content.append(self.render_dsl_text(inner, is_main=True, headword=word))
+                    if is_numbered:
+                        # keep the 1./2./3. marker inline
+                        defs_html += f"<div class='def-num'>{self.render_dsl_text(inner, headword=word)}</div>"
                         continue
 
-                    # ---------------- Sub-items ([m3+] notes etc.) ----------------
+                    # sub-items ([m3+] explanatory bullets)
                     if lvl and lvl >= 3:
-                        current_li_content.append(
-                            f"<div class='sub-item' data-level='{lvl}'>{self.render_dsl_text(inner, headword=word)}</div>"
-                        )
+                        defs_html += f"<div class='sub-item' data-level='{lvl}'>{self.render_dsl_text(inner, headword=word)}</div>"
                         continue
 
-                    # ---------------- Standalone fallback ----------------
-                    if in_list:
-                        # Append inline note below current li
-                        current_li_content.append(
-                            f"<div class='sub-item' data-level='{lvl or 2}'>{self.render_dsl_text(inner, headword=word)}</div>"
-                        )
-                    else:
-                        defs_html += f"<div class='standalone'>{self.render_dsl_text(inner, headword=word)}</div>"
-
-                # Close any remaining items/lists
-                if current_li_content:
-                    defs_html += "<li>" + "".join(current_li_content) + "</li>"
-                if in_list:
-                    defs_html += "</ol>"
+                    # plain line
+                    defs_html += f"<div class='standalone'>{self.render_dsl_text(inner, headword=word)}</div>"
 
                 clean_word = self._unescape_dsl_text(word)
                 body += f"""
@@ -582,6 +545,7 @@ class MainWindow(Adw.ApplicationWindow):
         </html>
         """
         return self._last_html
+
 
 
 
