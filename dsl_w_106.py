@@ -90,18 +90,10 @@ class DSLRenderer:
             r = int(color[0:2], 16) / 255.0
             g = int(color[2:4], 16) / 255.0
             b = int(color[4:6], 16) / 255.0
-
         h, l, s = colorsys.rgb_to_hls(r, g, b)
-        # Instead of l * factor (which clamps to white too fast),
-        # move l proportionally toward 1.0 based on factor.
-        if factor > 1.0:
-            l = l + (1.0 - l) * (factor - 1) / factor
-        elif factor < 1.0:
-            l = l * factor
-
+        l = min(1.0, l * factor)
         r, g, b = colorsys.hls_to_rgb(h, l, s)
         return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
-
 
     # ------------------------------------------------------------
     # Tag open/close logic
@@ -116,45 +108,74 @@ class DSLRenderer:
         elif tag == "c":
             color = (param or "inherit").strip()
             rgba = Gdk.RGBA()
+
+            # --- Replace too-dark named colors with lighter equivalents (dark mode) ---
+            if self.dark_mode and color:
+                pname = color.lower().strip()
+                lighten_map = {
+                    "navy": "royalblue",
+                    "darkblue": "dodgerblue",
+                    "mediumblue": "dodgerblue",
+                    "midnightblue": "cornflowerblue",
+                    "indigo": "mediumslateblue",
+                    "darkviolet": "orchid",
+                    "blueviolet": "mediumpurple",
+                    "darkmagenta": "violet",
+                    "darkred": "tomato",
+                    "maroon": "indianred",
+                    "darkgreen": "seagreen",
+                    "darkolivegreen": "yellowgreen",
+                    "darkslategray": "cadetblue",
+                    "darkslateblue": "slateblue",
+                    "purple": "mediumorchid",
+                }
+                if pname in lighten_map:
+                    color = lighten_map[pname]
+
+            # --- Replace too-light named colors with darker equivalents (light mode) ---
+            elif not self.dark_mode and color:
+                pname = color.lower().strip()
+                darken_map = {
+                    "aliceblue": "steelblue",
+                    "antiquewhite": "peru",
+                    "azure": "deepskyblue",
+                    "beige": "saddlebrown",
+                    "ghostwhite": "slategray",
+                    "ivory": "darkkhaki",
+                    "lightgray": "gray",
+                    "lightyellow": "goldenrod",
+                    "palegreen": "seagreen",
+                    "white": "gray",
+                    "yellow": "darkgoldenrod",
+                }
+                if pname in darken_map:
+                    color = darken_map[pname]
+
+            # --- Convert to hex for consistent output ---
             if rgba.parse(color):
-                # Normalize to hex
                 color = "#{:02x}{:02x}{:02x}".format(
                     int(rgba.red * 255),
                     int(rgba.green * 255),
                     int(rgba.blue * 255)
                 )
 
-            # --- Adaptive adjustment for dark mode ---
-            if self.dark_mode and param:
-                pname = param.lower()
-                factor = 1.0
-
-                # Parse base RGB for luminance check
+            # --- Minor tone balancing ---
+            if param:
                 rgba.parse(color)
                 r, g, b = rgba.red, rgba.green, rgba.blue
-                luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b  # perceptual brightness
+                luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                factor = 1.0
 
-                # Very dark colors → lighten
-                if luminance < 0.25 or "dark" in pname or re.match(r"#0[0-9a-f]", pname):
-                    factor = 1.7
-                # Mid-dark classics that need help
-                elif pname in {
-                    "navy", "midnightblue", "indigo", "purple", "darkviolet",
-                    "blueviolet", "darkmagenta", "darkred", "maroon",
-                    "darkgreen", "darkolivegreen", "darkslategray", "darkslateblue"
-                }:
-                    factor = 3.2
-                # Too-bright pastel tones → darken slightly
-                elif luminance > 0.85 or pname in {
-                    "aqua", "azure", "aliceblue", "ghostwhite", "ivory", "honeydew",
-                    "mintcream", "white", "lightyellow", "lemonchiffon"
-                }:
-                    factor = 0.75
+                if self.dark_mode and luminance < 0.25:
+                    factor = 1.5
+                elif not self.dark_mode and luminance > 0.9:
+                    factor = 0.8
 
                 if factor != 1.0:
                     color = self._lighten(color, factor)
 
             return f"<span style='color:{color}'>"
+
 
 
 
