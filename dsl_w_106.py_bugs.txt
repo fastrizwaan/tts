@@ -1,0 +1,15 @@
+dsl dictionary bugs:
+
+1. You're welcome (en-arb)
+2. Smart Thesaurus 📖 En-En_Cambridge Advanced Learners Dictionary (links not working level 3 art)
+
+art
+📖 en-arb-enwiktionary (the below is the right rendering. but 
+art ⟨n⟩ (activity)
+فن ⟨m⟩ /fann/, \[plural\] فنون /funuun/
+
+
+ ⟨m⟩ /fann/, \[plural\] فنون /funuun/فن ⟨m⟩ /fann/, \[plural\] فنون /funuun/
+
+perhaps add an arabic space or عَرَبِيّ or something at the start to make it right aligned
+ فن  

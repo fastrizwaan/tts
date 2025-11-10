@@ -129,7 +129,6 @@ class DSLRenderer:
                     "darkslateblue": "slateblue",
                     "purple": "mediumorchid",
                     "azure": "deepskyblue",
-                    "aliceblue": "steelblue",
                 }
                 if pname in lighten_map:
                     color = lighten_map[pname]

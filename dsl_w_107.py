@@ -652,7 +652,7 @@ class MainWindow(Adw.ApplicationWindow):
         return False
 
     def on_settings(self, *_):
-        dlg = SettingsDialog(self, self.dict_manager.dictionaries.keys())
+        dlg = SettingsDialog(self, getattr(self, 'dictionaries', None))
         dlg.present()
 
     def _apply_theme_to_webview(self):
@@ -674,18 +674,30 @@ class MainWindow(Adw.ApplicationWindow):
             return
         try:
             cfg = json.load(open(CONFIG_FILE))
-            for d in cfg.get("dictionaries", []):
-                p = d["path"]
-                c = d.get("color", "default")
-                if os.path.exists(p):
-                    self.dict_manager.load_dictionary(p, c)
+            self.dictionaries = cfg.get("dictionaries", [])
+            
+            # Load only enabled dictionaries into dict_manager
+            for d in self.dictionaries:
+                if d.get("enabled", True):
+                    p = d["path"]
+                    c = d.get("color", "default")
+                    if os.path.exists(p):
+                        self.dict_manager.load_dictionary(p, c)
         except Exception as e:
             print("Settings load error:", e)
+            self.dictionaries = []
 
     def save_settings(self):
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        arr = [{"path": p, "color": info["color"]} for p, info in self.dict_manager.dictionaries.items()]
-        json.dump({"dictionaries": arr}, open(CONFIG_FILE, "w"))
+        # Get dictionaries list from settings dialog if available
+        if hasattr(self, 'dictionaries'):
+            dict_list = self.dictionaries
+        else:
+            # Fallback: build from dict_manager
+            dict_list = [{"path": p, "color": info["color"], "enabled": True} 
+                        for p, info in self.dict_manager.dictionaries.items()]
+        
+        json.dump({"dictionaries": dict_list}, open(CONFIG_FILE, "w"), indent=2)
 
 
 # ============================================================
@@ -702,48 +714,47 @@ class SettingsDialog(Adw.PreferencesWindow):
       - Theme selection (System/Light/Dark)
       - Enable/disable toggle per dictionary
       - Priority reorder buttons (Up/Down)
+      - Remove dictionary button
       - Metadata display (language pair, entry count)
-      - Add new dictionaries
+      - Add new dictionaries with .dsl and .dsl.dz support
       - Auto-refresh + persistence
     """
 
-    SETTINGS_FILE = GLib.get_user_config_dir() + "/dsl_reader_settings.json"
-
     def __init__(self, app, dictionaries=None):
         super().__init__(title="Settings", transient_for=app)
-        self.set_default_size(560, 520)
+        self.set_default_size(600, 550)
         self.set_modal(True)
+        self.set_search_enabled(False)
 
         self.app = app
         self.style_manager = Adw.StyleManager.get_default()
 
-        # Accept dictionary data
-        if dictionaries is not None:
-            self.dictionaries = []
-            for d in dictionaries:
-                if isinstance(d, dict):
-                    self.dictionaries.append(d)
-                else:
-                    self.dictionaries.append({
-                        "name": getattr(d, "name", str(d)),
-                        "path": str(getattr(d, "path", d)),
-                        "enabled": getattr(d, "enabled", True),
-                        "meta": getattr(d, "meta", {}),
-                    })
+        # Initialize dictionaries list
+        if dictionaries is not None and isinstance(dictionaries, list):
+            # If passed as list, use it directly
+            self.dictionaries = dictionaries
+        elif hasattr(app, "dictionaries"):
+            # Use app's dictionary list
+            self.dictionaries = app.dictionaries
         else:
-            self.dictionaries = getattr(app, "dictionaries", [])
+            # Load from config file or initialize empty
+            self.dictionaries = []
+            self.load_settings()
 
         # === Preferences Page ===
         self.page = Adw.PreferencesPage()
         self.set_content(self.page)
 
         # === Theme Section ===
-        self.theme_group = Adw.PreferencesGroup(title="Theme")
+        self.theme_group = Adw.PreferencesGroup(
+            title="Appearance", 
+            description="Customize the visual theme"
+        )
         self.page.add(self.theme_group)
 
         self.theme_row = Adw.ComboRow(
-            title="Theme mode",
-            subtitle="Choose color scheme",
+            title="Theme",
+            subtitle="Choose light or dark mode",
             model=Gtk.StringList.new(["System", "Light", "Dark"]),
         )
         self.theme_row.set_selected(self._current_theme_index())
@@ -751,18 +762,33 @@ class SettingsDialog(Adw.PreferencesWindow):
         self.theme_group.add(self.theme_row)
 
         # === Dictionaries Section ===
-        self.dict_group = Adw.PreferencesGroup(title="Dictionaries")
+        self.dict_group = Adw.PreferencesGroup(
+            title="Dictionaries",
+            description="Manage your dictionary sources • Higher position = higher priority"
+        )
         self.page.add(self.dict_group)
 
-        # List container (no reorderable property in GTK4)
+        # List container with rounded corners
         self.dict_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.dict_list.add_css_class("boxed-list")
+        
+        # Empty state placeholder
+        self.empty_row = Adw.ActionRow(
+            title="No dictionaries loaded",
+            subtitle="Click 'Add Dictionary' below to get started",
+        )
+        self.empty_row.set_sensitive(False)
+        
         self.dict_group.add(self.dict_list)
 
         self._populate_dictionaries()
 
-        # Add dictionary button
-        add_button = Gtk.Button(label="Add Dictionary…")
+        # Add dictionary button with icon
+        add_button = Gtk.Button(label="Add Dictionary…", halign=Gtk.Align.CENTER)
+        add_button.set_icon_name("list-add-symbolic")
+        add_button.add_css_class("pill")
         add_button.add_css_class("suggested-action")
+        add_button.set_margin_top(12)
         add_button.connect("clicked", self.on_add_dictionary)
         self.dict_group.add(add_button)
 
@@ -807,8 +833,12 @@ class SettingsDialog(Adw.PreferencesWindow):
     # ==========================================================
     def _populate_dictionaries(self):
         self.clear_listbox(self.dict_list)
-        for idx, d in enumerate(self.dictionaries):
-            self.dict_list.append(self._make_dict_row(d, idx))
+        
+        if not self.dictionaries:
+            self.dict_list.append(self.empty_row)
+        else:
+            for idx, d in enumerate(self.dictionaries):
+                self.dict_list.append(self._make_dict_row(d, idx))
 
     def _make_dict_row(self, d, idx):
         """Build one row for the dictionary list."""
@@ -827,21 +857,34 @@ class SettingsDialog(Adw.PreferencesWindow):
         )
 
         # Switch toggle
-        switch = Gtk.Switch(active=d.get("enabled", True))
+        switch = Gtk.Switch(active=d.get("enabled", True), valign=Gtk.Align.CENTER)
         switch.connect("state-set", self.on_dict_toggled, d)
+        switch.set_tooltip_text("Enable/disable dictionary")
         row.add_suffix(switch)
 
+        # Control buttons box
+        control_box = Gtk.Box(spacing=4, valign=Gtk.Align.CENTER)
+        
         # Reorder controls (Up/Down)
         up_btn = Gtk.Button(icon_name="go-up-symbolic")
         down_btn = Gtk.Button(icon_name="go-down-symbolic")
+        up_btn.add_css_class("flat")
+        down_btn.add_css_class("flat")
         up_btn.set_tooltip_text("Move up (higher priority)")
         down_btn.set_tooltip_text("Move down (lower priority)")
         up_btn.connect("clicked", self.on_move_up, idx)
         down_btn.connect("clicked", self.on_move_down, idx)
 
-        control_box = Gtk.Box(spacing=6)
+        # Remove button
+        remove_btn = Gtk.Button(icon_name="user-trash-symbolic")
+        remove_btn.add_css_class("flat")
+        remove_btn.add_css_class("error")
+        remove_btn.set_tooltip_text("Remove dictionary")
+        remove_btn.connect("clicked", self.on_remove_dictionary, idx)
+
         control_box.append(up_btn)
         control_box.append(down_btn)
+        control_box.append(remove_btn)
         row.add_suffix(control_box)
 
         row.set_activatable(False)
@@ -856,8 +899,8 @@ class SettingsDialog(Adw.PreferencesWindow):
             )
             self._populate_dictionaries()
             self.save_settings()
-            if hasattr(self.app, "refresh_search_results"):
-                self.app.refresh_search_results()
+            # Note: Dictionary priority is just visual order; 
+            # actual search priority depends on dict_manager implementation
 
     def on_move_down(self, _btn, idx):
         if idx < len(self.dictionaries) - 1:
@@ -867,14 +910,82 @@ class SettingsDialog(Adw.PreferencesWindow):
             )
             self._populate_dictionaries()
             self.save_settings()
-            if hasattr(self.app, "refresh_search_results"):
-                self.app.refresh_search_results()
+            # Note: Dictionary priority is just visual order;
+            # actual search priority depends on dict_manager implementation
+
+    def on_remove_dictionary(self, _btn, idx):
+        """Remove dictionary with confirmation dialog"""
+        if idx < 0 or idx >= len(self.dictionaries):
+            return
+        
+        dict_name = self.dictionaries[idx].get("name", "Unknown")
+        
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading=f"Remove {dict_name}?",
+            body="This will only remove it from the list, not delete the file.",
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("remove", "Remove")
+        dialog.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        
+        dialog.connect("response", self._on_remove_dialog_response, idx)
+        dialog.present()
+
+    def _on_remove_dialog_response(self, dialog, response, idx):
+        if response == "remove":
+            dict_path = self.dictionaries[idx].get("path")
+            self.dictionaries.pop(idx)
+            self._populate_dictionaries()
+            self.save_settings()
+            
+            # Remove from app's dict_manager
+            if hasattr(self.app, "dict_manager") and dict_path:
+                if dict_path in self.app.dict_manager.dictionaries:
+                    del self.app.dict_manager.dictionaries[dict_path]
+                    # Rebuild entries index
+                    self.app.dict_manager.entries.clear()
+                    for path, info in self.app.dict_manager.dictionaries.items():
+                        for w, defs in info["entries"].items():
+                            self.app.dict_manager.entries.setdefault(w.lower(), []).append(
+                                (w, info["name"], defs, info["color"])
+                            )
+                
+                # Refresh search if there's text
+                if hasattr(self.app, "perform_search") and hasattr(self.app, "search_entry"):
+                    current_text = self.app.search_entry.get_text()
+                    if current_text:
+                        self.app.perform_search(current_text)
+
 
     def on_dict_toggled(self, switch, state, d):
         d["enabled"] = state
         self.save_settings()
-        if hasattr(self.app, "refresh_search_results"):
-            self.app.refresh_search_results()
+        
+        # Reload dictionary in app if we have access to dict_manager
+        if hasattr(self.app, "dict_manager") and d.get("path"):
+            path = d["path"]
+            if state and path not in self.app.dict_manager.dictionaries:
+                # Re-enable: load the dictionary
+                self.app.dict_manager.load_dictionary(path, d.get("color", "default"))
+            elif not state and path in self.app.dict_manager.dictionaries:
+                # Disable: remove from active dictionaries
+                del self.app.dict_manager.dictionaries[path]
+                # Rebuild entries index
+                self.app.dict_manager.entries.clear()
+                for p, info in self.app.dict_manager.dictionaries.items():
+                    for w, defs in info["entries"].items():
+                        self.app.dict_manager.entries.setdefault(w.lower(), []).append(
+                            (w, info["name"], defs, info["color"])
+                        )
+            
+            # Refresh search results
+            if hasattr(self.app, "perform_search") and hasattr(self.app, "search_entry"):
+                current_text = self.app.search_entry.get_text()
+                if current_text:
+                    self.app.perform_search(current_text)
 
     def on_add_dictionary(self, *_):
         dialog = Gtk.FileChooserNative(
@@ -883,69 +994,133 @@ class SettingsDialog(Adw.PreferencesWindow):
             action=Gtk.FileChooserAction.OPEN,
         )
         filter_dsl = Gtk.FileFilter()
-        filter_dsl.set_name("DSL Dictionaries")
+        filter_dsl.set_name("DSL Dictionaries (*.dsl, *.dsl.dz)")
         filter_dsl.add_pattern("*.dsl")
-        dialog.add_filter(filter_dsl)
+        filter_dsl.add_pattern("*.dsl.dz")
+        dialog.set_filter(filter_dsl)
 
-        response = dialog.run()
+        dialog.connect("response", self._on_file_dialog_response)
+        dialog.show()
+
+    def _on_file_dialog_response(self, dialog, response):
         if response == Gtk.ResponseType.ACCEPT:
-            path = dialog.get_file().get_path()
-            name = GLib.path_get_basename(path)
-            meta = self._extract_dsl_metadata(path)
-            new_dict = {"name": name, "path": path, "enabled": True, "meta": meta}
-            self.dictionaries.append(new_dict)
-            self._populate_dictionaries()
-            self.save_settings()
-            if hasattr(self.app, "refresh_search_results"):
-                self.app.refresh_search_results()
-
-        dialog.destroy()
+            file = dialog.get_file()
+            if file:
+                path = file.get_path()
+                name = GLib.path_get_basename(path)
+                meta = self._extract_dsl_metadata(path)
+                new_dict = {"name": name, "path": path, "enabled": True, "meta": meta}
+                self.dictionaries.append(new_dict)
+                self._populate_dictionaries()
+                self.save_settings()
+                if hasattr(self.app, "dict_manager"):
+                    self.app.dict_manager.load_dictionary(path)
+                    if hasattr(self.app, "perform_search"):
+                        current_text = self.app.search_entry.get_text()
+                        if current_text:
+                            self.app.perform_search(current_text)
 
     # ==========================================================
     # METADATA EXTRACTION
     # ==========================================================
     def _extract_dsl_metadata(self, path):
+        """Extract metadata from DSL file header"""
         meta = {}
         try:
-            with open(path, "r", encoding="utf-16-le", errors="ignore") as f:
-                for _ in range(100):
-                    line = f.readline().strip()
-                    if not line:
-                        continue
-                    if line.startswith("#INDEX_LANGUAGE"):
-                        meta["index_language"] = line.split('"', 1)[1].strip('"')
-                    elif line.startswith("#CONTENTS_LANGUAGE"):
-                        meta["contents_language"] = line.split('"', 1)[1].strip('"')
-                    elif line.lower().startswith("#name"):
-                        meta["name"] = line.split('"', 1)[1].strip('"')
-                    elif line.startswith("0"):
+            # Handle gzipped files
+            if path.endswith('.dz'):
+                with gzip.open(path, 'rb') as f:
+                    raw = f.read(10000)  # Read first 10KB
+            else:
+                with open(path, 'rb') as f:
+                    raw = f.read(10000)
+            
+            # Try to decode
+            text = None
+            if raw.startswith(b"\xef\xbb\xbf"):  # UTF-8 BOM
+                text = raw[3:].decode("utf-8", errors="ignore")
+            else:
+                for enc in ("utf-16-le", "utf-16-be", "utf-8", "cp1251", "latin1"):
+                    try:
+                        text = raw.decode(enc)
                         break
-            # crude word count
-            with open(path, "r", encoding="utf-16-le", errors="ignore") as f:
-                meta["word_count"] = sum(1 for line in f if line.strip().startswith("0"))
+                    except:
+                        continue
+            
+            if not text:
+                return meta
+            
+            # Extract metadata from header
+            for line in text.splitlines()[:50]:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("#INDEX_LANGUAGE"):
+                    parts = line.split('"')
+                    if len(parts) >= 2:
+                        meta["index_language"] = parts[1]
+                elif line.startswith("#CONTENTS_LANGUAGE"):
+                    parts = line.split('"')
+                    if len(parts) >= 2:
+                        meta["contents_language"] = parts[1]
+                elif line.lower().startswith("#name"):
+                    parts = line.split('"')
+                    if len(parts) >= 2:
+                        meta["name"] = parts[1]
+                elif not line.startswith("#"):
+                    break  # End of header
+            
+            # Count entries (words starting with non-space)
+            try:
+                if path.endswith('.dz'):
+                    with gzip.open(path, 'rt', encoding='utf-16-le', errors='ignore') as f:
+                        count = sum(1 for line in f if line and not line[0].isspace() and not line.startswith("#"))
+                else:
+                    with open(path, 'r', encoding='utf-16-le', errors='ignore') as f:
+                        count = sum(1 for line in f if line and not line[0].isspace() and not line.startswith("#"))
+                
+                if count > 0:
+                    meta["word_count"] = count
+            except:
+                pass  # If word count fails, just skip it
+                
         except Exception as e:
-            print("Metadata extraction failed:", e)
+            print(f"Metadata extraction failed for {path}: {e}")
+        
         return meta
 
     # ==========================================================
     # PERSISTENCE
     # ==========================================================
     def save_settings(self):
+        """Save settings to both app instance and config file"""
+        # Update app's dictionary list
+        if hasattr(self.app, 'dictionaries'):
+            self.app.dictionaries = self.dictionaries
+        
+        # Save to config file
         data = {
             "theme": self.theme_row.get_selected_item().get_string().lower(),
             "dictionaries": self.dictionaries,
         }
         try:
-            with open(self.SETTINGS_FILE, "w", encoding="utf-8") as f:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
             print("Failed to save settings:", e)
 
     def load_settings(self):
+        """Load settings from config file"""
         try:
-            with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
+            if not CONFIG_FILE.exists():
+                return
+            
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            
             self.dictionaries = data.get("dictionaries", [])
+            
             theme = data.get("theme", "system")
             if theme == "light":
                 self.style_manager.set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
@@ -955,6 +1130,8 @@ class SettingsDialog(Adw.PreferencesWindow):
                 self.style_manager.set_color_scheme(Adw.ColorScheme.DEFAULT)
         except FileNotFoundError:
             pass
+        except Exception as e:
+            print(f"Failed to load settings: {e}")
             
 # ============================================================
 #  APPLICATION
