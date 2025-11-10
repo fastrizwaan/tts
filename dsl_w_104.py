@@ -143,13 +143,14 @@ class DSLRenderer:
     # Stateful parser
     # ------------------------------------------------------------
     def _render_line(self, line: str, headword: str) -> str:
+        """Parse a single DSL definition line into GoldenDict-style HTML."""
         line = line.replace("~", html.escape(headword)).strip()
         tokens = re.split(r"(\[/?[a-zA-Z0-9\s=:_#-]+\]|<<|>>)", line)
 
         stack = []
         html_fragments = []
 
-        # ---- Robust tag push ----
+        # ---- Helpers ----
         def push(tagtoken: str):
             content = tagtoken[1:-1].strip()
             if not content:
@@ -164,14 +165,12 @@ class DSLRenderer:
             stack.append(name)
             html_fragments.append(self._open_tag(name, param))
 
-        # ---- Robust tag pop ----
         def pop(tagtoken: str):
             if not stack:
                 return
             top = stack.pop()
             html_fragments.append(self._close_tag(top))
 
-        # ---- Text handler ----
         def process_text(txt: str):
             if not txt:
                 return
@@ -202,31 +201,59 @@ class DSLRenderer:
             if not tok:
                 i += 1
                 continue
+
+            # --- DSL tags ---
             if tok.startswith("[") and tok.endswith("]"):
-                if tok.startswith("[/"):
-                    pop(tok)
+                tname = tok[1:-1].strip()
+                # Closing tag
+                if tname.startswith("/"):
+                    pop(tname)
+                # Handle [ref]link[/ref]
+                elif tname.lower().startswith("ref"):
+                    next_token = tokens[i + 1] if i + 1 < len(tokens) else ""
+                    if next_token and not next_token.startswith("["):
+                        word = next_token.strip()
+                        html_fragments.append(
+                            f'<a href="dict://{html.escape(word)}" class="dict-link">{html.escape(word)}</a>'
+                        )
+                        # Skip link text + closing [/ref]
+                        i += 3
+                        continue
+                    else:
+                        push(tok)
                 else:
                     push(tok)
-            elif tok in {"<<", ">>"}:
-                if tok == "<<":
-                    push(tok)
+
+            # --- GoldenDict <<link>> syntax ---
+            elif tok == "<<":
+                if i + 1 < len(tokens) and tokens[i + 1] not in {"<<", ">>"}:
+                    word = tokens[i + 1].strip()
+                    html_fragments.append(
+                        f'<a href="dict://{html.escape(word)}" class="dict-link">{html.escape(word)}</a>'
+                    )
+                    # Skip link text and >>
+                    i += 3
+                    continue
                 else:
-                    pop(tok)
+                    push(tok)
+
+            # --- Normal text ---
             else:
                 process_text(tok)
+
             i += 1
 
-        # Close any unbalanced tags
+        # ---- Close unbalanced tags ----
         while stack:
             top = stack.pop()
             html_fragments.append(self._close_tag(top))
 
         out = "".join(html_fragments)
-        # Fix dict:// links
+        # --- Ensure clean links (safety cleanup) ---
         out = re.sub(
-            r"<a class='dict-link' href='dict://([^']+)'>(.*?)</a>",
-            r"<a class='dict-link' href='dict://\1'>\2</a>",
-            out
+            r"<a href=\"dict://([^']+)\" class=\"dict-link\">(.*?)</a>",
+            r'<a href="dict://\1" class="dict-link">\2</a>',
+            out,
         )
         return out
 
