@@ -445,6 +445,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.style_manager.connect("notify::dark", self.on_theme_changed)
         self._build_ui()
         self._apply_theme_to_webview()
+        self.show_placeholder("Load a dictionary to start searching")
         self._load_settings()
 
     # ---------------- UI ----------------
@@ -471,7 +472,6 @@ class MainWindow(Adw.ApplicationWindow):
         scrolled = Gtk.ScrolledWindow(vexpand=True)
         scrolled.set_child(self.webview)
         vbox.append(scrolled)
-        self.show_placeholder("Load a dictionary to start searching")
 
     def _build_theme_css(self):
         dark = self.style_manager.get_dark()
@@ -694,12 +694,26 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _apply_theme_to_webview(self):
         dark = self.style_manager.get_dark()
+        
+        # Set dark mode in webkit settings
         try:
             self.webview.get_settings().set_property("enable-dark-mode", dark)
         except TypeError:
             pass
+        
+        # Set webview background color to prevent white flash
+        bg_color = Gdk.RGBA()
+        if dark:
+            bg_color.parse("#1e1e1e")
+        else:
+            bg_color.parse("#ffffff")
+        self.webview.set_background_color(bg_color)
 
     def on_theme_changed(self, *_):
+        # Update webview background color
+        self._apply_theme_to_webview()
+        
+        # Refresh content
         if hasattr(self, "_last_html") and self._last_html:
             # Refresh search results
             html = self.build_html(self._last_html)
