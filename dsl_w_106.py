@@ -128,6 +128,7 @@ class DSLRenderer:
                     "darkslategray": "cadetblue",
                     "darkslateblue": "slateblue",
                     "purple": "mediumorchid",
+                    "azure": "deepskyblue",
                 }
                 if pname in lighten_map:
                     color = lighten_map[pname]
@@ -147,6 +148,9 @@ class DSLRenderer:
                     "palegreen": "seagreen",
                     "white": "gray",
                     "yellow": "darkgoldenrod",
+                    "aqua": "teal",
+                    "aquamarine": "mediumseagreen",
+                    "lime": "forestgreen",
                 }
                 if pname in darken_map:
                     color = darken_map[pname]
