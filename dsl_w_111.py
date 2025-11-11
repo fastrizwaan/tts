@@ -126,6 +126,7 @@ class DSLRenderer:
                     "darkgreen": "seagreen",
                     "darkolivegreen": "yellowgreen",
                     "darkslategray": "cadetblue",
+                    "dimgray": "slategray",
                     "darkslateblue": "slateblue",
                     "purple": "mediumorchid",
                     "azure": "deepskyblue",
@@ -246,6 +247,10 @@ class DSLRenderer:
 
         line = re.sub(r"\{\{/?(?:region|lab|head|pos|posgram|inf|gwblock_[a-z])\}\}", "", line, flags=re.I)
 
+        # Interpret single '\' (possibly with spaces) as a blank line separator
+        if re.fullmatch(r'\s*\\\s*', line):
+            return "<div style='margin-top:0.5em'></div>"
+            
         # Replace tilde (~) with lemma
         line = line.replace("~", html.escape(headword))
         

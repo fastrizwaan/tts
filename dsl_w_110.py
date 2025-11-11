@@ -56,7 +56,7 @@ class DSLParser:
 # ============================================================
 
 class DSLRenderer:
-    """GoldenDict-style HTML renderer for DSL lines (fully featured, safe, dark-mode aware)."""
+    """GoldenDict-style HTML renderer for DSL lines (theme-aware and contrast-safe)."""
 
     TAG_MAP = {
         "b":        ("<b>", "</b>"),
@@ -108,56 +108,39 @@ class DSLRenderer:
         elif tag == "c":
             color = (param or "inherit").strip()
             rgba = Gdk.RGBA()
+            pname = color.lower().strip()
 
-            # --- Replace too-dark named colors with lighter equivalents (dark mode) ---
-            if self.dark_mode and color:
-                pname = color.lower().strip()
+            # --- adaptive mapping for dark mode ---
+            if self.dark_mode and pname:
                 lighten_map = {
-                    "navy": "royalblue",
-                    "darkblue": "dodgerblue",
-                    "mediumblue": "dodgerblue",
-                    "midnightblue": "cornflowerblue",
-                    "indigo": "mediumslateblue",
-                    "darkviolet": "orchid",
-                    "blueviolet": "mediumpurple",
-                    "darkmagenta": "violet",
-                    "darkred": "tomato",
-                    "maroon": "indianred",
-                    "darkgreen": "seagreen",
-                    "darkolivegreen": "yellowgreen",
-                    "darkslategray": "cadetblue",
-                    "darkslateblue": "slateblue",
-                    "purple": "mediumorchid",
-                    "azure": "deepskyblue",
-                    "aliceblue": "steelblue",
-                    "sienna": "orange",
+                    "navy": "royalblue", "darkblue": "dodgerblue",
+                    "mediumblue": "dodgerblue", "midnightblue": "cornflowerblue",
+                    "indigo": "mediumslateblue", "darkviolet": "orchid",
+                    "blueviolet": "mediumpurple", "darkmagenta": "violet",
+                    "darkred": "tomato", "maroon": "indianred", "darkgray": "lightgray",
+                    "darkgreen": "seagreen", "darkolivegreen": "yellowgreen",
+                    "darkslategray": "slategray", "darkslateblue": "slateblue",
+                    "purple": "mediumorchid", "azure": "deepskyblue",
+                    "aliceblue": "steelblue", "black": "lightgray",
+                    "brown": "lightsalmon", "lightgray": "gray",
                 }
-                if pname in lighten_map:
-                    color = lighten_map[pname]
+                color = lighten_map.get(pname, color)
 
-            # --- Replace too-light named colors with darker equivalents (light mode) ---
-            elif not self.dark_mode and color:
-                pname = color.lower().strip()
+            # --- adaptive mapping for light mode ---
+            elif not self.dark_mode and pname:
                 darken_map = {
-                    "aliceblue": "steelblue",
-                    "antiquewhite": "peru",
-                    "azure": "deepskyblue",
-                    "beige": "saddlebrown",
-                    "ghostwhite": "slategray",
-                    "ivory": "darkkhaki",
-                    "lightgray": "gray",
-                    "lightyellow": "goldenrod",
-                    "palegreen": "seagreen",
-                    "white": "gray",
-                    "yellow": "darkgoldenrod",
-                    "aqua": "teal",
-                    "aquamarine": "mediumseagreen",
-                    "lime": "forestgreen",
+                    "aliceblue": "steelblue", "antiquewhite": "peru",
+                    "azure": "deepskyblue", "beige": "saddlebrown",
+                    "ghostwhite": "slategray", "ivory": "darkkhaki",
+                    "lightgray": "gray", "lightyellow": "goldenrod",
+                    "palegreen": "seagreen", "white": "gray",
+                    "yellow": "darkgoldenrod", "aqua": "teal",
+                    "aquamarine": "mediumseagreen", "lime": "forestgreen",
+                    "pink": "mediumvioletred",
                 }
-                if pname in darken_map:
-                    color = darken_map[pname]
+                color = darken_map.get(pname, color)
 
-            # --- Convert to hex for consistent output ---
+            # --- Convert to hex for consistency ---
             if rgba.parse(color):
                 color = "#{:02x}{:02x}{:02x}".format(
                     int(rgba.red * 255),
@@ -165,27 +148,17 @@ class DSLRenderer:
                     int(rgba.blue * 255)
                 )
 
-            # --- Minor tone balancing ---
-            if param:
-                rgba.parse(color)
+            # --- Apply contrast adjustment based on luminance ---
+            if rgba.parse(color):
                 r, g, b = rgba.red, rgba.green, rgba.blue
                 luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-                factor = 1.0
 
-                if self.dark_mode and luminance < 0.25:
-                    factor = 1.5
-                elif not self.dark_mode and luminance > 0.9:
-                    factor = 0.8
-
-                if factor != 1.0:
-                    color = self._lighten(color, factor)
+                if self.dark_mode and luminance < 0.3:
+                    color = self._lighten(color, 1.5)
+                elif not self.dark_mode and luminance > 0.85:
+                    color = self._lighten(color, 0.8)
 
             return f"<span style='color:{color}'>"
-
-
-
-
-
 
         # [lang name="English"]
         elif tag.startswith("lang"):
@@ -222,44 +195,17 @@ class DSLRenderer:
     # Stateful parser
     # ------------------------------------------------------------
     def _render_line(self, line: str, headword: str) -> str:
-        """Parse one DSL definition line into HTML."""
-        # --- Strip ABBYY Lingvo / Cambridge DSL macros ---
         line = re.sub(
-            r"\{\{/?(?:"
-            r"b|c|i|v|w|text|title|type|category|"
-            r"def|sense_t|sense_b|inf|phrase|usage|region|"
-            r"pos|posgram|posblock_h|Main entry|Derived|"
-            r"Another wordform|lab|gl|xtext|xref|xeg|sp|sm|"
-            r"phrasal_verb_h|idiom_h|gwblock_h|gwblock|runon_h|"
-            r"clepan|collpan|upan|obj|var|infgrp|infl|picrefs|"
-            r"Phrasal Verb|See also"
-            r")\}\}",
+            r"\{\{[^{}]+\}\}",
             "",
             line,
-            flags=re.IGNORECASE,
         )
-
-        # Fallback: remove stray unknown {{...}} blocks
-        line = re.sub(r"\{\{[^{}]+\}\}", "", line)
-
-        #line = re.sub(r"\{\{[^{}]+\}\}", "", line)
-
-        line = re.sub(r"\{\{/?(?:region|lab|head|pos|posgram|inf|gwblock_[a-z])\}\}", "", line, flags=re.I)
-
-        # Replace tilde (~) with lemma
-        line = line.replace("~", html.escape(headword))
-        
         tokens = re.split(r"(\[/?[a-zA-Z0-9\s=:_#*-]+\]|<<|>>)", line)
-                
         stack = []
         html_fragments = []
 
-        # --- Tag handlers ---
         def push(tagtoken: str):
             content = tagtoken[1:-1].strip()
-            if not content:
-                html_fragments.append(html.escape(tagtoken))
-                return
             parts = content.split(None, 1)
             if not parts:
                 html_fragments.append(html.escape(tagtoken))
@@ -275,81 +221,37 @@ class DSLRenderer:
             top = stack.pop()
             html_fragments.append(self._close_tag(top))
 
-        # --- Text handler ---
         def process_text(txt: str):
             if not txt:
                 return
-            # Unescape escaped brackets and punctuation before HTML escaping
-            txt = (
-                txt.replace(r"\[", "[")
-                   .replace(r"\]", "]")
-                   .replace(r"\(", "(")
-                   .replace(r"\)", ")")
-                   .replace(r"\{", "{")
-                   .replace(r"\}", "}")
-                   .replace(r"\~", "~")
-                   .replace(r"\/", "/")
-            )
-
             txt_esc = html.escape(txt, quote=False)
-
-
-            # POS markers like <n>, <adj>
             txt_esc = re.sub(
                 r"&lt;([a-zA-Z0-9\-]+)&gt;",
                 lambda m: f"<span class='pos-tag'>⟨{m.group(1)}⟩</span>",
                 txt_esc,
             )
-
-            # transliteration /.../
             txt_esc = re.sub(
                 r"/([^/]+)/",
                 lambda m: f"<span class='translit'>/{html.escape(m.group(1))}/</span>",
                 txt_esc,
             )
-
-            # media filenames
-            txt_esc = re.sub(
-                r"([A-Za-z0-9_\-]+\.(?:wav|mp3|ogg|flac|png|jpg|jpeg|gif))",
-                lambda m: f"<span class='media-file'>🎧 {html.escape(m.group(1))}</span>",
-                txt_esc,
-            )
-
-            # RTL detection
             if re.search(r"[\u0590-\u06FF\u0750-\u08FF]", txt_esc):
                 html_fragments.append(f"<span dir='rtl'>{txt_esc}</span>")
             else:
                 html_fragments.append(txt_esc)
 
-        # --- Main parse loop ---
         i = 0
         while i < len(tokens):
             tok = tokens[i]
             if not tok:
                 i += 1
                 continue
-
             if tok.startswith("[") and tok.endswith("]"):
                 tname = tok[1:-1].strip()
-
-                # Closing
                 if tname.startswith("/"):
                     pop(tname)
-                # [ref]word[/ref]
-                elif tname.lower().startswith("ref"):
-                    next_token = tokens[i + 1] if i + 1 < len(tokens) else ""
-                    if next_token and not next_token.startswith("["):
-                        word = next_token.strip()
-                        html_fragments.append(
-                            f'<a href="dict://{html.escape(word)}" class="dict-link">{html.escape(word)}</a>'
-                        )
-                        i += 3
-                        continue
-                    else:
-                        push(tok)
                 else:
                     push(tok)
-
             elif tok == "<<":
                 if i + 1 < len(tokens) and tokens[i + 1] not in {"<<", ">>"}:
                     word = tokens[i + 1].strip()
@@ -360,19 +262,14 @@ class DSLRenderer:
                     continue
                 else:
                     push(tok)
-
             else:
                 process_text(tok)
-
             i += 1
 
-        # close unbalanced
         while stack:
-            top = stack.pop()
-            html_fragments.append(self._close_tag(top))
+            html_fragments.append(self._close_tag(stack.pop()))
 
         out = "".join(html_fragments)
-        # tidy up link formatting
         out = re.sub(
             r"<a href=\"dict://([^']+)\" class=\"dict-link\">(.*?)</a>",
             r'<a href="dict://\1" class="dict-link">\2</a>',
@@ -385,6 +282,7 @@ class DSLRenderer:
     # ------------------------------------------------------------
     def render_entry(self, headword, defs):
         return "\n".join(self._render_line(line, headword) for line in defs)
+
 
 # ============================================================
 #  DICTIONARY MANAGER
@@ -491,22 +389,40 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _build_theme_css(self):
         dark = self.style_manager.get_dark()
+
+        # --- base palette ---
         bg = "#1e1e1e" if dark else "#ffffff"
         fg = "#dddddd" if dark else "#222222"
-        link = "#89b4ff" if dark else "#005bbb"
         border = "#444" if dark else "#ccc"
-        pos = "#9ae59a" if dark else "#228B22"
-        example = "#9ae59a" if dark else "#228B22"
+
+        # --- adaptive accents ---
+        accent_link = "#89b4ff" if dark else "#005bbb"
+        accent_pos = "orange" if dark else "#228B22"
+        accent_example = "lightgreen" if dark else "#0070cc"
+        accent_comment = "#c6c6c6" if dark else "#555555"
+        accent_translit = "#a0a0a0" if dark else "#666666"
+        accent_lemma = "gold" if dark else accent_link
+
+
 
         return f"""
         :root {{
             --base-indent: 0.4em;
+            --bg: {bg};
+            --fg: {fg};
+            --border: {border};
+            --link: {accent_link};
+            --pos: {accent_pos};
+            --example: {accent_example};
+            --comment: {accent_comment};
+            --translit: {accent_translit};
+            --lemma: {accent_lemma};
         }}
 
         body {{
             font-family: system-ui, sans-serif;
-            background: {bg};
-            color: {fg};
+            background: var(--bg);
+            color: var(--fg);
             margin: 12px;
             line-height: 1.45;
         }}
@@ -514,7 +430,7 @@ class MainWindow(Adw.ApplicationWindow):
         .lemma {{
             font-size: 1.3em;
             font-weight: bold;
-            color: {link};
+            color: var(--lemma);
         }}
 
         .dict {{
@@ -539,19 +455,38 @@ class MainWindow(Adw.ApplicationWindow):
         }}
 
         .pos {{
-            color: {pos};
+            color: var(--pos);
             font-style: italic;
             display: inline-block;
         }}
 
         .example {{
-            color: {example};
+            color: var(--example);
             font-style: italic;
             display: inline-block;
         }}
 
+        .comment {{
+            color: var(--comment);
+            opacity: 0.8;
+        }}
+
+        .translit {{
+            color: var(--translit);
+            font-style: italic;
+            opacity: 0.9;
+        }}
+
+        .pos-tag {{
+            opacity: 0.9;
+            font-style: italic;
+            color: var(--pos);
+            display: inline-block;
+            margin: 0 0.15em;
+        }}
+
         .dict-link {{
-            color: {link};
+            color: var(--link);
             text-decoration: none;
             cursor: pointer;
             display: inline-block;
@@ -562,54 +497,40 @@ class MainWindow(Adw.ApplicationWindow):
 
         hr {{
             border: none;
-            border-top: 1px solid {border};
+            border-top: 1px solid var(--border);
             margin: 10px 0;
         }}
 
-        /* --- NEW for transliteration & mixed text --- */
         .m-line {{
             line-height: 1.4;
             margin: 2px 0;
         }}
-        .m-tag {{
-            opacity: 0.7;
-            font-style: italic;
-            display: inline-block;
-        }}
-        .translit {{
-            color: gray;
-            display: inline-block;
-        }}
-        .pos-tag {{
-            opacity: 0.85;
-            font-style: italic;
-            display: inline-block;
-            margin: 0 0.15em;
-        }}
-        .translit {{
-            color: gray;
-            font-style: italic;
-        }}
-        .comment {{
-            opacity: 0.7;
-        }}
+
         .media-file {{
             color: var(--link);
             cursor: pointer;
             display: inline-block;
             margin-left: 0.25em;
         }}
+
         .lang {{
             opacity: 0.8;
             font-style: italic;
         }}
+
         .full-translation {{
             display: none;
             opacity: 0.8;
             font-style: italic;
         }}
 
+        .ipa {{
+            font-family: "Noto Sans IPA", "DejaVu Sans", sans-serif;
+            font-style: italic;
+            color: var(--translit);
+        }}
         """
+
 
 
     # ---------------- Logic ----------------
