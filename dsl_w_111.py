@@ -31,24 +31,37 @@ class DSLParser:
                     if w.strip():
                         entries.setdefault(w, []).extend(defs)
 
-        for raw in self.text.splitlines():
+        for lineno, raw in enumerate(self.text.splitlines(), 1):
             line = raw.rstrip("\n\r")
-            if not line or line.startswith("#"):
+
+            # Debug each line
+            if line.lstrip().startswith("#"):
+                print(f"[DEBUG] Skipping header/comment line {lineno}: {line!r}")
                 continue
+
+            if not line:
+                continue
+
             if line == "-":
                 flush()
                 headwords, defs, in_def = [], [], False
                 continue
+
             if raw and raw[0] in (" ", "\t"):
                 in_def = True
                 defs.append(line)
                 continue
+
             if in_def:
                 flush()
                 headwords, defs, in_def = [], [], False
+
             headwords.append(line)
+
         flush()
+        print(f"[DEBUG] Parsed {len(entries)} entries total.")
         return entries
+
 
 
 # ============================================================
@@ -401,40 +414,59 @@ class DictionaryManager:
         self.entries = {}
 
     def decode_dsl_bytes(self, raw: bytes) -> str:
-        if raw.startswith(b"\xef\xbb\xbf"):
+        # Handle UTF BOMs properly before regexes see garbage
+        if raw.startswith(b"\xef\xbb\xbf"):  # UTF-8 BOM
             return raw[3:].decode("utf-8", "ignore")
+        if raw.startswith(b"\xff\xfe"):      # UTF-16 LE BOM
+            return raw[2:].decode("utf-16-le", "ignore")
+        if raw.startswith(b"\xfe\xff"):      # UTF-16 BE BOM
+            return raw[2:].decode("utf-16-be", "ignore")
+
+        # Try encodings (UTF-8 first, fallback chain)
         for enc in ("utf-8", "utf-16-le", "utf-16-be", "cp1251", "cp1256", "latin1"):
             try:
                 return raw.decode(enc)
             except Exception:
                 continue
+
         return raw.decode("utf-8", "ignore")
+
 
     def load_dictionary(self, path, color="default"):
         path = Path(path)
         if not path.exists():
+            print(f"[DEBUG] Dictionary file not found: {path}")
             return False
+
         try:
             raw = gzip.open(path, "rb").read() if path.suffix == ".dz" else open(path, "rb").read()
             text = self.decode_dsl_bytes(raw)
         except Exception as e:
-            print("Decode error:", e)
+            print("[DEBUG] Decode error:", e)
             return False
 
         dict_name = path.stem
-        for line in text.splitlines()[:20]:
-            if line.startswith("#NAME"):
-                m = re.search(r'#NAME\s+"([^"]+)"', line)
-                if m:
-                    dict_name = m.group(1)
+        found_name = False
+        for line in text.splitlines()[:200]:
+            m = re.search(r'^\s*#\s*NAME\s+"([^"]+)"', line, flags=re.IGNORECASE)
+            if m:
+                dict_name = m.group(1).strip()
+                found_name = True
+                print(f"[DEBUG] Found dictionary name in header: {dict_name!r}")
                 break
 
+        if not found_name:
+            print(f"[DEBUG] No #NAME line found, defaulting to file stem: {dict_name!r}")
+
         entries = DSLParser(text).parse()
+        print(f"[DEBUG] Loaded dictionary: {dict_name!r} with {len(entries)} entries from {path.name}")
+
         self.dictionaries[str(path)] = {"name": dict_name, "entries": entries, "color": color}
         for w, defs in entries.items():
             self.entries.setdefault(w.lower(), []).append((w, dict_name, defs, color))
-        print(f"Loaded {len(entries)} entries from {dict_name}")
+
         return True
+
 
     def search(self, q):
         q = q.lower().strip()
@@ -1083,8 +1115,8 @@ class SettingsDialog(Adw.PreferencesWindow):
             file = dialog.get_file()
             if file:
                 path = file.get_path()
-                name = GLib.path_get_basename(path)
                 meta = self._extract_dsl_metadata(path)
+                name = meta.get("name", GLib.path_get_basename(path))
                 new_dict = {"name": name, "path": path, "enabled": True, "meta": meta}
                 self.dictionaries.append(new_dict)
                 self._populate_dictionaries()
