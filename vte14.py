@@ -1023,7 +1023,7 @@ class VirtualTextView(Gtk.DrawingArea):
         self.cursor_visible = True
         
         # Position cursor at click location
-        line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 20
+        line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 10
         if x > line_num_width:
             # Get position from coordinates
             line, col = self._get_position_from_coords(x, y)
@@ -1141,7 +1141,7 @@ class VirtualTextView(Gtk.DrawingArea):
             return
         try:
             # Calculate cursor position on screen
-            line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 20
+            line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 10
             # Get current line text
             line_text = self.buffer.get_line(self.cursor_line)
             if self.editing and self.cursor_line == self.edit_line:
@@ -1883,7 +1883,7 @@ class VirtualTextView(Gtk.DrawingArea):
             if self._needs_wrap_recalc:
                 self._wrapped_lines_cache.clear()
                 self._needs_wrap_recalc = False
-            line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 20
+            line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 10
             self.wrap_width = self.get_width() - line_num_width - 20
             if self.wrap_width <= 0:
                 self.wrap_width = 1
@@ -1925,7 +1925,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 return logical_line_num, last_segment[2], len(last_wrapped_segments) - 1
         return max(0, self.buffer.total_lines - 1), 0, 0
     def _get_position_from_coords(self, x, y):
-        line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 20
+        line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 10
         if x < line_num_width:
             return -1, -1
         logical_line_num, seg_start_col, segment_index = self._get_visual_line_info_from_y(y)
@@ -2348,7 +2348,7 @@ class VirtualTextView(Gtk.DrawingArea):
         return Gdk.DragAction.COPY # Return single preferred action
     def _on_drop_drop(self, target, value, x, y):
         if isinstance(value, str):
-            line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 20
+            line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 10
             if x > line_num_width:
                 logical_line_num, seg_start_col, segment_index = self._get_visual_line_info_from_y(y)
                 if logical_line_num is not None:
@@ -2387,7 +2387,7 @@ class VirtualTextView(Gtk.DrawingArea):
         if int(height // self.line_height) + 2 != self.visible_lines:
             self.visible_lines = int(height // self.line_height) + 2
         if self.buffer.word_wrap:
-            line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 20
+            line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 10
             new_wrap_width = width - line_num_width - 20
             wrap_width_changed = new_wrap_width > 0 and new_wrap_width != self.wrap_width
             if wrap_width_changed:
@@ -2400,10 +2400,12 @@ class VirtualTextView(Gtk.DrawingArea):
         start_line = int(self.scroll_y // self.line_height)
         end_line = start_line + self.visible_lines + 10
         wrapped_lines_data = self._get_wrapped_lines(start_line, end_line)
+        # textview background color 
         cr.set_source_rgb(1, 1, 1) if not is_dark else cr.set_source_rgb(0.1, 0.1, 0.1)
         cr.paint()
-        line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 20
-        cr.set_source_rgb(0.95, 0.95, 0.95) if not is_dark else cr.set_source_rgb(0.15, 0.15, 0.15)
+        line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 10
+        # display line number background
+        cr.set_source_rgb(1, 1, 1) if not is_dark else cr.set_source_rgb(0.1, 0.1, 0.1)
         cr.rectangle(0, 0, line_num_width, height)
         cr.fill()
         y_offset = -(self.scroll_y % self.line_height)
@@ -2416,16 +2418,22 @@ class VirtualTextView(Gtk.DrawingArea):
                 y_pos = int(y_offset + visual_line_counter * self.line_height)
                 if y_pos > height:
                     break
-                cr.set_source_rgb(0.5, 0.5, 0.5) if not is_dark else cr.set_source_rgb(0.7, 0.7, 0.7)
+                # display line number background
+                cr.set_source_rgb(0.3, 0.3, 0.3) if not is_dark else cr.set_source_rgb(0.3, 0.3, 0.3)
                 line_num_layout = self.create_pango_layout("")
                 line_num_layout.set_font_description(self.font_desc)
                 line_num_layout.set_text(str(logical_line_num + 1))
-                cr.move_to(10, y_pos)
+                # Right-align line numbers
+                ink_extents = line_num_layout.get_pixel_extents()[0]
+                text_width = ink_extents.width
+                x_pos = line_num_width - text_width - 4  # 4px right margin
+                cr.move_to(x_pos, y_pos)
                 PangoCairo.show_layout(cr, line_num_layout)
             visual_line_counter += len(wrapped_segments)
             line_index += 1
         separator_x = line_num_width
-        cr.set_source_rgb(0.8, 0.8, 0.8) if not is_dark else cr.set_source_rgb(0.3, 0.3, 0.3)
+        # separator vertical line color 
+        cr.set_source_rgb(1, 1, 1) if not is_dark else cr.set_source_rgb(0.1, 0.1, 0.1)
         cr.set_line_width(1)
         cr.move_to(separator_x, 0)
         cr.line_to(separator_x, height)
@@ -2460,6 +2468,7 @@ class VirtualTextView(Gtk.DrawingArea):
                     else:
                         cursor_in_segment = seg_start_col <= self.cursor_col <= seg_end_col
                     if cursor_in_segment:
+                        # Current line Highlight
                         cr.set_source_rgb(0.95, 0.95, 1.0) if not is_dark else cr.set_source_rgb(0.2, 0.2, 0.3)
                         highlight_x_start = line_num_width
                         cr.rectangle(highlight_x_start, y_pos - 2, width - line_num_width, self.line_height)
@@ -2513,7 +2522,7 @@ class VirtualTextView(Gtk.DrawingArea):
                         layout = self.create_pango_layout("")
                         layout.set_font_description(self.font_desc)
                         layout.set_text(segment_text)
-                        cr.set_source_rgb(0, 0, 0) if not is_dark else cr.set_source_rgb(0.9, 0.9, 0.9)
+                        cr.set_source_rgb(0, 0, 0) if not is_dark else cr.set_source_rgb(0.4, 0.9, 0.9)
                         cr.move_to(line_num_width + 10 - self.scroll_x, y_pos)
                         PangoCairo.show_layout(cr, layout)
                 else:
@@ -2521,7 +2530,8 @@ class VirtualTextView(Gtk.DrawingArea):
                     layout = self.create_pango_layout("")
                     layout.set_font_description(self.font_desc)
                     layout.set_text(segment_text)
-                    cr.set_source_rgb(0, 0, 0) if not is_dark else cr.set_source_rgb(0.9, 0.9, 0.9)
+                    # normal text color
+                    cr.set_source_rgb(0.3, 0.3, 0.3) if not is_dark else cr.set_source_rgb(0.7, 0.7, 0.7)
                     cr.move_to(line_num_width + 10 - self.scroll_x, y_pos)
                     PangoCairo.show_layout(cr, layout)
                 # Draw preedit underline if applicable
@@ -2633,7 +2643,7 @@ class VirtualTextView(Gtk.DrawingArea):
         if self.buffer.word_wrap:
             return False
         scroll_amount = dx * self.char_width * 10
-        line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 20
+        line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 10
         available_width = self.get_width() - line_num_width
         max_scroll_x = max(0, self.max_line_width - available_width)
         old_scroll_x = self.scroll_x
@@ -2667,7 +2677,7 @@ class VirtualTextView(Gtk.DrawingArea):
         drag_threshold = 5
         if abs(x - self.drag_start_x) > drag_threshold or abs(y - self.drag_start_y) > drag_threshold:
             return
-        line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 20
+        line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 10
         if x > line_num_width:
             logical_line_num, seg_start_col, segment_index = self._get_visual_line_info_from_y(y)
             if logical_line_num is not None:
@@ -2888,7 +2898,7 @@ class VirtualTextView(Gtk.DrawingArea):
                     col += self.preedit_cursor_pos
                     line_text = self.edit_text[:self.edit_cursor_pos] + self.preedit_string + self.edit_text[self.edit_cursor_pos:]
             cursor_x_pos_in_line = self._get_text_width(line_text[:col])
-            line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 20
+            line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 10
             available_width = self.get_width() - line_num_width
             if cursor_x_pos_in_line < self.scroll_x:
                 self.scroll_x = max(0, cursor_x_pos_in_line - 10)
@@ -2982,7 +2992,7 @@ class VirtualTextView(Gtk.DrawingArea):
         max_scroll_y = max(0, total_visual_height - self.get_height())
         self.scroll_y = max(0, min(max_scroll_y, scroll_y))
         if not self.buffer.word_wrap:
-            line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 20
+            line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 10
             available_width = self.get_width() - line_num_width
             max_scroll_x = max(0, self.max_line_width - available_width)
             self.scroll_x = max(0, min(max_scroll_x, scroll_x))
@@ -3336,7 +3346,7 @@ class TextEditorWindow(Adw.ApplicationWindow):
         status_box.add_css_class("toolbar")
         status_box.set_margin_start(4)
         status_box.set_margin_end(4)
-        status_box.set_margin_top(4)
+        status_box.set_margin_top(0)
         status_box.set_margin_bottom(4)
         self.toolbar_view.add_bottom_bar(status_box)
 
@@ -3385,14 +3395,13 @@ class TextEditorWindow(Adw.ApplicationWindow):
             background: none;
             border: none;
             box-shadow: none;
-            margin: 1px;
-            padding: 0px;
-            min-width: 8px; /* or smaller if you want a thinner bar */
-            min-height: 8px;
+            margin: 0px;
+            padding: 1px;
+           
         }
         scrollbar slider {
             background-color: rgba(127,127,127,0.8); /* visible handle only */
-            border-radius: 25px;
+            border-radius: 30px;
         }
         """
 
@@ -3460,8 +3469,11 @@ class TextEditorWindow(Adw.ApplicationWindow):
         v_adjustment.set_step_increment(self.text_view.line_height)
         v_adjustment.set_page_increment(viewport_height * 0.9)
         v_adjustment.set_value(self.text_view.scroll_y)
+        # Hide vertical scrollbar if content fits in viewport
+        self.v_scrollbar.set_visible(total_height > viewport_height)
+        
         if not self.text_view.buffer.word_wrap:
-            line_num_width = len(str(self.text_view.buffer.total_lines)) * self.text_view.char_width + 20
+            line_num_width = len(str(self.text_view.buffer.total_lines)) * self.text_view.char_width + 10
             available_width = self.text_view.get_width() - line_num_width
             total_width = self.text_view.max_line_width
             h_adjustment = self.h_scrollbar.get_adjustment()
@@ -3471,7 +3483,8 @@ class TextEditorWindow(Adw.ApplicationWindow):
             h_adjustment.set_step_increment(self.text_view.char_width * 10)
             h_adjustment.set_page_increment(available_width * 0.9)
             h_adjustment.set_value(self.text_view.scroll_x)
-            self.h_scrollbar.set_visible(True)
+            # Hide horizontal scrollbar if content fits in viewport
+            self.h_scrollbar.set_visible(total_width > available_width)
         else:
             self.h_scrollbar.set_visible(False)
     def generate_test_data(self):
