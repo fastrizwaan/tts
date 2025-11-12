@@ -651,24 +651,36 @@ class VirtualTextBuffer:
             return False
     
     # --- Undo/Redo system methods ---
-    def add_undo_action(self, action_type, data):
+    def add_undo_action(self, action_type, data, cursor_line=None, cursor_col=None, 
+                        selection_start_line=None, selection_start_col=None,
+                        selection_end_line=None, selection_end_col=None, has_selection=False):
         """
-        Add an action to the undo stack.
+        Add an action to the undo stack with cursor and selection state.
         action_type: 'insert', 'delete', 'replace', 'insert_line', 'delete_line', 'merge_lines'
         data: dict with action-specific data
         """
         if self.in_undo_redo:
             return
         
+        # Store the state before the action
+        action_data = data.copy()
+        action_data['cursor_line_before'] = cursor_line
+        action_data['cursor_col_before'] = cursor_col
+        action_data['selection_start_line'] = selection_start_line
+        action_data['selection_start_col'] = selection_start_col
+        action_data['selection_end_line'] = selection_end_line
+        action_data['selection_end_col'] = selection_end_col
+        action_data['has_selection'] = has_selection
+        
         self.undo_stack.append({
             'type': action_type,
-            'data': data.copy()
+            'data': action_data
         })
         # Clear redo stack when new action is performed
         self.redo_stack.clear()
     
     def undo(self):
-        """Undo the last action"""
+        """Undo the last action and restore cursor and selection state"""
         if not self.undo_stack:
             return False
         
@@ -676,6 +688,15 @@ class VirtualTextBuffer:
         action = self.undo_stack.pop()
         action_type = action['type']
         data = action['data']
+        
+        # Get saved state
+        cursor_line_before = data.get('cursor_line_before')
+        cursor_col_before = data.get('cursor_col_before')
+        selection_start_line = data.get('selection_start_line')
+        selection_start_col = data.get('selection_start_col')
+        selection_end_line = data.get('selection_end_line')
+        selection_end_col = data.get('selection_end_col')
+        has_selection = data.get('has_selection', False)
         
         try:
             if action_type == 'insert':
@@ -686,9 +707,10 @@ class VirtualTextBuffer:
                 old_text = self.lines[line]
                 new_text = old_text[:start] + old_text[end:]
                 self.lines[line] = new_text
-                # Add to redo stack
                 self.redo_stack.append(action)
-                cursor_pos = (line, start)
+                # Restore cursor to where it was before insert
+                cursor_pos = (cursor_line_before if cursor_line_before is not None else line, 
+                             cursor_col_before if cursor_col_before is not None else start)
                 
             elif action_type == 'delete':
                 # Undo delete: insert the text back
@@ -699,7 +721,13 @@ class VirtualTextBuffer:
                 new_line = old_line[:pos] + text + old_line[pos:]
                 self.lines[line] = new_line
                 self.redo_stack.append(action)
-                cursor_pos = (line, pos + len(text))
+                # For delete, select the restored text
+                if has_selection:
+                    cursor_pos = (cursor_line_before if cursor_line_before is not None else line, 
+                                 cursor_col_before if cursor_col_before is not None else pos)
+                else:
+                    # If no selection before, place cursor after restored text
+                    cursor_pos = (line, pos + len(text))
                 
             elif action_type == 'replace':
                 # Undo replace: restore old text
@@ -707,7 +735,8 @@ class VirtualTextBuffer:
                 old_text = data['old_text']
                 self.lines[line] = old_text
                 self.redo_stack.append(action)
-                cursor_pos = (line, data.get('cursor_col', 0))
+                cursor_pos = (cursor_line_before if cursor_line_before is not None else line,
+                             cursor_col_before if cursor_col_before is not None else data.get('cursor_col', 0))
                 
             elif action_type == 'insert_line':
                 # Undo insert line: delete the line
@@ -715,7 +744,8 @@ class VirtualTextBuffer:
                 del self.lines[line]
                 self.total_lines -= 1
                 self.redo_stack.append(action)
-                cursor_pos = (max(0, line - 1), 0)
+                cursor_pos = (cursor_line_before if cursor_line_before is not None else max(0, line - 1),
+                             cursor_col_before if cursor_col_before is not None else 0)
                 
             elif action_type == 'delete_line':
                 # Undo delete line: insert the line back
@@ -724,7 +754,8 @@ class VirtualTextBuffer:
                 self.lines.insert(line, text)
                 self.total_lines += 1
                 self.redo_stack.append(action)
-                cursor_pos = (line, 0)
+                cursor_pos = (cursor_line_before if cursor_line_before is not None else line,
+                             cursor_col_before if cursor_col_before is not None else 0)
                 
             elif action_type == 'merge_lines':
                 # Undo merge: split lines back
@@ -737,20 +768,20 @@ class VirtualTextBuffer:
                 self.lines.insert(line + 1, part2)
                 self.total_lines += 1
                 self.redo_stack.append(action)
-                cursor_pos = (line, len(part1))
+                cursor_pos = (cursor_line_before if cursor_line_before is not None else line,
+                             cursor_col_before if cursor_col_before is not None else len(part1))
             
             elif action_type == 'delete_multiline':
-                # Undo delete multiline: restore all deleted lines
+                # Undo delete multiline: restore all deleted lines and selection
                 start_line = data['start_line']
                 old_lines = data['old_lines']
                 # Replace the merged line with original lines
                 self.lines[start_line:start_line+1] = old_lines
                 self.total_lines += len(old_lines) - 1
                 self.redo_stack.append(action)
-                # Place cursor at the end of selection
-                end_line = data['end_line']
-                end_col = data['end_col']
-                cursor_pos = (end_line, end_col)
+                # Restore to cursor position before deletion (which had selection)
+                cursor_pos = (cursor_line_before if cursor_line_before is not None else data['end_line'],
+                             cursor_col_before if cursor_col_before is not None else data['end_col'])
             
             elif action_type == 'insert_multiline':
                 # Undo multi-line insert: remove inserted lines
@@ -771,7 +802,8 @@ class VirtualTextBuffer:
                     self.total_lines -= lines_added
                 
                 self.redo_stack.append(action)
-                cursor_pos = (line, col)
+                cursor_pos = (cursor_line_before if cursor_line_before is not None else line,
+                             cursor_col_before if cursor_col_before is not None else col)
             
             elif action_type == 'replace_all':
                 # Undo replace all: restore all old lines
@@ -787,7 +819,18 @@ class VirtualTextBuffer:
             self.modified = True
             self._token_cache.clear()
             self.in_undo_redo = False
-            return cursor_pos
+            
+            # Return cursor position and selection state
+            return {
+                'cursor': cursor_pos,
+                'selection': {
+                    'has_selection': has_selection,
+                    'start_line': selection_start_line,
+                    'start_col': selection_start_col,
+                    'end_line': selection_end_line,
+                    'end_col': selection_end_col
+                }
+            }
             
         except Exception as e:
             print(f"Error during undo: {e}")
@@ -795,7 +838,7 @@ class VirtualTextBuffer:
             return False
     
     def redo(self):
-        """Redo the last undone action"""
+        """Redo the last undone action and restore state"""
         if not self.redo_stack:
             return False
         
@@ -814,7 +857,11 @@ class VirtualTextBuffer:
                 new_text = old_text[:start] + text + old_text[start:]
                 self.lines[line] = new_text
                 self.undo_stack.append(action)
+                # After inserting, cursor goes to end of inserted text
                 cursor_pos = (line, start + len(text))
+                # No selection after insert
+                has_selection = False
+                selection_state = None
                 
             elif action_type == 'delete':
                 # Redo delete: delete the text again
@@ -825,7 +872,11 @@ class VirtualTextBuffer:
                 new_line = old_line[:pos] + old_line[end:]
                 self.lines[line] = new_line
                 self.undo_stack.append(action)
+                # After deleting, cursor goes to deletion point
                 cursor_pos = (line, pos)
+                # No selection after delete
+                has_selection = False
+                selection_state = None
                 
             elif action_type == 'replace':
                 # Redo replace: apply new text
@@ -834,6 +885,8 @@ class VirtualTextBuffer:
                 self.lines[line] = new_text
                 self.undo_stack.append(action)
                 cursor_pos = (line, data.get('cursor_col', 0))
+                has_selection = False
+                selection_state = None
                 
             elif action_type == 'insert_line':
                 # Redo insert line: insert the line
@@ -843,6 +896,8 @@ class VirtualTextBuffer:
                 self.total_lines += 1
                 self.undo_stack.append(action)
                 cursor_pos = (line, 0)
+                has_selection = False
+                selection_state = None
                 
             elif action_type == 'delete_line':
                 # Redo delete line: delete the line
@@ -851,6 +906,8 @@ class VirtualTextBuffer:
                 self.total_lines -= 1
                 self.undo_stack.append(action)
                 cursor_pos = (max(0, line - 1), 0)
+                has_selection = False
+                selection_state = None
                 
             elif action_type == 'merge_lines':
                 # Redo merge: merge lines again
@@ -861,6 +918,8 @@ class VirtualTextBuffer:
                 self.total_lines -= 1
                 self.undo_stack.append(action)
                 cursor_pos = (line, data['split_pos'])
+                has_selection = False
+                selection_state = None
             
             elif action_type == 'delete_multiline':
                 # Redo delete multiline: delete the lines again
@@ -877,7 +936,10 @@ class VirtualTextBuffer:
                 self.lines[start_line:end_line+1] = [merged_text]
                 self.total_lines -= (end_line - start_line)
                 self.undo_stack.append(action)
+                # After deletion, cursor at deletion point
                 cursor_pos = (start_line, start_col)
+                has_selection = False
+                selection_state = None
             
             elif action_type == 'insert_multiline':
                 # Redo multi-line insert: insert the text again
@@ -917,6 +979,8 @@ class VirtualTextBuffer:
                 
                 self.undo_stack.append(action)
                 cursor_pos = (final_line, final_col)
+                has_selection = False
+                selection_state = None
             
             elif action_type == 'replace_all':
                 # Redo replace all: apply new lines
@@ -925,14 +989,29 @@ class VirtualTextBuffer:
                 self.total_lines = len(self.lines)
                 self.undo_stack.append(action)
                 cursor_pos = (0, 0)
+                has_selection = False
+                selection_state = None
             
             else:
                 cursor_pos = (0, 0)
+                has_selection = False
+                selection_state = None
             
             self.modified = True
             self._token_cache.clear()
             self.in_undo_redo = False
-            return cursor_pos
+            
+            # Return cursor position and selection state
+            return {
+                'cursor': cursor_pos,
+                'selection': {
+                    'has_selection': has_selection,
+                    'start_line': None,
+                    'start_col': None,
+                    'end_line': None,
+                    'end_col': None
+                }
+            }
             
         except Exception as e:
             print(f"Error during redo: {e}")
@@ -1398,10 +1477,20 @@ class VirtualTextView(Gtk.DrawingArea):
                 # Undo
                 result = self.buffer.undo()
                 if result:
-                    line, col = result
+                    # Handle new return format with cursor and selection
+                    line, col = result['cursor']
                     self.cursor_line = line
                     self.cursor_col = col
-                    self.has_selection = False
+                    
+                    # Restore selection state
+                    sel_state = result['selection']
+                    self.has_selection = sel_state['has_selection']
+                    if self.has_selection:
+                        self.selection_start_line = sel_state['start_line']
+                        self.selection_start_col = sel_state['start_col']
+                        self.selection_end_line = sel_state['end_line']
+                        self.selection_end_col = sel_state['end_col']
+                    
                     # Cancel editing mode
                     if self.editing:
                         self.editing = False
@@ -1413,10 +1502,20 @@ class VirtualTextView(Gtk.DrawingArea):
                 # Redo (Ctrl+Y)
                 result = self.buffer.redo()
                 if result:
-                    line, col = result
+                    # Handle new return format with cursor and selection
+                    line, col = result['cursor']
                     self.cursor_line = line
                     self.cursor_col = col
-                    self.has_selection = False
+                    
+                    # Restore selection state
+                    sel_state = result['selection']
+                    self.has_selection = sel_state['has_selection']
+                    if self.has_selection:
+                        self.selection_start_line = sel_state['start_line']
+                        self.selection_start_col = sel_state['start_col']
+                        self.selection_end_line = sel_state['end_line']
+                        self.selection_end_col = sel_state['end_col']
+                    
                     # Cancel editing mode
                     if self.editing:
                         self.editing = False
@@ -1443,10 +1542,20 @@ class VirtualTextView(Gtk.DrawingArea):
                 # Redo (Ctrl+Shift+Z)
                 result = self.buffer.redo()
                 if result:
-                    line, col = result
+                    # Handle new return format with cursor and selection
+                    line, col = result['cursor']
                     self.cursor_line = line
                     self.cursor_col = col
-                    self.has_selection = False
+                    
+                    # Restore selection state
+                    sel_state = result['selection']
+                    self.has_selection = sel_state['has_selection']
+                    if self.has_selection:
+                        self.selection_start_line = sel_state['start_line']
+                        self.selection_start_col = sel_state['start_col']
+                        self.selection_end_line = sel_state['end_line']
+                        self.selection_end_col = sel_state['end_col']
+                    
                     # Cancel editing mode
                     if self.editing:
                         self.editing = False
@@ -1462,6 +1571,10 @@ class VirtualTextView(Gtk.DrawingArea):
             if not self.editing:
                 self._start_editing()
             if self.editing:
+                # Save cursor state before tab insertion
+                saved_cursor_line = self.cursor_line
+                saved_cursor_col = self.cursor_col
+                
                 # Add undo action for tab insertion
                 old_text = self.edit_text
                 self.buffer.add_undo_action('insert', {
@@ -1469,7 +1582,10 @@ class VirtualTextView(Gtk.DrawingArea):
                     'start': self.edit_cursor_pos,
                     'end': self.edit_cursor_pos + 1,
                     'text': '\t'
-                })
+                }, cursor_line=saved_cursor_line, cursor_col=self.edit_cursor_pos,
+                   selection_start_line=None, selection_start_col=None,
+                   selection_end_line=None, selection_end_col=None,
+                   has_selection=False)
                 self.edit_text = self.edit_text[:self.edit_cursor_pos] + '\t' + self.edit_text[self.edit_cursor_pos:]
                 self.edit_cursor_pos += 1
                 self.cursor_col = self.edit_cursor_pos
@@ -1553,6 +1669,10 @@ class VirtualTextView(Gtk.DrawingArea):
                 # Commit any pending word
                 self._commit_word_to_undo()
                 
+                # Save cursor state before Enter
+                saved_cursor_line = self.cursor_line
+                saved_cursor_col = self.cursor_col
+                
                 if self.has_selection:
                     self._delete_selection()
                 current_line_text = self.buffer.get_line(self.cursor_line)
@@ -1563,7 +1683,10 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.buffer.add_undo_action('insert_line', {
                     'line': self.cursor_line + 1,
                     'text': part2
-                })
+                }, cursor_line=saved_cursor_line, cursor_col=saved_cursor_col,
+                   selection_start_line=None, selection_start_col=None,
+                   selection_end_line=None, selection_end_col=None,
+                   has_selection=False)
                 
                 self.buffer.set_line(self.cursor_line, part1)
                 self.buffer.insert_line(self.cursor_line + 1, part2)
@@ -1618,6 +1741,10 @@ class VirtualTextView(Gtk.DrawingArea):
                 # Commit any pending word
                 self._commit_word_to_undo()
                 
+                # Save cursor state before Enter
+                saved_cursor_line = self.cursor_line
+                saved_cursor_col = self.edit_cursor_pos
+                
                 if self.has_selection:
                     self._delete_selection()
                 current_edit_cursor_pos = self.edit_cursor_pos
@@ -1630,7 +1757,10 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.buffer.add_undo_action('insert_line', {
                     'line': self.cursor_line + 1,
                     'text': part2
-                })
+                }, cursor_line=saved_cursor_line, cursor_col=saved_cursor_col,
+                   selection_start_line=None, selection_start_col=None,
+                   selection_end_line=None, selection_end_col=None,
+                   has_selection=False)
                 
                 self.buffer.set_line(self.cursor_line, part1)
                 self.buffer.insert_line(self.cursor_line + 1, part2)
@@ -2157,6 +2287,15 @@ class VirtualTextView(Gtk.DrawingArea):
         # Get the selected text before deleting
         selected_text = self._get_selected_text()
         
+        # Save current cursor and selection state BEFORE deleting
+        saved_cursor_line = self.cursor_line
+        saved_cursor_col = self.cursor_col
+        saved_sel_start_line = self.selection_start_line
+        saved_sel_start_col = self.selection_start_col
+        saved_sel_end_line = self.selection_end_line
+        saved_sel_end_col = self.selection_end_col
+        saved_has_selection = self.has_selection
+        
         start_line, start_col, end_line, end_col = bounds
         if start_line == end_line:
             # Selection within a single line - add undo action
@@ -2165,13 +2304,16 @@ class VirtualTextView(Gtk.DrawingArea):
             else:
                 line_text = self.buffer.get_line(start_line)
             
-            # Add undo action for single-line deletion
+            # Add undo action for single-line deletion with selection state
             self.buffer.add_undo_action('delete', {
                 'line': start_line,
                 'pos': start_col,
                 'end': end_col,
                 'text': selected_text
-            })
+            }, cursor_line=saved_cursor_line, cursor_col=saved_cursor_col,
+               selection_start_line=saved_sel_start_line, selection_start_col=saved_sel_start_col,
+               selection_end_line=saved_sel_end_line, selection_end_col=saved_sel_end_col,
+               has_selection=saved_has_selection)
             
             new_text = line_text[:start_col] + line_text[end_col:]
             if self.editing and start_line == self.edit_line:
@@ -2199,7 +2341,7 @@ class VirtualTextView(Gtk.DrawingArea):
             # Store the old lines for undo
             old_lines = self.buffer.lines[start_line:end_line + 1].copy()
             
-            # Add undo action for multi-line deletion
+            # Add undo action for multi-line deletion with selection state
             self.buffer.add_undo_action('delete_multiline', {
                 'start_line': start_line,
                 'end_line': end_line,
@@ -2207,7 +2349,10 @@ class VirtualTextView(Gtk.DrawingArea):
                 'end_col': end_col,
                 'old_lines': old_lines,
                 'selected_text': selected_text
-            })
+            }, cursor_line=saved_cursor_line, cursor_col=saved_cursor_col,
+               selection_start_line=saved_sel_start_line, selection_start_col=saved_sel_start_col,
+               selection_end_line=saved_sel_end_line, selection_end_col=saved_sel_end_col,
+               has_selection=saved_has_selection)
             
             # Set the merged content on the first line
             self.buffer.set_line(start_line, merged_text)
@@ -2435,6 +2580,10 @@ class VirtualTextView(Gtk.DrawingArea):
             self.queue_draw()
     def _insert_text_at_cursor(self, text):
         """Insert text at the current cursor position"""
+        # Save cursor state before insertion
+        saved_cursor_line = self.cursor_line
+        saved_cursor_col = self.cursor_col
+        
         if self.has_selection:
             # Delete selection first
             self._delete_selection()
@@ -2454,7 +2603,10 @@ class VirtualTextView(Gtk.DrawingArea):
                 'col': self.cursor_col,
                 'text': text,
                 'old_line_text': old_line_text
-            })
+            }, cursor_line=saved_cursor_line, cursor_col=saved_cursor_col,
+               selection_start_line=None, selection_start_col=None,
+               selection_end_line=None, selection_end_col=None,
+               has_selection=False)
             
             thread = threading.Thread(target=self._async_insert_text, args=(text,))
             thread.daemon = True
@@ -2468,7 +2620,10 @@ class VirtualTextView(Gtk.DrawingArea):
                     'start': self.edit_cursor_pos,
                     'end': self.edit_cursor_pos + len(text),
                     'text': text
-                })
+                }, cursor_line=saved_cursor_line, cursor_col=saved_cursor_col,
+                   selection_start_line=None, selection_start_col=None,
+                   selection_end_line=None, selection_end_col=None,
+                   has_selection=False)
                 
                 self.edit_text = (self.edit_text[:self.edit_cursor_pos] + text + self.edit_text[self.edit_cursor_pos:])
                 self.edit_cursor_pos += len(text)
@@ -3091,12 +3246,16 @@ class VirtualTextView(Gtk.DrawingArea):
         if self.word_buffer and self.word_start_line >= 0:
             # Calculate end position
             end_col = self.word_start_col + len(self.word_buffer)
+            # Save cursor position before the word was typed
             self.buffer.add_undo_action('insert', {
                 'line': self.word_start_line,
                 'start': self.word_start_col,
                 'end': end_col,
                 'text': self.word_buffer
-            })
+            }, cursor_line=self.word_start_line, cursor_col=self.word_start_col,
+               selection_start_line=None, selection_start_col=None,
+               selection_end_line=None, selection_end_col=None,
+               has_selection=False)
             print(f"Committed word to undo: '{self.word_buffer}' at {self.word_start_line}:{self.word_start_col}")
         # Reset word buffer
         self.word_buffer = ""
@@ -3190,8 +3349,8 @@ class VirtualTextView(Gtk.DrawingArea):
             width = logical_rect.width / Pango.SCALE
             if width > max_width:
                 max_width = width
-        # Only add small padding for horizontal scroolbar to become visible
-        self.max_line_width = max_width + self.char_width * 1
+        # Only add small padding, not excessive buffer
+        self.max_line_width = max_width + self.char_width * 2
     def set_buffer(self, buffer):
         self.buffer = buffer
         self.scroll_y = 0
