@@ -739,6 +739,40 @@ class VirtualTextBuffer:
                 self.redo_stack.append(action)
                 cursor_pos = (line, len(part1))
             
+            elif action_type == 'delete_multiline':
+                # Undo delete multiline: restore all deleted lines
+                start_line = data['start_line']
+                old_lines = data['old_lines']
+                # Replace the merged line with original lines
+                self.lines[start_line:start_line+1] = old_lines
+                self.total_lines += len(old_lines) - 1
+                self.redo_stack.append(action)
+                # Place cursor at the end of selection
+                end_line = data['end_line']
+                end_col = data['end_col']
+                cursor_pos = (end_line, end_col)
+            
+            elif action_type == 'insert_multiline':
+                # Undo multi-line insert: remove inserted lines
+                line = data['line']
+                col = data['col']
+                text = data['text']
+                old_line_text = data['old_line_text']
+                
+                # Count lines added
+                lines_added = text.count('\n')
+                
+                # Restore original line
+                self.lines[line] = old_line_text
+                
+                # Remove added lines if any
+                if lines_added > 0:
+                    del self.lines[line + 1: line + 1 + lines_added]
+                    self.total_lines -= lines_added
+                
+                self.redo_stack.append(action)
+                cursor_pos = (line, col)
+            
             elif action_type == 'replace_all':
                 # Undo replace all: restore all old lines
                 old_lines = data['old_lines']
@@ -827,6 +861,62 @@ class VirtualTextBuffer:
                 self.total_lines -= 1
                 self.undo_stack.append(action)
                 cursor_pos = (line, data['split_pos'])
+            
+            elif action_type == 'delete_multiline':
+                # Redo delete multiline: delete the lines again
+                start_line = data['start_line']
+                end_line = data['end_line']
+                start_col = data['start_col']
+                end_col = data['end_col']
+                old_lines = data['old_lines']
+                # Merge first and last line
+                before_text = old_lines[0][:start_col]
+                after_text = old_lines[-1][end_col:]
+                merged_text = before_text + after_text
+                # Replace with merged line
+                self.lines[start_line:end_line+1] = [merged_text]
+                self.total_lines -= (end_line - start_line)
+                self.undo_stack.append(action)
+                cursor_pos = (start_line, start_col)
+            
+            elif action_type == 'insert_multiline':
+                # Redo multi-line insert: insert the text again
+                line = data['line']
+                col = data['col']
+                text = data['text']
+                old_line_text = data['old_line_text']
+                
+                # Split the text into lines
+                paste_lines = text.split('\n')
+                before_text = old_line_text[:col]
+                after_text = old_line_text[col:]
+                
+                # Build new lines
+                first_line = before_text + paste_lines[0]
+                new_lines = [first_line]
+                
+                if len(paste_lines) > 1:
+                    # Add middle lines
+                    new_lines.extend(paste_lines[1:-1])
+                    # Add last line
+                    last_line = paste_lines[-1] + after_text
+                    new_lines.append(last_line)
+                    
+                    # Calculate final position
+                    final_line = line + len(paste_lines) - 1
+                    final_col = len(paste_lines[-1])
+                else:
+                    # Single line: append after_text
+                    new_lines[0] = first_line + after_text
+                    final_line = line
+                    final_col = col + len(text)
+                
+                # Replace the line with new lines
+                self.lines[line:line+1] = new_lines
+                self.total_lines += len(new_lines) - 1
+                
+                self.undo_stack.append(action)
+                cursor_pos = (final_line, final_col)
             
             elif action_type == 'replace_all':
                 # Redo replace all: apply new lines
@@ -2063,13 +2153,26 @@ class VirtualTextView(Gtk.DrawingArea):
         bounds = self._get_selection_bounds()
         if not bounds:
             return False
+        
+        # Get the selected text before deleting
+        selected_text = self._get_selected_text()
+        
         start_line, start_col, end_line, end_col = bounds
         if start_line == end_line:
-            # Selection within a single line
+            # Selection within a single line - add undo action
             if self.editing and start_line == self.edit_line:
                 line_text = self.edit_text
             else:
                 line_text = self.buffer.get_line(start_line)
+            
+            # Add undo action for single-line deletion
+            self.buffer.add_undo_action('delete', {
+                'line': start_line,
+                'pos': start_col,
+                'end': end_col,
+                'text': selected_text
+            })
+            
             new_text = line_text[:start_col] + line_text[end_col:]
             if self.editing and start_line == self.edit_line:
                 self.edit_text = new_text
@@ -2092,6 +2195,20 @@ class VirtualTextView(Gtk.DrawingArea):
             before_text = first_line_text[:start_col]
             after_text = last_line_text[end_col:]
             merged_text = before_text + after_text
+            
+            # Store the old lines for undo
+            old_lines = self.buffer.lines[start_line:end_line + 1].copy()
+            
+            # Add undo action for multi-line deletion
+            self.buffer.add_undo_action('delete_multiline', {
+                'start_line': start_line,
+                'end_line': end_line,
+                'start_col': start_col,
+                'end_col': end_col,
+                'old_lines': old_lines,
+                'selected_text': selected_text
+            })
+            
             # Set the merged content on the first line
             self.buffer.set_line(start_line, merged_text)
             # Delete lines from start_line + 1 to end_line
@@ -2330,12 +2447,29 @@ class VirtualTextView(Gtk.DrawingArea):
         # Handle the text insertion
         if '\n' in text:
             # Multi-line paste - handle in background thread
+            # Add undo action for multi-line paste
+            old_line_text = self.buffer.get_line(self.cursor_line)
+            self.buffer.add_undo_action('insert_multiline', {
+                'line': self.cursor_line,
+                'col': self.cursor_col,
+                'text': text,
+                'old_line_text': old_line_text
+            })
+            
             thread = threading.Thread(target=self._async_insert_text, args=(text,))
             thread.daemon = True
             thread.start()
         else:
             # Single line text - handle immediately
             if self.editing:
+                # Add undo action for paste
+                self.buffer.add_undo_action('insert', {
+                    'line': self.edit_line,
+                    'start': self.edit_cursor_pos,
+                    'end': self.edit_cursor_pos + len(text),
+                    'text': text
+                })
+                
                 self.edit_text = (self.edit_text[:self.edit_cursor_pos] + text + self.edit_text[self.edit_cursor_pos:])
                 self.edit_cursor_pos += len(text)
                 self.cursor_col = self.edit_cursor_pos
@@ -2430,6 +2564,8 @@ class VirtualTextView(Gtk.DrawingArea):
         y_offset = -(self.scroll_y % self.line_height)
         visual_line_counter = 0
         line_index = 0
+        
+        # First pass: Draw line numbers (before highlight)
         while line_index < len(wrapped_lines_data) and visual_line_counter < self.visible_lines + 20:
             wrapped_segments = wrapped_lines_data[line_index]
             logical_line_num = start_line + line_index
@@ -2437,7 +2573,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 y_pos = int(y_offset + visual_line_counter * self.line_height)
                 if y_pos > height:
                     break
-                # display line number background
+                # display line number
                 cr.set_source_rgb(0.3, 0.3, 0.3) if not is_dark else cr.set_source_rgb(0.3, 0.3, 0.3)
                 line_num_layout = self.create_pango_layout("")
                 line_num_layout.set_font_description(self.font_desc)
@@ -2487,11 +2623,28 @@ class VirtualTextView(Gtk.DrawingArea):
                     else:
                         cursor_in_segment = seg_start_col <= self.cursor_col <= seg_end_col
                     if cursor_in_segment:
-                        # Current line Highlight
+                        # Draw current line highlight OVER the entire line including line numbers
+                        cr.restore()  # Remove clipping temporarily
                         cr.set_source_rgb(0.95, 0.95, 1.0) if not is_dark else cr.set_source_rgb(0.2, 0.2, 0.3)
-                        highlight_x_start = line_num_width
-                        cr.rectangle(highlight_x_start, y_pos - 2, width - line_num_width, self.line_height)
+                        # Start from x=0 to include line number area
+                        cr.rectangle(0, y_pos - 2, width, self.line_height)
                         cr.fill()
+                        
+                        # Redraw line number on top of highlight with better visibility
+                        cr.set_source_rgb(0.5, 0.5, 0.5) if not is_dark else cr.set_source_rgb(0.6, 0.6, 0.6)
+                        line_num_layout = self.create_pango_layout("")
+                        line_num_layout.set_font_description(self.font_desc)
+                        line_num_layout.set_text(str(logical_line_num + 1))
+                        ink_extents = line_num_layout.get_pixel_extents()[0]
+                        text_width = ink_extents.width
+                        x_pos = line_num_width - text_width - 4
+                        cr.move_to(x_pos, y_pos)
+                        PangoCairo.show_layout(cr, line_num_layout)
+                        
+                        # Restore clipping for text area
+                        cr.save()
+                        cr.rectangle(line_num_width, 0, width - line_num_width, height)
+                        cr.clip()
                 if self.highlight_matches and self.highlight_pattern:
                     for match in self.highlight_pattern.finditer(segment_text):
                         mstart, mend = match.span()
@@ -3037,7 +3190,8 @@ class VirtualTextView(Gtk.DrawingArea):
             width = logical_rect.width / Pango.SCALE
             if width > max_width:
                 max_width = width
-        self.max_line_width = max_width + 20 * self.char_width
+        # Only add small padding, not excessive buffer
+        self.max_line_width = max_width + self.char_width * 2
     def set_buffer(self, buffer):
         self.buffer = buffer
         self.scroll_y = 0
