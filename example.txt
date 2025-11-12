@@ -1,0 +1,7 @@
+welcome to the document editor with which you can edit huge files easily like dictionary glossaries.
+
+it is supposed to perfrom superiorly; 
+
+other text editors take a lot of time to load a million line file. whereas this will be instant.
+
+this is what make this the best editor.
