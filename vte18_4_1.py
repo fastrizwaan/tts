@@ -1896,25 +1896,8 @@ class VirtualTextView(Gtk.DrawingArea):
             
             if keyval in [Gdk.KEY_Up, Gdk.KEY_Down, Gdk.KEY_Left, Gdk.KEY_Right]:
                 if shift_pressed and not self.has_selection:
-                    current_line_text = self.buffer.get_line(self.cursor_line)
-                    # If current line is empty, adjust selection start based on direction
-                    if len(current_line_text.strip()) == 0:
-                        if keyval == Gdk.KEY_Down and self.cursor_line < self.buffer.total_lines - 1:
-                            # Moving down from empty line - start selection from next line
-                            self.selection_start_line = self.cursor_line + 1
-                            self.selection_start_col = 0
-                        elif keyval == Gdk.KEY_Up and self.cursor_line > 0:
-                            # Moving up from empty line - start selection from end of previous line
-                            prev_line_text = self.buffer.get_line(self.cursor_line - 1)
-                            self.selection_start_line = self.cursor_line - 1
-                            self.selection_start_col = len(prev_line_text)
-                        else:
-                            # Left/Right or can't adjust
-                            self.selection_start_line = self.cursor_line
-                            self.selection_start_col = self.cursor_col
-                    else:
-                        self.selection_start_line = self.cursor_line
-                        self.selection_start_col = self.cursor_col
+                    self.selection_start_line = self.cursor_line
+                    self.selection_start_col = self.cursor_col
                 if keyval == Gdk.KEY_Up:
                     self._move_cursor_up(shift_pressed)
                 elif keyval == Gdk.KEY_Down:
@@ -1938,20 +1921,8 @@ class VirtualTextView(Gtk.DrawingArea):
                 return True
             elif keyval in [Gdk.KEY_Home, Gdk.KEY_End]:
                 if shift_pressed and not self.has_selection:
-                    current_line_text = self.buffer.get_line(self.cursor_line)
-                    # If current line is empty, don't start selection from it
-                    if len(current_line_text.strip()) == 0:
-                        if keyval == Gdk.KEY_Home:
-                            # For Home, stay at current position
-                            self.selection_start_line = self.cursor_line
-                            self.selection_start_col = 0
-                        else:  # End key
-                            # For End, stay at current position
-                            self.selection_start_line = self.cursor_line
-                            self.selection_start_col = 0
-                    else:
-                        self.selection_start_line = self.cursor_line
-                        self.selection_start_col = self.cursor_col
+                    self.selection_start_line = self.cursor_line
+                    self.selection_start_col = self.cursor_col
                 if keyval == Gdk.KEY_Home:
                     if ctrl_pressed:
                         if shift_pressed:
@@ -2490,13 +2461,6 @@ class VirtualTextView(Gtk.DrawingArea):
         end_line = min(self.buffer.total_lines - 1, start_line + self.visible_lines + 50)
         wrapped_lines_data = self._get_wrapped_lines(start_line, end_line)
         y_offset = -(self.scroll_y % self.line_height)
-        
-        # If y is above the visible area (negative), return the first visible line
-        if y < y_offset:
-            if len(wrapped_lines_data) > 0 and len(wrapped_lines_data[0]) > 0:
-                return start_line, 0, 0
-            return start_line, 0, 0
-        
         visual_line_counter = 0
         logical_line_index = 0
         while logical_line_index < len(wrapped_lines_data):
@@ -2509,7 +2473,6 @@ class VirtualTextView(Gtk.DrawingArea):
                     return logical_line_num, seg_start_col, segment_index
                 visual_line_counter += 1
             logical_line_index += 1
-        # If y is below the visible area, return the last line in the data
         if len(wrapped_lines_data) > 0:
             last_logical_index = len(wrapped_lines_data) - 1
             last_wrapped_segments = wrapped_lines_data[last_logical_index]
@@ -2599,43 +2562,9 @@ class VirtualTextView(Gtk.DrawingArea):
             return
         current_x = start_x + offset_x
         current_y = start_y + offset_y
-        
-        # Auto-scroll when dragging outside visible area
-        widget_height = self.get_height()
-        scroll_margin = self.line_height * 2
-        
-        if current_y < scroll_margin and self.scroll_y > 0:
-            # Dragging near top - scroll up
-            self.scroll_y = max(0, self.scroll_y - self.line_height)
-            self._update_scrollbar()
-        elif current_y > widget_height - scroll_margin:
-            # Dragging near bottom - scroll down
-            max_scroll = max(0, (self.buffer.total_lines * self.line_height) - widget_height)
-            self.scroll_y = min(max_scroll, self.scroll_y + self.line_height)
-            self._update_scrollbar()
-        
         line, col = self._get_position_from_coords(current_x, current_y)
         if line == -1:
             return
-        
-        # Adjust selection_start if starting from empty line and moving away for the first time
-        if not self.has_selection and line != self.selection_start_line:
-            start_line_text = self.buffer.get_line(self.selection_start_line)
-            if len(start_line_text.strip()) == 0:
-                # Starting from empty line - adjust selection_start based on direction
-                if line > self.selection_start_line:
-                    # Dragging down - start selection from next line
-                    if self.selection_start_line < self.buffer.total_lines - 1:
-                        self.selection_start_line = self.selection_start_line + 1
-                        self.selection_start_col = 0
-                elif line < self.selection_start_line:
-                    # Dragging up - start selection from end of previous line
-                    if self.selection_start_line > 0:
-                        prev_line_text = self.buffer.get_line(self.selection_start_line - 1)
-                        self.selection_start_line = self.selection_start_line - 1
-                        self.selection_start_col = len(prev_line_text)
-        
-        # Always include current line in selection (even if empty)
         self.selection_end_line = line
         self.selection_end_col = col
         self.cursor_line = line
@@ -2666,41 +2595,8 @@ class VirtualTextView(Gtk.DrawingArea):
             return (e_line, e_col, s_line, s_col)
         else:
             return (s_line, s_col, e_line, e_col)
-    
-    def _get_normalized_selection_bounds(self):
-        """Get selection bounds with empty start/end lines excluded (for copy/cut)"""
-        bounds = self._get_selection_bounds()
-        if not bounds:
-            return None
-        
-        start_line, start_col, end_line, end_col = bounds
-        
-        # Skip starting empty lines
-        while start_line < end_line:
-            line_text = self.buffer.get_line(start_line)
-            if len(line_text.strip()) == 0 and start_col == 0:
-                start_line += 1
-                start_col = 0
-            else:
-                break
-        
-        # Skip ending empty lines
-        while end_line > start_line:
-            line_text = self.buffer.get_line(end_line)
-            if len(line_text.strip()) == 0 and end_col == 0:
-                end_line -= 1
-                # Set end_col to end of previous line
-                end_col = len(self.buffer.get_line(end_line))
-            else:
-                break
-        
-        # Check if selection is now empty
-        if start_line == end_line and start_col >= end_col:
-            return None
-        
-        return (start_line, start_col, end_line, end_col)
     def _get_selected_text(self):
-        bounds = self._get_normalized_selection_bounds()
+        bounds = self._get_selection_bounds()
         if not bounds:
             return ""
         start_line, start_col, end_line, end_col = bounds
@@ -2729,7 +2625,7 @@ class VirtualTextView(Gtk.DrawingArea):
             lines.append(last_line_text[:end_col])
             return "\n".join(lines)
     def _delete_selection(self):
-        bounds = self._get_normalized_selection_bounds()
+        bounds = self._get_selection_bounds()
         if not bounds:
             return False
         
@@ -2931,9 +2827,6 @@ class VirtualTextView(Gtk.DrawingArea):
         try:
             self.buffer.modified = True
             self.buffer.lines[edit_line] = new_lines[0]
-            # Clear token cache for modified line
-            if edit_line in self.buffer._token_cache:
-                del self.buffer._token_cache[edit_line]
             additional_lines = new_lines[1:]
             if len(new_lines) > 1:
                 self.editing = False
@@ -2974,8 +2867,6 @@ class VirtualTextView(Gtk.DrawingArea):
                 end_idx = min(start_idx + chunk_size, len(additional_lines))
                 chunk = additional_lines[start_idx:end_idx]
                 self.buffer.lines[insert_pos:insert_pos] = chunk
-                # Clear token cache since line numbers shifted
-                self.buffer._token_cache.clear()
                 chunk_len = len(chunk)
                 added += chunk_len
                 insert_pos += chunk_len
@@ -2992,9 +2883,6 @@ class VirtualTextView(Gtk.DrawingArea):
         try:
             self.buffer.modified = True
             self.buffer.lines[cursor_line] = lines_to_insert[0]
-            # Clear token cache for modified line
-            if cursor_line in self.buffer._token_cache:
-                del self.buffer._token_cache[cursor_line]
             additional_lines = lines_to_insert[1:]
             if not additional_lines:
                 self.cursor_line = final_cursor_line
@@ -3029,8 +2917,6 @@ class VirtualTextView(Gtk.DrawingArea):
                 end_idx = min(start_idx + chunk_size, len(additional_lines))
                 chunk = additional_lines[start_idx:end_idx]
                 self.buffer.lines[insert_pos:insert_pos] = chunk
-                # Clear token cache since line numbers shifted
-                self.buffer._token_cache.clear()
                 chunk_len = len(chunk)
                 added += chunk_len
                 insert_pos += chunk_len
@@ -3680,16 +3566,8 @@ class VirtualTextView(Gtk.DrawingArea):
     def _move_cursor_up(self, extend_selection=False):
         if self.cursor_line > 0:
             if extend_selection and not self.has_selection:
-                # Check if current line is empty - if so, start selection from previous line end
-                current_line_text = self.buffer.get_line(self.cursor_line)
-                if len(current_line_text.strip()) == 0:
-                    # Current line is empty, start selection from end of previous line
-                    prev_line_text = self.buffer.get_line(self.cursor_line - 1)
-                    self.selection_start_line = self.cursor_line - 1
-                    self.selection_start_col = len(prev_line_text)
-                else:
-                    self.selection_start_line = self.cursor_line
-                    self.selection_start_col = self.cursor_col
+                self.selection_start_line = self.cursor_line
+                self.selection_start_col = self.cursor_col
             elif not extend_selection:
                 self.has_selection = False
                 self.cursor_visible = True
@@ -3697,7 +3575,6 @@ class VirtualTextView(Gtk.DrawingArea):
             line_text = self.buffer.get_line(self.cursor_line)
             self.cursor_col = min(self.cursor_col, len(line_text))
             if extend_selection:
-                # Always include the current line in selection (even if empty)
                 self.selection_end_line = self.cursor_line
                 self.selection_end_col = self.cursor_col
                 self.has_selection = True
@@ -3709,15 +3586,8 @@ class VirtualTextView(Gtk.DrawingArea):
     def _move_cursor_down(self, extend_selection=False):
         if self.cursor_line < self.buffer.total_lines - 1:
             if extend_selection and not self.has_selection:
-                # Check if current line is empty - if so, start selection from next line
-                current_line_text = self.buffer.get_line(self.cursor_line)
-                if len(current_line_text.strip()) == 0:
-                    # Current line is empty, start selection from next line
-                    self.selection_start_line = self.cursor_line + 1
-                    self.selection_start_col = 0
-                else:
-                    self.selection_start_line = self.cursor_line
-                    self.selection_start_col = self.cursor_col
+                self.selection_start_line = self.cursor_line
+                self.selection_start_col = self.cursor_col
             elif not extend_selection:
                 self.has_selection = False
                 self.cursor_visible = True
@@ -3725,7 +3595,6 @@ class VirtualTextView(Gtk.DrawingArea):
             line_text = self.buffer.get_line(self.cursor_line)
             self.cursor_col = min(self.cursor_col, len(line_text))
             if extend_selection:
-                # Always include the current line in selection (even if empty)
                 self.selection_end_line = self.cursor_line
                 self.selection_end_col = self.cursor_col
                 self.has_selection = True
