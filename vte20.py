@@ -2024,53 +2024,69 @@ class VirtualTextView(Gtk.DrawingArea):
                 return True
             elif keyval in [Gdk.KEY_Delete, Gdk.KEY_BackSpace]:
                 if self.has_selection:
-                    # Check if we have an empty line selection (0-0)
+                    # Recompute corrected bounds (patched to treat empty line as character)
                     bounds = self._get_selection_bounds()
                     if bounds:
                         start_line, start_col, end_line, end_col = bounds
-                        # Check if this is an empty line selection (single line, 0-0 or 0-huge)
+
+                        # -------------------------------
+                        # A) SINGLE EMPTY LINE DELETE
+                        # -------------------------------
                         if start_line == end_line:
                             line_text = self.buffer.get_line(start_line)
-                            # Empty line selection: 0-0 or 0-huge on empty line
-                            if len(line_text) == 0 and start_col == 0:
-                                # Delete the empty line itself
+
+                            if len(line_text) == 0:
+                                # Delete empty line itself
                                 if self.buffer.total_lines > 1:
-                                    # Save state for undo
                                     saved_cursor_line = self.cursor_line
                                     saved_cursor_col = self.cursor_col
-                                    
-                                    # Add undo action
-                                    self.buffer.add_undo_action('delete_line', {
-                                        'line': start_line,
-                                        'text': ''
-                                    }, cursor_line=saved_cursor_line, cursor_col=saved_cursor_col,
-                                       selection_start_line=self.selection_start_line,
-                                       selection_start_col=self.selection_start_col,
-                                       selection_end_line=self.selection_end_line,
-                                       selection_end_col=self.selection_end_col,
-                                       has_selection=True)
-                                    
+
+                                    # Undo action
+                                    self.buffer.add_undo_action(
+                                        'delete_line',
+                                        { 'line': start_line, 'text': '' },
+                                        cursor_line=saved_cursor_line,
+                                        cursor_col=saved_cursor_col,
+                                        selection_start_line=self.selection_start_line,
+                                        selection_start_col=self.selection_start_col,
+                                        selection_end_line=self.selection_end_line,
+                                        selection_end_col=self.selection_end_col,
+                                        has_selection=True
+                                    )
+
+                                    # Actual delete
                                     self.buffer.delete_line(start_line)
-                                    # Position cursor at the same line (or previous if we deleted last line)
+
+                                    # Cursor placement after deletion
                                     self.cursor_line = min(start_line, self.buffer.total_lines - 1)
                                     self.cursor_col = 0
+
+                                    # Clear selection
                                     self.has_selection = False
                                     self.selection_start_line = -1
                                     self.selection_start_col = -1
                                     self.selection_end_line = -1
                                     self.selection_end_col = -1
+
                                     self._ensure_cursor_visible()
                                     self.emit('buffer-changed')
                                     self.emit('modified-changed', self.buffer.modified)
                                     self.queue_draw()
                                     return True
-                    
-                    # Normal selection deletion
-                    self._delete_selection()
-                    return True
+
+                        # -------------------------------------------
+                        # B) MULTILINE (empty lines included)
+                        # Normal selection deletion handles all cases
+                        # -------------------------------------------
+                        self._delete_selection()
+                        return True
+
                 else:
+                    # No selection → normal backspace/delete behavior
                     if not self.editing:
                         self._start_editing()
+                    # Fall through to editing mode
+
                     # Let it fall through to editing mode handling
             # For any other printable key in non-editing mode, start editing
             elif not ctrl_pressed and not alt_pressed:
@@ -2518,33 +2534,75 @@ class VirtualTextView(Gtk.DrawingArea):
                 logical_line_num = start_line + last_logical_index
                 return logical_line_num, last_segment[2], len(last_wrapped_segments) - 1
         return max(0, self.buffer.total_lines - 1), 0, 0
+        
     def _get_position_from_coords(self, x, y):
         line_num_width = len(str(self.buffer.total_lines)) * self.char_width + 10
+
+        # Click in line-number gutter → invalid
         if x < line_num_width:
             return -1, -1
+
+        # --- Get logical line from visual Y ---
         logical_line_num, seg_start_col, segment_index = self._get_visual_line_info_from_y(y)
+
+        # Prevent out-of-range line numbers
+        if logical_line_num < 0 or logical_line_num >= self.buffer.total_lines:
+            return -1, -1
+
+        # --- Resolve text for this logical line ---
         line_text = self.buffer.get_line(logical_line_num)
         if self.editing and logical_line_num == self.edit_line:
             line_text = self.edit_text
             if self.in_preedit:
-                line_text = self.edit_text[:self.edit_cursor_pos] + self.preedit_string + self.edit_text[self.edit_cursor_pos:]
-        wrapped_segments = self._get_wrapped_lines(logical_line_num, logical_line_num)[0]
+                line_text = (
+                    self.edit_text[:self.edit_cursor_pos] +
+                    self.preedit_string +
+                    self.edit_text[self.edit_cursor_pos:]
+                )
+
+        # --- Get wrapped segments safely ---
+        wrapped_list = self._get_wrapped_lines(logical_line_num, logical_line_num)
+
+        # In rare cases wrapping may return an empty list → treat as empty line
+        if not wrapped_list or not wrapped_list[0]:
+            # Entire line is empty or wrap failed
+            return logical_line_num, 0
+
+        wrapped_segments = wrapped_list[0]
+
+        # --- Compute column within segment ---
         col = 0
+        rel_x = x - line_num_width - 10 + self.scroll_x
+
+        # Click inside valid segment
         if 0 <= segment_index < len(wrapped_segments):
             _, seg_start, seg_end = wrapped_segments[segment_index]
             segment_text = line_text[seg_start:seg_end]
-            rel_x = x - line_num_width - 10 + self.scroll_x
             col_in_seg = self._get_cursor_position_from_x(segment_text, rel_x)
             col = seg_start + col_in_seg
+
         else:
-            rel_x = x - line_num_width - 10 + self.scroll_x
+            # Click outside wrapped segments → fall back to entire line
             col = self._get_cursor_position_from_x(line_text, rel_x)
-        if self.editing and logical_line_num == self.edit_line and self.in_preedit and col > self.edit_cursor_pos:
-            if col <= self.edit_cursor_pos + len(self.preedit_string):
-                col = self.edit_cursor_pos # adjust if click in preedit
+
+        # --- IME / preedit caret adjustment ---
+        if (
+            self.editing
+            and logical_line_num == self.edit_line
+            and self.in_preedit
+            and col > self.edit_cursor_pos
+        ):
+            preedit_end = self.edit_cursor_pos + len(self.preedit_string)
+
+            if col <= preedit_end:
+                # Click inside preedit → snap to cursor
+                col = self.edit_cursor_pos
             else:
+                # Click after preedit → remove preedit length
                 col -= len(self.preedit_string)
+
         return logical_line_num, col
+
     def _is_position_in_selection(self, line, col):
         bounds = self._get_selection_bounds()
         if not bounds:
@@ -2574,30 +2632,48 @@ class VirtualTextView(Gtk.DrawingArea):
         if line == end_line and col > end_col:
             return False
         return True
+
     def _on_drag_begin_select(self, gesture, x, y):
         line, col = self._get_position_from_coords(x, y)
         if line == -1:
             gesture.set_state(Gtk.EventSequenceState.DENIED)
             return
 
-        # If clicking inside an existing selection, don't allow new drag
-        if self.has_selection and self._is_position_in_selection(line, col):
-            gesture.set_state(Gtk.EventSequenceState.DENIED)
-            return
+        # Detect origin and whether it's empty
+        text = self.buffer.get_line(line)
+        self._drag_origin_line = line
+        self._drag_origin_is_empty = (len(text.strip()) == 0)
 
-        # Anchor selection
-        self.has_selection = False
-        self.selection_start_line = line
-        self.selection_start_col = col
-        self.selection_end_line = line
-        self.selection_end_col = col
+        # --- Anchor selection start ---
+        if self._drag_origin_is_empty:
+            # Drag UP rule: skip origin line
+            if line > 0:
+                prev_line_text = self.buffer.get_line(line - 1)
+                self.selection_start_line = line - 1
+                self.selection_start_col = len(prev_line_text)
+            else:
+                # top of file — anchor at line 0 safely
+                self.selection_start_line = 0
+                self.selection_start_col = 0
+        else:
+            # Normal non-empty origin
+            self.selection_start_line = line
+            self.selection_start_col = col
+
+        # Selection end starts equal to start
+        self.selection_end_line = self.selection_start_line
+        self.selection_end_col = self.selection_start_col
+
+        # Caret follows click visually
         self.cursor_line = line
         self.cursor_col = col
 
-        # Detect empty start line for our skip/include rules
-        self._drag_started_on_empty = self.buffer.get_line(line)
+        self.has_selection = False
+        self.cursor_visible = True  # will hide once selection activates
 
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+
+
 
     def _on_drag_update_select(self, gesture, offset_x, offset_y):
         success, start_x, start_y = gesture.get_start_point()
@@ -2607,7 +2683,7 @@ class VirtualTextView(Gtk.DrawingArea):
         current_x = start_x + offset_x
         current_y = start_y + offset_y
 
-        # --- Auto-scroll when overshooting top/bottom ---
+        # Auto-scroll support
         widget_height = self.get_height()
         scroll_margin = self.line_height * 2
 
@@ -2619,64 +2695,136 @@ class VirtualTextView(Gtk.DrawingArea):
             self.scroll_y = min(max_scroll, self.scroll_y + self.line_height)
             self._update_scrollbar()
 
-        # Get logical position from drag
-        line, col = self._get_position_from_coords(current_x, current_y)
-        if line == -1:
+        # Convert pointer → logical line
+        L, L_col = self._get_position_from_coords(current_x, current_y)
+        if L == -1:
             return
 
-        # -------------------------
-        # Apply EMPTY-LINE RULES
-        # -------------------------
-        if not self.has_selection and line != self.selection_start_line:
-            if self._drag_started_on_empty:
-                if line > self.selection_start_line:
-                    # Dragging DOWN from an empty line → include this empty line
-                    self.selection_start_col = 0
-                else:
-                    # Dragging UP from empty line → skip it, start at previous line end
-                    if self.selection_start_line > 0:
-                        prev_line_text = self.buffer.get_line(self.selection_start_line - 1)
-                        self.selection_start_line -= 1
-                        self.selection_start_col = len(prev_line_text)
+        O = self.selection_start_line
+        origin_empty = self._drag_origin_is_empty
+        last_index = self.buffer.total_lines - 1
 
-        # Set selection end normally
-        self.selection_end_line = line
-        self.selection_end_col = col
-
-        # Mark selection active as soon as we move
-        if (self.selection_start_line != self.selection_end_line or
-            self.selection_start_col != self.selection_end_col):
+        # ⭐ CRITICAL: begin selection as soon as pointer enters new line
+        if L != O:
             self.has_selection = True
 
-        # Update cursor
-        self.cursor_line = line
-        self.cursor_col = col
+        # --- DRAG UP ---
+        if L < O:
+            if origin_empty:
+                # Skip origin line
+                sel_end_line = L
+                sel_end_col = len(self.buffer.get_line(L))
+            else:
+                sel_end_line = L
+                sel_end_col = L_col
 
-        self._ensure_cursor_visible()
+        # --- DRAG DOWN ---
+        elif L > O:
+            # Skip landing line → select up to L - 1
+            target = max(O, L - 1)
+            sel_end_line = target
+            sel_end_col = len(self.buffer.get_line(target))
+
+        else:
+            # No vertical change
+            sel_end_line = O
+            sel_end_col = self.selection_start_col
+
+        self.selection_end_line = sel_end_line
+        self.selection_end_col = sel_end_col
+
+        # Caret hidden while selecting
+        self.cursor_visible = not self.has_selection
+
+        # Caret does NOT move during drag
         self.queue_draw()
 
+
+
+
+
+
+
+
     def _on_drag_end_select(self, gesture, offset_x, offset_y):
-        self._on_drag_update_select(gesture, offset_x, offset_y)
-        # Clear selection if no actual drag happened (start == end)
-        if self.selection_start_line == self.selection_end_line and self.selection_start_col == self.selection_end_col:
+        # Get TRUE pointer landing point
+        seq = gesture.get_last_updated_sequence()
+        success, lx, ly = gesture.get_point(seq)
+
+        if not success:
+            lx = lx if 'lx' in locals() else 0
+            ly = ly if 'ly' in locals() else 0
+
+        landing_line, landing_col = self._get_position_from_coords(lx, ly)
+        if landing_line == -1:
+            landing_line = self.selection_end_line
+            landing_col = self.selection_end_col
+
+        sL = self.selection_start_line
+        sC = self.selection_start_col
+        eL = self.selection_end_line
+        eC = self.selection_end_col
+
+        # No selection happened (click only)
+        if sL == eL and sC == eC:
             self.has_selection = False
             self.cursor_visible = True
-            # Reset selection markers
+            self.cursor_line = landing_line
+            self.cursor_col = landing_col
+
             self.selection_start_line = -1
             self.selection_start_col = -1
             self.selection_end_line = -1
             self.selection_end_col = -1
+
+            self.queue_draw()
+            return
+
+        # A real selection exists
+        self.has_selection = True
+        self.cursor_visible = False
+
+        # Caret goes to landing position (not selection end!)
+        self.cursor_line = landing_line
+        self.cursor_col = landing_col
+
         self.queue_draw()
+
+
+
+        
     def _get_selection_bounds(self):
         if not self.has_selection:
             return None
+
         s_line, s_col = self.selection_start_line, self.selection_start_col
         e_line, e_col = self.selection_end_line, self.selection_end_col
-        if s_line > e_line or (s_line == e_line and s_col > e_col):
-            return (e_line, e_col, s_line, s_col)
-        else:
+
+        # Normalize order
+        if (e_line < s_line) or (e_line == s_line and e_col < s_col):
+            s_line, s_col, e_line, e_col = e_line, e_col, s_line, s_col
+
+        # ----------------------------------------------------
+        # NEW: Empty-line selection should behave as a character
+        #
+        # If line is empty, treat selecting it as selecting "\n".
+        # Any selection on an empty line should remove the whole line.
+        # ----------------------------------------------------
+        if s_line == e_line:
+            line_text = self.buffer.get_line(s_line)
+
+            # Case: empty line
+            if len(line_text) == 0:
+                # User visually selected the (empty) line → treat as selecting its newline
+                return (s_line, 0, s_line, 1)
+
+            # Case: same-line selection on non-empty text
             return (s_line, s_col, e_line, e_col)
-    
+
+        # Multi-line selection stays unchanged
+        return (s_line, s_col, e_line, e_col)
+
+
     def _get_normalized_selection_bounds(self):
         """Get selection bounds with empty start/end lines excluded (for copy/cut)"""
         bounds = self._get_selection_bounds()
@@ -2739,107 +2887,130 @@ class VirtualTextView(Gtk.DrawingArea):
             lines.append(last_line_text[:end_col])
             return "\n".join(lines)
     def _delete_selection(self):
-        bounds = self._get_normalized_selection_bounds()
-        if not bounds:
-            return False
-        
-        # Get the selected text before deleting
-        selected_text = self._get_selected_text()
-        
-        # Save current cursor and selection state BEFORE deleting
-        saved_cursor_line = self.cursor_line
-        saved_cursor_col = self.cursor_col
-        saved_sel_start_line = self.selection_start_line
-        saved_sel_start_col = self.selection_start_col
-        saved_sel_end_line = self.selection_end_line
-        saved_sel_end_col = self.selection_end_col
-        saved_has_selection = self.has_selection
-        
-        start_line, start_col, end_line, end_col = bounds
-        if start_line == end_line:
-            # Selection within a single line - add undo action
-            if self.editing and start_line == self.edit_line:
-                line_text = self.edit_text
+        """Delete whatever is selected — always removing whole lines
+           when the selection spans multiple lines or falls on empty lines.
+        """
+        if not self.has_selection:
+            return
+
+        # Normalize bounds
+        s_line = self.selection_start_line
+        s_col  = self.selection_start_col
+        e_line = self.selection_end_line
+        e_col  = self.selection_end_col
+
+        if (e_line < s_line) or (e_line == s_line and e_col < s_col):
+            s_line, s_col, e_line, e_col = e_line, e_col, s_line, s_col
+
+        # Fetch lines
+        start_text = self.buffer.get_line(s_line)
+        end_text   = self.buffer.get_line(e_line)
+
+        # ----------------------------------------------------------
+        # CASE A — Single-line selection → normal character deletion
+        # ----------------------------------------------------------
+        if s_line == e_line:
+            # Empty line becomes “line is selected completely”
+            if len(start_text) == 0:
+                # Convert to full-line deletion
+                old_line = ''
+                self.buffer.add_undo_action(
+                    'delete_line',
+                    {'line': s_line, 'text': old_line},
+                    cursor_line=self.cursor_line,
+                    cursor_col=self.cursor_col,
+                    selection_start_line=s_line,
+                    selection_start_col=s_col,
+                    selection_end_line=e_line,
+                    selection_end_col=e_col,
+                    has_selection=True
+                )
+                if self.buffer.total_lines > 1:
+                    self.buffer.delete_line(s_line)
+                self.cursor_line = min(s_line, self.buffer.total_lines - 1)
+                self.cursor_col = 0
             else:
-                line_text = self.buffer.get_line(start_line)
-            
-            # Add undo action for single-line deletion with selection state
-            self.buffer.add_undo_action('delete', {
-                'line': start_line,
-                'pos': start_col,
-                'end': end_col,
-                'text': selected_text
-            }, cursor_line=saved_cursor_line, cursor_col=saved_cursor_col,
-               selection_start_line=saved_sel_start_line, selection_start_col=saved_sel_start_col,
-               selection_end_line=saved_sel_end_line, selection_end_col=saved_sel_end_col,
-               has_selection=saved_has_selection)
-            
-            new_text = line_text[:start_col] + line_text[end_col:]
-            if self.editing and start_line == self.edit_line:
-                self.edit_text = new_text
-                self.edit_cursor_pos = start_col
-                self.buffer.set_line(start_line, new_text)
-            else:
-                self.buffer.set_line(start_line, new_text)
-            self.cursor_line = start_line
-            self.cursor_col = start_col
-        else:
-            # Selection spans multiple lines
-            if self.editing and start_line == self.edit_line:
-                first_line_text = self.edit_text
-            else:
-                first_line_text = self.buffer.get_line(start_line)
-            if self.editing and end_line == self.edit_line:
-                last_line_text = self.edit_text
-            else:
-                last_line_text = self.buffer.get_line(end_line)
-            before_text = first_line_text[:start_col]
-            after_text = last_line_text[end_col:]
-            merged_text = before_text + after_text
-            
-            # Store the old lines for undo
-            old_lines = self.buffer.lines[start_line:end_line + 1].copy()
-            
-            # Add undo action for multi-line deletion with selection state
-            self.buffer.add_undo_action('delete_multiline', {
-                'start_line': start_line,
-                'end_line': end_line,
-                'start_col': start_col,
-                'end_col': end_col,
+                # Normal partial delete inside a line
+                old_text = start_text
+                new_text = old_text[:s_col] + old_text[e_col:]
+                self.buffer.add_undo_action(
+                    'replace',
+                    {'line': s_line, 'old_text': old_text},
+                    cursor_line=self.cursor_line,
+                    cursor_col=self.cursor_col,
+                    selection_start_line=s_line,
+                    selection_start_col=s_col,
+                    selection_end_line=e_line,
+                    selection_end_col=e_col,
+                    has_selection=True
+                )
+                self.buffer.set_line(s_line, new_text)
+                self.cursor_line = s_line
+                self.cursor_col = s_col
+
+            # Clear selection
+            self.has_selection = False
+            self.selection_start_line = -1
+            self.selection_start_col = -1
+            self.selection_end_line = -1
+            self.selection_end_col = -1
+            self.emit("buffer-changed")
+            self.emit("modified-changed", self.buffer.modified)
+            self.queue_draw()
+            return
+
+        # ----------------------------------------------------------
+        # CASE B — MULTILINE SELECTION → REMOVE FULL LINES CLEANLY
+        # ----------------------------------------------------------
+
+        # Capture old block for undo
+        old_lines = self.buffer.lines[s_line:e_line + 1]
+
+        # Undo action
+        self.buffer.add_undo_action(
+            'delete_multiline',
+            {
+                'start_line': s_line,
                 'old_lines': old_lines,
-                'selected_text': selected_text
-            }, cursor_line=saved_cursor_line, cursor_col=saved_cursor_col,
-               selection_start_line=saved_sel_start_line, selection_start_col=saved_sel_start_col,
-               selection_end_line=saved_sel_end_line, selection_end_col=saved_sel_end_col,
-               has_selection=saved_has_selection)
-            
-            # Set the merged content on the first line
-            self.buffer.set_line(start_line, merged_text)
-            # Delete lines from start_line + 1 to end_line
-            del self.buffer.lines[start_line + 1 : end_line + 1]
-            self.buffer.total_lines -= (end_line - start_line)
-            self.cursor_line = start_line
-            self.cursor_col = start_col
-            # If we were editing on a deleted line, stop editing
-            if self.editing and self.edit_line > start_line:
-                self.editing = False
-            elif self.editing and self.edit_line == start_line:
-                self.edit_text = merged_text
-                self.edit_cursor_pos = start_col
+                'end_line': e_line,
+                'end_col': e_col
+            },
+            cursor_line=self.cursor_line,
+            cursor_col=self.cursor_col,
+            selection_start_line=s_line,
+            selection_start_col=s_col,
+            selection_end_line=e_line,
+            selection_end_col=e_col,
+            has_selection=True
+        )
+
+        # Actual deletion — remove the entire block
+        del self.buffer.lines[s_line:e_line + 1]
+        self.buffer.total_lines -= (e_line - s_line + 1)
+        self.buffer.modified = True
+        self.buffer._token_cache.clear()
+
+        # Ensure at least one line exists
+        if self.buffer.total_lines == 0:
+            self.buffer.lines.append("")
+            self.buffer.total_lines = 1
+
+        # Cursor positioning
+        self.cursor_line = min(s_line, self.buffer.total_lines - 1)
+        self.cursor_col = 0
+
+        # Clear selection
         self.has_selection = False
         self.selection_start_line = -1
         self.selection_start_col = -1
         self.selection_end_line = -1
         self.selection_end_col = -1
-        self.cursor_visible = True
+
         self._ensure_cursor_visible()
-        if self.buffer.word_wrap:
-            self._wrapped_lines_cache.clear()
-            self._needs_wrap_recalc = True
-        self.emit('buffer-changed')
-        self.emit('modified-changed', self.buffer.modified)
+        self.emit("buffer-changed")
+        self.emit("modified-changed", self.buffer.modified)
         self.queue_draw()
-        return True
+
     def _copy_to_clipboard(self):
         if not self.has_selection:
             return
@@ -3687,114 +3858,211 @@ class VirtualTextView(Gtk.DrawingArea):
         if self.cursor_blink_timeout:
             GLib.source_remove(self.cursor_blink_timeout)
         self.cursor_blink_timeout = GLib.timeout_add(500, blink)
+        
+
+    def _update_selection_to(self, new_line, new_col):
+        """
+        Unified selection logic for keyboard, mouse, and programmatic selection.
+
+        Behavior:
+          - selection_start_line/col = the anchor
+          - selection_end_line/col   = the moving end
+          - empty-line rules apply ONLY if the anchor is on an empty line
+
+        Returns updated:
+          selection_start_line, selection_start_col,
+          selection_end_line,   selection_end_col
+        """
+        origin_line = self.selection_start_line
+        origin_col  = self.selection_start_col
+
+        start_text = self.buffer.get_line(origin_line)
+        start_is_empty = (len(start_text.strip()) == 0)
+
+        final_start_line = origin_line
+        final_start_col  = origin_col
+
+        if start_is_empty and new_line != origin_line:
+            moving_down = new_line > origin_line
+            moving_up   = new_line < origin_line
+
+            if moving_down:
+                # Include starting empty line (Shift+Down behavior)
+                final_start_col = 0
+
+            elif moving_up:
+                # Skip starting empty line (Shift+Up behavior)
+                if origin_line > 0:
+                    prev_text = self.buffer.get_line(origin_line - 1)
+                    final_start_line = origin_line - 1
+                    final_start_col  = len(prev_text)
+
+        return (
+            final_start_line,
+            final_start_col,
+            new_line,
+            new_col
+        )
+
+
+
+        
     def _move_cursor_up(self, extend_selection=False):
-        if self.cursor_line > 0:
+        if self.cursor_line == 0:
+            return
 
-            if extend_selection:
-                # We are extending upward.
-                current_line_text = self.buffer.get_line(self.cursor_line)
+        current_line = self.cursor_line
+        new_line = current_line - 1
+        new_text = self.buffer.get_line(new_line)
+        new_col = min(self.cursor_col, len(new_text))
 
-                if len(current_line_text) == 0:
-                    # Rule: bottom→top skip current empty line.
-                    # So selection should begin at previous line.
-                    prev_line_text = self.buffer.get_line(self.cursor_line - 1)
-                    self.selection_end_line = self.cursor_line - 1
-                    self.selection_end_col = len(prev_line_text)
-                else:
-                    # Normal line: include this line.
-                    self.selection_end_line = self.cursor_line - 1
-                    prev_line_text = self.buffer.get_line(self.cursor_line - 1)
-                    self.selection_end_col = min(self.cursor_col, len(prev_line_text))
+        if extend_selection:
+            # --- Apply your rule: skip ONLY the current cursor empty line ---
+            cur_text = self.buffer.get_line(current_line)
+            cur_is_empty = (len(cur_text.strip()) == 0)
 
-                self.has_selection = True
-
+            if cur_is_empty:
+                # skip current empty line → select previous line instead
+                sel_end_line = new_line
+                sel_end_col  = len(new_text)
             else:
-                # no shift: clear selection
-                self.has_selection = False
-                self.cursor_visible = True
+                # normal upward extension
+                sel_end_line = new_line
+                sel_end_col  = new_col
 
-            # Move cursor up
-            self.cursor_line -= 1
-            line_text = self.buffer.get_line(self.cursor_line)
-            self.cursor_col = min(self.cursor_col, len(line_text))
+            self.selection_end_line = sel_end_line
+            self.selection_end_col  = sel_end_col
+            self.has_selection = True
 
-            self._ensure_cursor_visible()
-            self.queue_draw()
+        else:
+            # collapse existing selection
+            self.has_selection = False
+            self.selection_start_line = new_line
+            self.selection_start_col  = new_col
+            self.selection_end_line   = new_line
+            self.selection_end_col    = new_col
+
+        # finally move cursor up
+        self.cursor_line = new_line
+        self.cursor_col  = new_col
+
+        self._ensure_cursor_visible()
+        self.queue_draw()
+
+
+
 
     def _move_cursor_down(self, extend_selection=False):
-        if self.cursor_line < self.buffer.total_lines - 1:
+        last_index = self.buffer.total_lines - 1
+        # nothing to do if already at last line
+        if self.cursor_line >= last_index:
+            return
 
-            if extend_selection:
-                # We are extending downward.
-                current_line_text = self.buffer.get_line(self.cursor_line)
+        current_line = self.cursor_line
+        new_line = current_line + 1
+        new_text = self.buffer.get_line(new_line)
+        new_col = min(self.cursor_col, len(new_text))
 
-                if len(current_line_text) == 0:
-                    # Rule: top→bottom include current empty line.
-                    # So selection_end is ON this empty line.
-                    self.selection_end_line = self.cursor_line
-                    self.selection_end_col = 0
+        if extend_selection:
+            # --- Initialize anchor when first entering extend mode ---
+            if not self.has_selection:
+                # Anchor should start at the current cursor line.
+                # If current line is empty, anchor at col 0 (full-line anchor).
+                cur_text = self.buffer.get_line(current_line)
+                if len(cur_text.strip()) == 0:
+                    self.selection_start_line = current_line
+                    self.selection_start_col = 0
                 else:
-                    # Normal line: include current line
-                    self.selection_end_line = self.cursor_line
-                    self.selection_end_col = self.cursor_col
+                    self.selection_start_line = current_line
+                    self.selection_start_col = self.cursor_col
 
-                self.has_selection = True
+            # Always skip the landing line: select up to new_line - 1
+            sel_end_line = min(new_line - 1, last_index)
+            sel_end_col = len(self.buffer.get_line(sel_end_line))
 
-            else:
-                self.has_selection = False
-                self.cursor_visible = True
+            self.selection_end_line = sel_end_line
+            self.selection_end_col = sel_end_col
+            self.has_selection = True
 
-            # Now actually move cursor down
-            self.cursor_line += 1
-            new_line_text = self.buffer.get_line(self.cursor_line)
-            self.cursor_col = min(self.cursor_col, len(new_line_text))
+        else:
+            # collapse selection and move anchor to the new cursor line
+            self.has_selection = False
+            self.selection_start_line = new_line
+            self.selection_start_col = new_col
+            self.selection_end_line = new_line
+            self.selection_end_col = new_col
 
-            self._ensure_cursor_visible()
-            self.queue_draw()
+        # Move cursor physically
+        self.cursor_line = new_line
+        self.cursor_col = new_col
+
+        self._ensure_cursor_visible()
+        self.queue_draw()
+
+
+
+
 
     def _move_cursor_left(self, extend_selection=False):
-        if extend_selection and not self.has_selection:
-            self.selection_start_line = self.cursor_line
-            self.selection_start_col = self.cursor_col
-        elif not extend_selection:
-            self.has_selection = False
-            self.cursor_visible = True
         if self.cursor_col > 0:
-            self.cursor_col -= 1
+            new_line = self.cursor_line
+            new_col = self.cursor_col - 1
         elif self.cursor_line > 0:
-            self.cursor_line -= 1
-            self.cursor_col = len(self.buffer.get_line(self.cursor_line))
-        self._ensure_cursor_visible()
+            new_line = self.cursor_line - 1
+            new_col = len(self.buffer.get_line(new_line))
+        else:
+            return
+
         if extend_selection:
-            self.selection_end_line = self.cursor_line
-            self.selection_end_col = self.cursor_col
-            self.has_selection = True
-        elif not extend_selection:
+            (s_line, s_col, e_line, e_col) = self._update_selection_to(new_line, new_col)
+            self.selection_start_line = s_line
+            self.selection_start_col  = s_col
+            self.selection_end_line   = e_line
+            self.selection_end_col    = e_col
+            self.has_selection        = True
+        else:
             self.has_selection = False
-            self.cursor_visible = True
+            self.selection_start_line = new_line
+            self.selection_start_col  = new_col
+            self.selection_end_line   = new_line
+            self.selection_end_col    = new_col
+
+        self.cursor_line = new_line
+        self.cursor_col = new_col
+        self._ensure_cursor_visible()
         self.queue_draw()
+
     def _move_cursor_right(self, extend_selection=False):
-        line_text = self.buffer.get_line(self.cursor_line)
-        if extend_selection and not self.has_selection:
-            self.selection_start_line = self.cursor_line
-            self.selection_start_col = self.cursor_col
-        elif not extend_selection:
-            self.has_selection = False
-            self.cursor_visible = True
-        if self.cursor_col < len(line_text):
-            self.cursor_col += 1
+        line_len = len(self.buffer.get_line(self.cursor_line))
+
+        if self.cursor_col < line_len:
+            new_line = self.cursor_line
+            new_col = self.cursor_col + 1
         elif self.cursor_line < self.buffer.total_lines - 1:
-            self.cursor_line += 1
-            self.cursor_col = 0
-        self._ensure_cursor_visible()
+            new_line = self.cursor_line + 1
+            new_col = 0
+        else:
+            return
+
         if extend_selection:
-            self.selection_end_line = self.cursor_line
-            self.selection_end_col = self.cursor_col
-            self.has_selection = True
-        elif not extend_selection:
+            (s_line, s_col, e_line, e_col) = self._update_selection_to(new_line, new_col)
+            self.selection_start_line = s_line
+            self.selection_start_col  = s_col
+            self.selection_end_line   = e_line
+            self.selection_end_col    = e_col
+            self.has_selection        = True
+        else:
             self.has_selection = False
-            self.cursor_visible = True
+            self.selection_start_line = new_line
+            self.selection_start_col  = new_col
+            self.selection_end_line   = new_line
+            self.selection_end_col    = new_col
+
+        self.cursor_line = new_line
+        self.cursor_col = new_col
+        self._ensure_cursor_visible()
         self.queue_draw()
+
     def _move_cursor_word_left(self, extend_selection=False):
         line_text = self.buffer.get_line(self.cursor_line)
         new_col = self._find_word_boundary(line_text, self.cursor_col, -1)
