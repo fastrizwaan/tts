@@ -17,60 +17,67 @@ import chardet  # For encoding detection
 
 # --- Encoding detection utilities ---
 def detect_encoding(file_path):
-    """
-    Detect the encoding of a file.
-    Returns tuple: (encoding, confidence, has_bom)
-    """
-    # First check for BOM
+    """Detect the encoding of a file"""
     with open(file_path, 'rb') as f:
         start = f.read(4)
     
-    # Check for UTF-8 BOM
+    # Check for BOM
     if start.startswith(b'\xef\xbb\xbf'):
         return ('utf-8-sig', 1.0, True)
-    
-    # Check for UTF-16 LE BOM
     if start.startswith(b'\xff\xfe'):
         if start[2:4] == b'\x00\x00':
             return ('utf-32-le', 1.0, True)
         return ('utf-16-le', 1.0, True)
-    
-    # Check for UTF-16 BE BOM
     if start.startswith(b'\xfe\xff'):
         return ('utf-16-be', 1.0, True)
-    
-    # Check for UTF-32 LE BOM
     if start.startswith(b'\xff\xfe\x00\x00'):
         return ('utf-32-le', 1.0, True)
-    
-    # Check for UTF-32 BE BOM
     if start.startswith(b'\x00\x00\xfe\xff'):
         return ('utf-32-be', 1.0, True)
     
-    # No BOM found, use chardet for detection
+    # Use chardet for detection
     try:
         with open(file_path, 'rb') as f:
-            raw_data = f.read(100000)  # Read first 100KB for detection
-        
+            raw_data = f.read(100000)
         result = chardet.detect(raw_data)
         encoding = result['encoding']
         confidence = result['confidence']
-        
-        # Normalize encoding names
         if encoding:
             encoding = encoding.lower()
             if encoding in ['ascii', 'us-ascii']:
                 encoding = 'utf-8'
-            elif encoding.startswith('utf-16'):
-                if b'\x00' in raw_data[1::2] and b'\x00' not in raw_data[::2]:
-                    encoding = 'utf-16-le'
-                elif b'\x00' in raw_data[::2] and b'\x00' not in raw_data[1::2]:
-                    encoding = 'utf-16-be'
-        
         return (encoding or 'utf-8', confidence, False)
     except Exception as e:
         print(f"Encoding detection failed: {e}")
         return ('utf-8', 0.5, False)
+
+def load_file_with_encoding(file_path, encoding=None):
+    """Load a file with specified or auto-detected encoding"""
+    if encoding is None:
+        encoding, confidence, has_bom = detect_encoding(file_path)
+        detection_info = f"Detected: {encoding} (confidence: {confidence:.0%})"
+        if has_bom:
+            detection_info += " [BOM]"
+    else:
+        detection_info = f"Specified: {encoding}"
+    
+    try:
+        with open(file_path, 'r', encoding=encoding, errors='replace') as f:
+            content = f.read()
+        lines = content.split('\n')
+        lines = [line.rstrip('\r') for line in lines]
+        return (lines, encoding, detection_info)
+    except Exception as e:
+        print(f"Failed to load with {encoding}: {e}. Falling back to UTF-8.")
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+            lines = content.split('\n')
+            lines = [line.rstrip('\r') for line in lines]
+            return (lines, 'utf-8', f"Fallback: utf-8")
+        except Exception as e2:
+            return (["Error loading file"], 'utf-8', f"Error: {str(e2)[:100]}")
+
 
 def load_file_with_encoding(file_path, encoding=None, max_line_length=10000):
     """
