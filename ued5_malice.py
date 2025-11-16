@@ -64,29 +64,23 @@ class IndexedFile:
             self.index.append(mm.tell())
 
     def _index_utf16(self):
-        # mmap.readline doesn't respect UTF16 boundaries.
-        # We manually scan for newline in the decoded form.
         raw = self.mm[:]
-
         text = raw.decode(self.encoding, errors="replace")
-        # This does allocate the decoded form,
-        # but NOT millions of Python strings (we avoid splitlines()).
-        # We scan line boundaries manually.
 
-        self.index = []
-        offset_bytes = 0
-        byte_width = 2  # UTF16 is 2 bytes per code unit; safe enough for LF detection.
+        self.index = [0]
+        byte_offset = 0
+        encoder = self.encoding
 
-        start = 0
-        for i, ch in enumerate(text):
+        for ch in text:
+            ch_bytes = ch.encode(encoder, errors="replace")
+            byte_offset += len(ch_bytes)
             if ch == "\n":
-                end_char = i + 1
-                self.index.append(offset_bytes + (end_char * byte_width))
-        # Last line end
-        self.index.append(len(raw))
+                self.index.append(byte_offset)
 
-        # Add a zero start
-        self.index.insert(0, 0)
+        if not self.index or self.index[-1] != len(raw):
+            self.index.append(len(raw))
+
+
 
     def total_lines(self):
         return len(self.index) - 1
@@ -113,30 +107,110 @@ class VirtualBuffer(GObject.Object):
 
     def __init__(self):
         super().__init__()
-        self.file = None
+        self.file = None            # IndexedFile
+        self.edits = {}             # sparse: line_number → modified string
         self.cursor_line = 0
         self.cursor_col = 0
 
     def load(self, indexed_file):
         self.file = indexed_file
+        self.edits.clear()
         self.cursor_line = 0
         self.cursor_col = 0
         self.emit("changed")
 
     def total(self):
-        return self.file.total_lines() if self.file else 1
+        """Return total number of logical lines in the buffer.
+
+        If a file is loaded, base it on file length and any edited lines.
+        If no file is loaded, base it on edited lines (or at least 1).
+        """
+        if not self.file:
+            # When editing an empty/new buffer, consider edits so added
+            if not self.edits:
+                return 1
+            return max(1, max(self.edits.keys()) + 1)
+
+        # File is present
+        if not self.edits:
+            return self.file.total_lines()
+
+        max_edited = max(self.edits.keys())
+        return max(self.file.total_lines(), max_edited + 1)
+
 
     def get_line(self, ln):
-        if not self.file:
-            return ""
-        return self.file[ln]
+        if ln in self.edits:
+            return self.edits[ln]
+        if self.file:
+            return self.file[ln] if 0 <= ln < self.file.total_lines() else ""
+        return ""
+
+
 
     def set_cursor(self, ln, col):
-        ln = max(0, min(ln, self.total() - 1))
+        total = self.total()
+        ln = max(0, min(ln, total - 1))
         line = self.get_line(ln)
         col = max(0, min(col, len(line)))
         self.cursor_line = ln
         self.cursor_col = col
+
+    # ------- Editing ----------
+    def insert_text(self, text):
+        ln = self.cursor_line
+        line = self.get_line(ln)
+        col = self.cursor_col
+
+        new_line = line[:col] + text + line[col:]
+        self.edits[ln] = new_line
+
+        self.cursor_col = col + len(text)
+        self.emit("changed")
+
+    def backspace(self):
+        ln = self.cursor_line
+        line = self.get_line(ln)
+        col = self.cursor_col
+
+        if col == 0:
+            return
+
+        new_line = line[:col-1] + line[col:]
+        self.edits[ln] = new_line
+
+        self.cursor_col = col - 1
+        self.emit("changed")
+
+    def insert_newline(self):
+        ln = self.cursor_line
+        col = self.cursor_col
+
+        old_line = self.get_line(ln)
+        left = old_line[:col]
+        right = old_line[col:]
+
+        # Put the left part into edits (replaces or creates this line)
+        self.edits[ln] = left
+
+        # Shift ONLY edited lines that come AFTER ln
+        shifted = {}
+        for k, v in self.edits.items():
+            if k > ln:
+                shifted[k + 1] = v
+            else:
+                shifted[k] = v
+
+        # Insert new blank line or right side of old line
+        shifted[ln + 1] = right
+
+        self.edits = shifted
+
+        self.cursor_line = ln + 1
+        self.cursor_col = 0
+        self.emit("changed")
+
+
 
 
 # ============================================================
@@ -201,42 +275,44 @@ class Renderer:
     def __init__(self):
         self.font = Pango.FontDescription("Monospace 13")
         self.line_h = 22
-        self.char_w = 9
+        self.char_w = 10
         self.ln_width = 70
 
-        self.bg = (0.10, 0.10, 0.10)
-        self.fg = (0.90, 0.90, 0.90)
-        self.ln_fg = (0.60, 0.60, 0.60)
+        # Clear semantic names
+        self.editor_background_color = (0.10, 0.10, 0.10)
+        self.text_foreground_color   = (0.50, 0.50, 0.50)
+        self.linenumber_foreground_color = (6.0, 0.60, 0.60)
 
     def draw(self, cr, alloc, buf, scroll_line, scroll_x, sel_s, sel_e):
-        cr.set_source_rgb(*self.bg)
+        # Background
+        cr.set_source_rgb(*self.editor_background_color)
         cr.paint()
 
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.font)
 
         total = buf.total()
-        max_vis = alloc.height // self.line_h
+        max_vis = (alloc.height // self.line_h) + 1
 
         y = 0
         for ln in range(scroll_line, min(scroll_line + max_vis, total)):
             text = buf.get_line(ln)
 
-            # line number
-            layout.set_text(str(ln + 1))
-            cr.set_source_rgb(*self.ln_fg)
+            # Line number
+            layout.set_text(str(ln + 1), -1)
+            cr.set_source_rgb(*self.linenumber_foreground_color)
             cr.move_to(5, y)
             PangoCairo.show_layout(cr, layout)
 
-            # text
-            layout.set_text(text)
-            cr.set_source_rgb(*self.fg)
+            # Line text
+            layout.set_text(text, -1)
+            cr.set_source_rgb(*self.text_foreground_color)
             cr.move_to(self.ln_width - scroll_x, y)
             PangoCairo.show_layout(cr, layout)
 
             y += self.line_h
 
-        # cursor
+        # Cursor
         cl, cc = buf.cursor_line, buf.cursor_col
         if scroll_line <= cl < scroll_line + max_vis:
             cy = (cl - scroll_line) * self.line_h
@@ -244,6 +320,8 @@ class Renderer:
             cr.set_source_rgb(1, 1, 1)
             cr.rectangle(cx, cy, 2, self.line_h)
             cr.fill()
+
+
 
 
 # ============================================================
@@ -262,11 +340,21 @@ class UltraView(Gtk.DrawingArea):
         self.set_focusable(True)
         self.set_vexpand(True)
         self.set_hexpand(True)
-        self.set_draw_func(self.on_draw)
+        self.set_draw_func(self.draw_view)
 
         self.install_mouse()
         self.install_keys()
         self.install_scroll()
+
+        self.im = Gtk.IMMulticontext()
+        self.im.set_client_widget(self)
+        self.im.connect("commit", self.on_commit)
+
+    def on_commit(self, im, text):
+        self.buf.insert_text(text)
+        self.keep_cursor_visible()
+        self.queue_draw()
+
 
     def install_mouse(self):
         g = Gtk.GestureClick()
@@ -306,35 +394,74 @@ class UltraView(Gtk.DrawingArea):
         self.ctrl.drag(ln, col)
         self.queue_draw()
 
-    def install_keys(self):
-        key = Gtk.EventControllerKey()
-        key.connect("key-pressed", self.on_key)
-        self.add_controller(key)
-
     def on_key(self, c, keyval, keycode, state):
+        # IME event first
+        event = c.get_current_event()
+        if event and self.im.filter_keypress(event):
+            return True
+
         name = Gdk.keyval_name(keyval)
 
-        if name == "Up":       self.ctrl.move_up()
-        elif name == "Down":   self.ctrl.move_down()
-        elif name == "Left":   self.ctrl.move_left()
-        elif name == "Right":  self.ctrl.move_right()
-        else:
-            return False
+        # Editing keys
+        if name == "BackSpace":
+            self.buf.backspace()
+            self.keep_cursor_visible()
+            self.queue_draw()
+            return True
 
-        self.keep_cursor_visible()
-        self.queue_draw()
-        return True
+        if name == "Return":
+            self.buf.insert_newline()
+            self.keep_cursor_visible()
+            self.queue_draw()
+            return True
+
+        # Arrow keys
+        if name == "Up":
+            self.ctrl.move_up()
+            self.keep_cursor_visible()
+            self.queue_draw()
+            return True
+        elif name == "Down":
+            self.ctrl.move_down()
+            self.keep_cursor_visible()
+            self.queue_draw()
+            return True
+        elif name == "Left":
+            self.ctrl.move_left()
+            self.keep_cursor_visible()
+            self.queue_draw()
+            return True
+        elif name == "Right":
+            self.ctrl.move_right()
+            self.keep_cursor_visible()
+            self.queue_draw()
+            return True
+
+        # Let IME handle all other keys
+        return False
 
     def keep_cursor_visible(self):
-        max_vis = self.get_allocated_height() // self.renderer.line_h
-        cl = self.buf.cursor_line
+        max_vis = max(1, (self.get_height() // self.renderer.line_h) + 1)
 
+        cl = self.buf.cursor_line
         if cl < self.scroll_line:
             self.scroll_line = cl
         elif cl >= self.scroll_line + max_vis:
             self.scroll_line = cl - max_vis + 1
+
+        if self.scroll_line < 0:
+            self.scroll_line = 0
+
+
         self.scroll_line = max(0, self.scroll_line)
 
+    def install_keys(self):
+        key = Gtk.EventControllerKey()
+        key.connect("key-pressed", self.on_key)
+        key.connect("key-released", lambda *_: False)
+
+        self.add_controller(key)
+        
     def install_scroll(self):
         sc = Gtk.EventControllerScroll.new(
             Gtk.EventControllerScrollFlags.VERTICAL |
@@ -345,7 +472,7 @@ class UltraView(Gtk.DrawingArea):
 
     def on_scroll(self, c, dx, dy):
         total = self.buf.total()
-        max_vis = max(1, self.get_allocated_height() // self.renderer.line_h)
+        max_vis = max(1, (self.get_allocated_height() // self.renderer.line_h) + 1)
         max_scroll = max(0, total - max_vis)
 
         if dy:
@@ -360,13 +487,24 @@ class UltraView(Gtk.DrawingArea):
         self.queue_draw()
         return True
 
-    def on_draw(self, area, cr, w, h):
-        alloc = area.get_allocation()
+
+    def draw_view(self, area, cr, w, h):
+        cr.set_source_rgb(0.10, 0.10, 0.10)
+        cr.rectangle(0, 0, w, h)
+        cr.fill()
+
+        alloc = type("Alloc", (), {"width": w, "height": h})
+
         self.renderer.draw(
-            cr, alloc, self.buf,
-            self.scroll_line, self.scroll_x,
-            self.ctrl.sel_start, self.ctrl.sel_end
+            cr,
+            alloc,
+            self.buf,
+            self.scroll_line,
+            self.scroll_x,
+            self.ctrl.sel_start,
+            self.ctrl.sel_end
         )
+
 
 
 # ============================================================
@@ -382,7 +520,7 @@ class VirtualScrollbar(Gtk.DrawingArea):
         self.set_vexpand(True)
         self.set_hexpand(False)
 
-        self.set_draw_func(self.on_draw)
+        self.set_draw_func(self.draw_scrollbar)
 
         click = Gtk.GestureClick()
         click.connect("pressed", self.on_click)
@@ -394,14 +532,15 @@ class VirtualScrollbar(Gtk.DrawingArea):
 
         self.dragging = False
 
-    def on_draw(self, area, cr, w, h):
+    def draw_scrollbar(self, area, cr, w, h):
         cr.set_source_rgb(0.20, 0.20, 0.20)
         cr.rectangle(0, 0, w, h)
         cr.fill()
 
         view = self.view
         total = view.buf.total()
-        max_vis = max(1, view.get_allocated_height() // view.renderer.line_h)
+
+        max_vis = max(1, (view.get_height() // view.renderer.line_h) + 1)
         max_scroll = max(0, total - max_vis)
 
         thumb_h = max(20, h * (max_vis / total))
@@ -411,6 +550,7 @@ class VirtualScrollbar(Gtk.DrawingArea):
         cr.set_source_rgb(0.55, 0.55, 0.55)
         cr.rectangle(0, y, w, thumb_h)
         cr.fill()
+
 
     def on_click(self, g, n_press, x, y):
         self.start_y = y
