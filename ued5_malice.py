@@ -272,7 +272,7 @@ class InputController:
 
 class Renderer:
     def __init__(self):
-        self.font = Pango.FontDescription("Monospace 13")
+        self.font = Pango.FontDescription("Monospace 12")
 
         # Calculate actual line height from font metrics
         # Create a temporary surface to get font metrics
@@ -281,7 +281,10 @@ class Renderer:
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.font)
         layout.set_text("Ay", -1)  # Use tall chars to get full height
-        _, self.line_h = layout.get_pixel_size()
+        _, text_height = layout.get_pixel_size()
+        
+        self.cursor_height = text_height  + 0  # Actual text height (for cursor)
+        self.line_h = text_height + 0  # Line height with spacing
 
         # Clear semantic names
         self.editor_background_color = (0.10, 0.10, 0.10)
@@ -351,7 +354,7 @@ class Renderer:
                 
                 cx = ln_width + text_width - scroll_x
                 cr.set_source_rgb(1, 1, 1)
-                cr.rectangle(cx, cy, 1, self.line_h)  # Width of 1 pixel
+                cr.rectangle(cx, cy, 1, self.cursor_height)  # Use text_h instead of line_h
                 cr.fill()
 
 # ============================================================
@@ -487,19 +490,19 @@ class UltraView(Gtk.DrawingArea):
             
             # Clamp to visible area
             x = max(ln_width, min(x, alloc.width - 50))
-            y = max(0, min(y, alloc.height - self.renderer.line_h))
+            y = max(0, min(y, alloc.height - self.renderer.text_h))
             
             # Create cursor rectangle
             rect = Gdk.Rectangle()
             rect.x = int(x)
             rect.y = int(y)
             rect.width = 2
-            rect.height = self.renderer.line_h
+            rect.height = self.renderer.text_h  # Use text_h instead of line_h
             
             self.im.set_cursor_location(rect)
         except Exception as e:
             print(f"IM cursor location error: {e}")
-
+                
     def on_key(self, c, keyval, keycode, state):
         # Let IM filter the event FIRST
         event = c.get_current_event()
