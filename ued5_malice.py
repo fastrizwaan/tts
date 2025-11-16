@@ -274,8 +274,16 @@ class InputController:
 class Renderer:
     def __init__(self):
         self.font = Pango.FontDescription("Monospace 13")
-        self.line_h = 22
-        self.ln_width = 70
+
+        # Calculate actual line height from font metrics
+        # Create a temporary surface to get font metrics
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surface)
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(self.font)
+        layout.set_text("Ay", -1)  # Use tall chars to get full height
+        _, self.line_h = layout.get_pixel_size()
+        self.line_h += 4  # Add some line spacing
 
         # Clear semantic names
         self.editor_background_color = (0.10, 0.10, 0.10)
@@ -292,6 +300,13 @@ class Renderer:
         width, _ = layout.get_pixel_size()
         return width
 
+    def calculate_line_number_width(self, cr, total_lines):
+        """Calculate width needed for line numbers based on total lines"""
+        # Format the largest line number
+        max_line_num = str(total_lines)
+        width = self.get_text_width(cr, max_line_num)
+        return width + 15  # Add padding (5px left + 10px right margin)
+
     def draw(self, cr, alloc, buf, scroll_line, scroll_x, sel_s, sel_e):
         # Background
         cr.set_source_rgb(*self.editor_background_color)
@@ -301,6 +316,10 @@ class Renderer:
         layout.set_font_description(self.font)
 
         total = buf.total()
+        
+        # Calculate line number width dynamically
+        ln_width = self.calculate_line_number_width(cr, total)
+        
         max_vis = (alloc.height // self.line_h) + 1
 
         y = 0
@@ -316,7 +335,7 @@ class Renderer:
             # Line text
             layout.set_text(text, -1)
             cr.set_source_rgb(*self.text_foreground_color)
-            cr.move_to(self.ln_width - scroll_x, y)
+            cr.move_to(ln_width - scroll_x, y)
             PangoCairo.show_layout(cr, layout)
 
             y += self.line_h
@@ -331,7 +350,7 @@ class Renderer:
             text_before_cursor = line_text[:cc]
             text_width = self.get_text_width(cr, text_before_cursor)
             
-            cx = self.ln_width + text_width - scroll_x
+            cx = ln_width + text_width - scroll_x
             cr.set_source_rgb(1, 1, 1)
             cr.rectangle(cx, cy, 2, self.line_h)
             cr.fill()
@@ -534,14 +553,29 @@ class UltraView(Gtk.DrawingArea):
 
     def on_click(self, g, n, x, y):
         self.grab_focus()
+        
+        # Calculate line number width dynamically
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surface)
+        ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
+        
         ln = self.scroll_line + int(y // self.renderer.line_h)
         ln = max(0, min(ln, self.buf.total() - 1))
 
-        col = int((x - self.renderer.ln_width + self.scroll_x) //
-                  self.renderer.char_w)
-        line = self.buf.get_line(ln)
-        col = max(0, min(col, len(line)))
-
+        col_pixels = x - ln_width + self.scroll_x
+        if col_pixels < 0:
+            col = 0
+        else:
+            line_text = self.buf.get_line(ln)
+            # Binary search to find column from pixel position
+            col = 0
+            for i in range(len(line_text) + 1):
+                text_width = self.renderer.get_text_width(cr, line_text[:i])
+                if text_width > col_pixels:
+                    break
+                col = i
+        
+        col = max(0, min(col, len(self.buf.get_line(ln))))
         self.ctrl.click(ln, col)
         self.queue_draw()
 
@@ -550,14 +584,28 @@ class UltraView(Gtk.DrawingArea):
         if not ok:
             return
 
+        # Calculate line number width dynamically
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surface)
+        ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
+
         ln = self.scroll_line + int((sy + dy) // self.renderer.line_h)
         ln = max(0, min(ln, self.buf.total() - 1))
 
-        col = int((sx + dx - self.renderer.ln_width + self.scroll_x) //
-                  self.renderer.char_w)
-        line = self.buf.get_line(ln)
-        col = max(0, min(col, len(line)))
+        col_pixels = (sx + dx) - ln_width + self.scroll_x
+        if col_pixels < 0:
+            col = 0
+        else:
+            line_text = self.buf.get_line(ln)
+            # Binary search to find column from pixel position
+            col = 0
+            for i in range(len(line_text) + 1):
+                text_width = self.renderer.get_text_width(cr, line_text[:i])
+                if text_width > col_pixels:
+                    break
+                col = i
 
+        col = max(0, min(col, len(self.buf.get_line(ln))))
         self.ctrl.drag(ln, col)
         self.queue_draw()
 
