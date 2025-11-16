@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, os, mmap, gi
+import sys, os, mmap, gi, cairo
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -275,13 +275,22 @@ class Renderer:
     def __init__(self):
         self.font = Pango.FontDescription("Monospace 13")
         self.line_h = 22
-        self.char_w = 10
         self.ln_width = 70
 
         # Clear semantic names
         self.editor_background_color = (0.10, 0.10, 0.10)
         self.text_foreground_color   = (0.50, 0.50, 0.50)
-        self.linenumber_foreground_color = (6.0, 0.60, 0.60)
+        self.linenumber_foreground_color = (0.60, 0.60, 0.60)
+
+    def get_text_width(self, cr, text):
+        """Calculate actual pixel width of text using Pango"""
+        if not text:
+            return 0
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(self.font)
+        layout.set_text(text, -1)
+        width, _ = layout.get_pixel_size()
+        return width
 
     def draw(self, cr, alloc, buf, scroll_line, scroll_x, sel_s, sel_e):
         # Background
@@ -312,23 +321,27 @@ class Renderer:
 
             y += self.line_h
 
-        # Cursor
+        # Cursor - calculate actual text width
         cl, cc = buf.cursor_line, buf.cursor_col
         if scroll_line <= cl < scroll_line + max_vis:
             cy = (cl - scroll_line) * self.line_h
-            cx = self.ln_width + (cc * self.char_w) - scroll_x
+            
+            # Get text before cursor and measure it
+            line_text = buf.get_line(cl)
+            text_before_cursor = line_text[:cc]
+            text_width = self.get_text_width(cr, text_before_cursor)
+            
+            cx = self.ln_width + text_width - scroll_x
             cr.set_source_rgb(1, 1, 1)
             cr.rectangle(cx, cy, 2, self.line_h)
             cr.fill()
-
-
-
 
 # ============================================================
 #   VIEW
 # ============================================================
 
 class UltraView(Gtk.DrawingArea):
+
     def __init__(self, buf):
         super().__init__()
         self.buf = buf
@@ -346,14 +359,168 @@ class UltraView(Gtk.DrawingArea):
         self.install_keys()
         self.install_scroll()
 
+        # Setup IM context with preedit support
         self.im = Gtk.IMMulticontext()
-        self.im.set_client_widget(self)
         self.im.connect("commit", self.on_commit)
+        self.im.connect("preedit-changed", self.on_preedit_changed)
+        self.im.connect("preedit-start", self.on_preedit_start)
+        self.im.connect("preedit-end", self.on_preedit_end)
+        
+        # Preedit state
+        self.preedit_string = ""
+        self.preedit_cursor = 0
+        
+        # Connect focus events
+        focus = Gtk.EventControllerFocus()
+        focus.connect("enter", self.on_focus_in)
+        focus.connect("leave", self.on_focus_out)
+        self.add_controller(focus)
 
     def on_commit(self, im, text):
-        self.buf.insert_text(text)
-        self.keep_cursor_visible()
+        """Handle committed text from IM"""
+        if text:
+            self.buf.insert_text(text)
+            self.keep_cursor_visible()
+            self.queue_draw()
+            # Update IM cursor AFTER buffer changes
+            self.update_im_cursor_location()
+
+    def on_preedit_start(self, im):
+        """Preedit (composition) started"""
         self.queue_draw()
+
+    def on_preedit_end(self, im):
+        """Preedit (composition) ended"""
+        self.preedit_string = ""
+        self.preedit_cursor = 0
+        self.queue_draw()
+
+    def on_preedit_changed(self, im):
+        """Preedit text changed - show composition"""
+        try:
+            preedit_str, attrs, cursor_pos = self.im.get_preedit_string()
+            self.preedit_string = preedit_str or ""
+            self.preedit_cursor = cursor_pos
+            self.queue_draw()
+        except Exception as e:
+            print(f"Preedit error: {e}")
+
+    def on_focus_in(self, controller):
+        """Widget gained focus"""
+        self.im.focus_in()
+        self.im.set_client_widget(self)
+        self.update_im_cursor_location()
+        
+    def on_focus_out(self, controller):
+        """Widget lost focus"""
+        self.im.focus_out()
+
+    def update_im_cursor_location(self):
+        """Tell IM where to display composition window"""
+        try:
+            # Get actual allocation
+            alloc = self.get_allocation()
+            if alloc.width <= 0 or alloc.height <= 0:
+                return
+                
+            cl, cc = self.buf.cursor_line, self.buf.cursor_col
+            
+            # Get the actual line text up to cursor
+            line_text = self.buf.get_line(cl)
+            text_before_cursor = line_text[:cc]
+            
+            # Measure actual text width using Pango
+            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+            cr = cairo.Context(surface)
+            layout = PangoCairo.create_layout(cr)
+            layout.set_font_description(self.renderer.font)
+            layout.set_text(text_before_cursor, -1)
+            
+            # Get actual pixel width
+            text_width, _ = layout.get_pixel_size()
+            
+            # Calculate screen position
+            y = (cl - self.scroll_line) * self.renderer.line_h
+            x = self.renderer.ln_width + text_width - self.scroll_x
+            
+            # Clamp to visible area
+            x = max(self.renderer.ln_width, min(x, alloc.width - 50))
+            y = max(0, min(y, alloc.height - self.renderer.line_h))
+            
+            # Create cursor rectangle
+            rect = Gdk.Rectangle()
+            rect.x = int(x)
+            rect.y = int(y)
+            rect.width = 2
+            rect.height = self.renderer.line_h
+            
+            self.im.set_cursor_location(rect)
+        except Exception as e:
+            print(f"IM cursor location error: {e}")
+
+    def on_key(self, c, keyval, keycode, state):
+        # Let IM filter the event FIRST
+        event = c.get_current_event()
+        if event and self.im.filter_keypress(event):
+            return True
+
+        name = Gdk.keyval_name(keyval)
+
+        # Editing keys
+        if name == "BackSpace":
+            self.buf.backspace()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+
+        if name == "Return":
+            self.buf.insert_newline()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+
+        # Arrow keys
+        if name == "Up":
+            self.ctrl.move_up()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+        elif name == "Down":
+            self.ctrl.move_down()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+        elif name == "Left":
+            self.ctrl.move_left()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+        elif name == "Right":
+            self.ctrl.move_right()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+
+        return False
+
+    def install_keys(self):
+        key = Gtk.EventControllerKey()
+        key.connect("key-pressed", self.on_key)
+        key.connect("key-released", self.on_key_release)
+        self.add_controller(key)
+        
+    def on_key_release(self, c, keyval, keycode, state):
+        """Filter key releases for IM"""
+        event = c.get_current_event()
+        if event and self.im.filter_keypress(event):
+            return True
+        return False
 
 
     def install_mouse(self):
@@ -393,52 +560,6 @@ class UltraView(Gtk.DrawingArea):
 
         self.ctrl.drag(ln, col)
         self.queue_draw()
-
-    def on_key(self, c, keyval, keycode, state):
-        # IME event first
-        event = c.get_current_event()
-        if event and self.im.filter_keypress(event):
-            return True
-
-        name = Gdk.keyval_name(keyval)
-
-        # Editing keys
-        if name == "BackSpace":
-            self.buf.backspace()
-            self.keep_cursor_visible()
-            self.queue_draw()
-            return True
-
-        if name == "Return":
-            self.buf.insert_newline()
-            self.keep_cursor_visible()
-            self.queue_draw()
-            return True
-
-        # Arrow keys
-        if name == "Up":
-            self.ctrl.move_up()
-            self.keep_cursor_visible()
-            self.queue_draw()
-            return True
-        elif name == "Down":
-            self.ctrl.move_down()
-            self.keep_cursor_visible()
-            self.queue_draw()
-            return True
-        elif name == "Left":
-            self.ctrl.move_left()
-            self.keep_cursor_visible()
-            self.queue_draw()
-            return True
-        elif name == "Right":
-            self.ctrl.move_right()
-            self.keep_cursor_visible()
-            self.queue_draw()
-            return True
-
-        # Let IME handle all other keys
-        return False
 
     def keep_cursor_visible(self):
         max_vis = max(1, (self.get_height() // self.renderer.line_h) + 1)
