@@ -283,8 +283,8 @@ class Renderer:
         layout.set_text("Ay", -1)  # Use tall chars to get full height
         _, text_height = layout.get_pixel_size()
         
-        self.cursor_height = text_height  + 0  # Actual text height (for cursor)
-        self.line_h = text_height + 0  # Line height with spacing
+        self.text_h = text_height  # Actual text height (for cursor)
+        self.line_h = text_height - 0  # Line height with spacing
 
         # Clear semantic names
         self.editor_background_color = (0.10, 0.10, 0.10)
@@ -354,7 +354,7 @@ class Renderer:
                 
                 cx = ln_width + text_width - scroll_x
                 cr.set_source_rgb(1, 1, 1)
-                cr.rectangle(cx, cy, 1, self.cursor_height)  # Use text_h instead of line_h
+                cr.rectangle(cx, cy, 1, self.text_h)  # Use text_h instead of line_h
                 cr.fill()
 
 # ============================================================
