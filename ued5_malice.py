@@ -4,8 +4,7 @@ import sys, os, mmap, gi, cairo
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo
-
+from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo, GLib
 
 # ============================================================
 #   ENCODING DETECTION
@@ -283,7 +282,6 @@ class Renderer:
         layout.set_font_description(self.font)
         layout.set_text("Ay", -1)  # Use tall chars to get full height
         _, self.line_h = layout.get_pixel_size()
-        self.line_h += 4  # Add some line spacing
 
         # Clear semantic names
         self.editor_background_color = (0.10, 0.10, 0.10)
@@ -307,7 +305,7 @@ class Renderer:
         width = self.get_text_width(cr, max_line_num)
         return width + 15  # Add padding (5px left + 10px right margin)
 
-    def draw(self, cr, alloc, buf, scroll_line, scroll_x, sel_s, sel_e):
+    def draw(self, cr, alloc, buf, scroll_line, scroll_x, cursor_visible=True):
         # Background
         cr.set_source_rgb(*self.editor_background_color)
         cr.paint()
@@ -340,20 +338,21 @@ class Renderer:
 
             y += self.line_h
 
-        # Cursor - calculate actual text width
-        cl, cc = buf.cursor_line, buf.cursor_col
-        if scroll_line <= cl < scroll_line + max_vis:
-            cy = (cl - scroll_line) * self.line_h
-            
-            # Get text before cursor and measure it
-            line_text = buf.get_line(cl)
-            text_before_cursor = line_text[:cc]
-            text_width = self.get_text_width(cr, text_before_cursor)
-            
-            cx = ln_width + text_width - scroll_x
-            cr.set_source_rgb(1, 1, 1)
-            cr.rectangle(cx, cy, 2, self.line_h)
-            cr.fill()
+        # Cursor - only draw if visible (for blinking)
+        if cursor_visible:
+            cl, cc = buf.cursor_line, buf.cursor_col
+            if scroll_line <= cl < scroll_line + max_vis:
+                cy = (cl - scroll_line) * self.line_h
+                
+                # Get text before cursor and measure it
+                line_text = buf.get_line(cl)
+                text_before_cursor = line_text[:cc]
+                text_width = self.get_text_width(cr, text_before_cursor)
+                
+                cx = ln_width + text_width - scroll_x
+                cr.set_source_rgb(1, 1, 1)
+                cr.rectangle(cx, cy, 1, self.line_h)  # Width of 1 pixel
+                cr.fill()
 
 # ============================================================
 #   VIEW
@@ -394,14 +393,39 @@ class UltraView(Gtk.DrawingArea):
         focus.connect("enter", self.on_focus_in)
         focus.connect("leave", self.on_focus_out)
         self.add_controller(focus)
+        
+        # Cursor blink state
+        self.cursor_visible = True
+        self.cursor_blink_timeout = None
+        self.start_cursor_blink()
+    
+    def start_cursor_blink(self):
+        """Start cursor blinking animation"""
+        def blink():
+            self.cursor_visible = not self.cursor_visible
+            self.queue_draw()
+            return True  # Continue blinking
+        
+        if self.cursor_blink_timeout:
+            GLib.source_remove(self.cursor_blink_timeout)
+        
+        self.cursor_blink_timeout = GLib.timeout_add(500, blink)  # Blink every 500ms
+
+    def stop_cursor_blink(self):
+        """Stop cursor blinking"""
+        if self.cursor_blink_timeout:
+            GLib.source_remove(self.cursor_blink_timeout)
+            self.cursor_blink_timeout = None
+        self.cursor_visible = True
 
     def on_commit(self, im, text):
         """Handle committed text from IM"""
         if text:
             self.buf.insert_text(text)
             self.keep_cursor_visible()
+            self.cursor_visible = True  # Reset blink on typing
+            self.start_cursor_blink()
             self.queue_draw()
-            # Update IM cursor AFTER buffer changes
             self.update_im_cursor_location()
 
     def on_preedit_start(self, im):
@@ -451,19 +475,18 @@ class UltraView(Gtk.DrawingArea):
             # Measure actual text width using Pango
             surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
             cr = cairo.Context(surface)
-            layout = PangoCairo.create_layout(cr)
-            layout.set_font_description(self.renderer.font)
-            layout.set_text(text_before_cursor, -1)
             
-            # Get actual pixel width
-            text_width, _ = layout.get_pixel_size()
+            text_width = self.renderer.get_text_width(cr, text_before_cursor)
+            
+            # Calculate line number width dynamically
+            ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
             
             # Calculate screen position
             y = (cl - self.scroll_line) * self.renderer.line_h
-            x = self.renderer.ln_width + text_width - self.scroll_x
+            x = ln_width + text_width - self.scroll_x
             
             # Clamp to visible area
-            x = max(self.renderer.ln_width, min(x, alloc.width - 50))
+            x = max(ln_width, min(x, alloc.width - 50))
             y = max(0, min(y, alloc.height - self.renderer.line_h))
             
             # Create cursor rectangle
@@ -624,13 +647,6 @@ class UltraView(Gtk.DrawingArea):
 
         self.scroll_line = max(0, self.scroll_line)
 
-    def install_keys(self):
-        key = Gtk.EventControllerKey()
-        key.connect("key-pressed", self.on_key)
-        key.connect("key-released", lambda *_: False)
-
-        self.add_controller(key)
-        
     def install_scroll(self):
         sc = Gtk.EventControllerScroll.new(
             Gtk.EventControllerScrollFlags.VERTICAL |
@@ -670,10 +686,8 @@ class UltraView(Gtk.DrawingArea):
             self.buf,
             self.scroll_line,
             self.scroll_x,
-            self.ctrl.sel_start,
-            self.ctrl.sel_end
+            self.cursor_visible  # Pass cursor visibility state
         )
-
 
 
 # ============================================================
