@@ -769,7 +769,7 @@ class VirtualScrollbar(Gtk.DrawingArea):
 class EditorWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
-        self.set_title("UltraEditor v4 — Full Indexing, UTF16-Safe")
+        self.set_title("Virutal Text Editor")
         self.set_default_size(1000, 700)
 
         self.buf = VirtualBuffer()

@@ -953,7 +953,7 @@ class EditorWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
         self.set_title("UltraEditor v3.8 — IME + Auto-sizing")
-        self.set_default_size(1000, 700)
+        self.set_default_size(640, 480)
 
         self.buf = VirtualBuffer()
         self.view = UltraView(self.buf)
