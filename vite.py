@@ -2,7 +2,8 @@
 import sys, os, mmap, gi, cairo, time, unicodedata
 from threading import Thread
 from array import array
-import math
+import math 
+import datetime
 import bisect
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -3583,6 +3584,12 @@ class VirtualTextView(Gtk.DrawingArea):
         self.connect('resize', self.on_resize)
 
     def on_buffer_changed(self, *args):
+        # Clear wrap cache as content has changed
+        if self.renderer.wrap_enabled:
+            self.renderer.wrap_cache.clear()
+            self.renderer.total_visual_lines_cache = -1
+            self.renderer.visual_line_anchor = None
+            
         # Update scrollbars after width changes
         self.update_scrollbar()
         self.queue_draw()
@@ -5639,7 +5646,7 @@ class EditorWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
         self.set_title("Virtual Text Editor")
-        self.set_default_size(320, 240)
+        self.set_default_size(800, 600)
         
         # Track current encoding
         self.current_encoding = "utf-8"
