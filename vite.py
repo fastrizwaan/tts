@@ -3418,11 +3418,11 @@ class Renderer:
                         idx1 = visual_byte_index(text_segment, s_col)
                         idx2 = visual_byte_index(text_segment, e_col)
                         
-                        r1 = layout.index_to_pos(idx1)
-                        r2 = layout.index_to_pos(idx2)
+                        r1_strong, r1_weak = layout.get_cursor_pos(idx1)
+                        r2_strong, r2_weak = layout.get_cursor_pos(idx2)
                         
-                        x1 = r1.x / Pango.SCALE
-                        x2 = r2.x / Pango.SCALE
+                        x1 = r1_strong.x / Pango.SCALE
+                        x2 = r2_strong.x / Pango.SCALE
                         
                         # Handle newline selection
                         if e_col > len(text_segment):
