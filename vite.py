@@ -4584,7 +4584,13 @@ class VirtualTextView(Gtk.DrawingArea):
         self._clicked_in_selection = False
         
         # Track if a drag might start (deferred until movement)
+        # Track if a drag might start (deferred until movement)
         self._drag_pending = False
+        
+        # Auto-scroll on drag
+        self.autoscroll_timer_id = None
+        self.last_drag_x = 0
+        self.last_drag_y = 0
 
     def on_middle_click(self, gesture, n_press, x, y):
         """Paste from primary clipboard on middle-click"""
@@ -4907,6 +4913,7 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def on_release(self, g, n, x, y):
         """Handle mouse button release"""
+        self.stop_autoscroll()  # Stop auto-scroll on release
         self.ctrl.end_drag()
 
 
@@ -5095,6 +5102,156 @@ class VirtualTextView(Gtk.DrawingArea):
 
 
 
+    def start_autoscroll(self):
+        """Start the auto-scroll timer if not already running"""
+        if self.autoscroll_timer_id is None:
+            # Call autoscroll_tick every 50ms (20 times per second)
+            self.autoscroll_timer_id = GLib.timeout_add(50, self.autoscroll_tick)
+    
+    def stop_autoscroll(self):
+        """Stop the auto-scroll timer"""
+        if self.autoscroll_timer_id is not None:
+            GLib.source_remove(self.autoscroll_timer_id)
+            self.autoscroll_timer_id = None
+    
+    def autoscroll_tick(self):
+        """Called periodically during drag to perform auto-scrolling"""
+        if not self.ctrl.dragging and not self.drag_and_drop_mode:
+            # No longer dragging, stop the timer
+            self.stop_autoscroll()
+            return False
+        
+        viewport_height = self.get_height()
+        viewport_width = self.get_width()
+        
+        # Define edge zones (pixels from edge where auto-scroll activates)
+        edge_size = 30
+        
+        # Calculate scroll amounts based on how close to edge
+        scroll_amount = 0
+        hscroll_amount = 0
+        
+        # Vertical scrolling
+        if self.last_drag_y < edge_size:
+            # Near top edge - scroll up
+            # Speed increases closer to edge
+            scroll_amount = -max(1, int((edge_size - self.last_drag_y) / 10) + 1)
+        elif self.last_drag_y > viewport_height - edge_size:
+            # Near bottom edge - scroll down
+            scroll_amount = max(1, int((self.last_drag_y - (viewport_height - edge_size)) / 10) + 1)
+        
+        # Horizontal scrolling (only when wrap is disabled)
+        if not self.renderer.wrap_enabled:
+            ln_width = 50  # Approximate line number width
+            if self.last_drag_x < ln_width + edge_size:
+                # Near left edge - scroll left
+                hscroll_amount = -max(5, int((ln_width + edge_size - self.last_drag_x) / 5) + 5)
+            elif self.last_drag_x > viewport_width - edge_size:
+                # Near right edge - scroll right
+                hscroll_amount = max(5, int((self.last_drag_x - (viewport_width - edge_size)) / 5) + 5)
+        
+        # Perform scrolling
+        did_scroll = False
+        
+        if scroll_amount != 0:
+            total_lines = self.buf.total()
+            if total_lines == 0:
+                return True
+            
+            visible = max(1, viewport_height // self.renderer.line_h)
+            
+            if self.renderer.wrap_enabled:
+                # Word wrap mode: scroll by visual lines
+                surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+                cr = cairo.Context(surface)
+                ln_width = self.renderer.calculate_line_number_width(cr, total_lines)
+                
+                # Calculate current visual line
+                current_visual = self.renderer.logical_to_visual_line(
+                    cr, self.buf, self.scroll_line, 0, ln_width, viewport_width
+                )
+                current_visual += self.scroll_visual_offset
+                
+                # Calculate total visual lines for bounds checking
+                total_visual = self.renderer.get_total_visual_lines(cr, self.buf, ln_width, viewport_width)
+                max_scroll_visual = max(0, total_visual - visible)
+                
+                # Apply scroll
+                new_visual = current_visual + scroll_amount
+                new_visual = max(0, min(new_visual, max_scroll_visual))
+                
+                if new_visual != current_visual:
+                    # Convert back to logical line + visual offset
+                    new_log, new_vis_off, _, _ = self.renderer.visual_to_logical_line(
+                        cr, self.buf, new_visual, ln_width, viewport_width
+                    )
+                    
+                    self.scroll_line = new_log
+                    self.scroll_visual_offset = new_vis_off
+                    self.vadj.set_value(new_visual)
+                    did_scroll = True
+            else:
+                # Non-wrap mode: scroll by logical lines
+                new_scroll = self.scroll_line + scroll_amount
+                max_scroll = max(0, total_lines - visible)
+                new_scroll = max(0, min(new_scroll, max_scroll))
+                
+                if new_scroll != self.scroll_line:
+                    self.scroll_line = new_scroll
+                    self.scroll_visual_offset = 0
+                    self.vadj.set_value(self.scroll_line)
+                    did_scroll = True
+        
+        if hscroll_amount != 0 and not self.renderer.wrap_enabled:
+            new_scroll_x = self.scroll_x + hscroll_amount
+            max_hscroll = max(0, self.renderer.max_line_width - viewport_width)
+            new_scroll_x = max(0, min(new_scroll_x, max_hscroll))
+            
+            if new_scroll_x != self.scroll_x:
+                self.scroll_x = new_scroll_x
+                self.hadj.set_value(self.scroll_x)
+                did_scroll = True
+        
+        # Update selection after scrolling
+        if did_scroll:
+            # Get the line/col at current drag position
+            ln, col = self.xy_to_line_col(self.last_drag_x, self.last_drag_y)
+            
+            # Update drag selection to follow the cursor
+            if self.drag_and_drop_mode:
+                # In drag-and-drop mode, just update drop position
+                self.drop_position_line = ln
+                self.drop_position_col = col
+            elif self.word_selection_mode:
+                # Word selection mode - extend by words
+                line_text = self.buf.get_line(ln)
+                if line_text and 0 <= col <= len(line_text):
+                    start_col, end_col = self.find_word_boundaries(line_text, min(col, len(line_text) - 1))
+                    
+                    # Use anchor word for direction
+                    is_forward = False
+                    if ln > self.anchor_word_start_line:
+                        is_forward = True
+                    elif ln == self.anchor_word_start_line and col >= self.anchor_word_start_col:
+                        is_forward = True
+                    
+                    if is_forward:
+                        self.buf.selection.set_start(self.anchor_word_start_line, self.anchor_word_start_col)
+                        self.ctrl.update_drag(ln, end_col)
+                    else:
+                        self.buf.selection.set_start(self.anchor_word_end_line, self.anchor_word_end_col)
+                        self.ctrl.update_drag(ln, start_col)
+                else:
+                    self.ctrl.update_drag(ln, col)
+            else:
+                # Normal character selection
+                self.ctrl.update_drag(ln, col)
+            
+            self.queue_draw()
+        
+        # Keep timer running
+        return True
+
     def on_drag_update(self, g, dx, dy):
         ok, sx, sy = g.get_start_point()
         if not ok:
@@ -5108,6 +5265,29 @@ class VirtualTextView(Gtk.DrawingArea):
             # Now we know it's a drag, so it's NOT a click-to-clear
             self._clicked_in_selection = False
             self.queue_draw()
+
+        # Store current drag position for auto-scroll
+        self.last_drag_x = sx + dx
+        self.last_drag_y = sy + dy
+        
+        # Check if we're near edges and start auto-scroll if needed
+        viewport_height = self.get_height()
+        viewport_width = self.get_width()
+        edge_size = 30
+        
+        near_edge = (
+            self.last_drag_y < edge_size or 
+            self.last_drag_y > viewport_height - edge_size or
+            (not self.renderer.wrap_enabled and (
+                self.last_drag_x < edge_size or 
+                self.last_drag_x > viewport_width - edge_size
+            ))
+        )
+        
+        if near_edge:
+            self.start_autoscroll()
+        else:
+            self.stop_autoscroll()
 
         # Always use accurate xy_to_line_col - Pango's hit-testing is fast enough
         ln, col = self.xy_to_line_col(sx + dx, sy + dy)
@@ -5203,6 +5383,9 @@ class VirtualTextView(Gtk.DrawingArea):
         self.queue_draw()
 
     def on_drag_end(self, g, dx, dy):
+        # Stop auto-scrolling
+        self.stop_autoscroll()
+        
         # If we clicked in selection but didn't actually drag (drag_and_drop_mode wasn't set),
         # then we should clear the selection now
         if self._clicked_in_selection and not self.drag_and_drop_mode:
