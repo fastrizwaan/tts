@@ -3318,10 +3318,9 @@ class Renderer:
         if is_rtl:
             available = max(0, view_w - ln_width)
             # Unified formula: right-align and apply scroll offset
-            return max(ln_width, ln_width + max(0, available - text_w) - scroll_x)
+            return ln_width + max(0, available - text_w) - scroll_x
         else:
-            # Ensure text never overlaps line numbers
-            return max(ln_width, ln_width - scroll_x)
+            return ln_width - scroll_x
 
     def calculate_line_number_width(self, cr, total_lines):
         """Calculate width needed for line numbers based on total lines"""
