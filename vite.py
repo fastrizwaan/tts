@@ -12,13 +12,14 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo, GLib, Gio
 
 CSS_OVERLAY_SCROLLBAR = """
-/* Vertical container */
+/* ========================
+   Scrollbars (unchanged)
+   ======================== */
 .overlay-scrollbar {
     background-color: rgb(25,25,25);
-    min-width: 2px;
+    min-width: 8px;
 }
 
-/* Vertical thumb */
 .overlay-scrollbar trough > slider {
     min-width: 8px;
     border-radius: 12px;
@@ -26,26 +27,23 @@ CSS_OVERLAY_SCROLLBAR = """
     transition: min-width 200ms ease, background-color 200ms ease;
 }
 
-/* Hover → wider */
 .overlay-scrollbar trough > slider:hover {
     min-width: 8px;
     background-color: rgba(0,127,255,0.52);
 }
 
-/* Dragging → :active (GTK4-native) */
 .overlay-scrollbar trough > slider:active {
     min-width: 8px;
     background-color: rgba(255,255,255,0.50);
 }
 
-
-/* ---------------- HORIZONTAL ---------------- */
-.hscrollbar-overlay  {
+.hscrollbar-overlay {
     background-color: rgb(25,25,25);
-    min-width: 2px;
+    min-width: 8px;
 }
+
 .hscrollbar-overlay trough > slider {
-    min-height: 2px;
+    min-height: 8px;
     border-radius: 12px;
     background-color: rgba(0,127,255,0.52);
     transition: min-height 200ms ease, background-color 200ms ease;
@@ -56,16 +54,169 @@ CSS_OVERLAY_SCROLLBAR = """
     background-color: rgba(0,127,255,0.52);
 }
 
-/* Dragging (GTK4-native) */
 .hscrollbar-overlay trough > slider:active {
     min-height: 8px;
     background-color: rgba(255,255,255,0.50);
 }
+
+/* ========================
+   Editor background
+   ======================== */
 .editor-surface {
-    background-color: rgb(25,25,25); /* same as your renderer’s bg */
+    background-color: rgb(25,25,25);
+}
+
+/* ========================
+   Chrome Tabs
+   ======================== */
+
+.chrome-tab {
+    margin-left: 1px;
+    margin-bottom:1px;
+    padding-left: 12px;
+    padding-right: 8px;
+    padding-top:4px;
+    padding-bottom:4px;
+
+    min-height: 24px;
+    background: transparent;
+    color: #c0c0c0;
+    min-height: 24px;
+    border-radius: 8px;
+
+    transition: background 140ms ease, color 140ms ease;
+}
+
+.chrome-tab label {
+    font-weight: normal;
+}
+
+.chrome-tab:hover {
+    color: #c0c0c0;
+    min-height: 24px;
+    background: rgba(255,255,255,0.10);
+    padding-left: 12px;
+    padding-right: 8px;
+    padding-top:4px;
+    padding-bottom:4px;
+
+}
+
+/* ACTIVE TAB (pilled) */
+.chrome-tab.active {
+    background: rgba(255,255,255,0.12);
+    color: white;
+    min-height: 24px;
+    padding-left: 12px;
+    padding-right: 8px;
+    padding-top:4px;
+    padding-bottom:4px;
+}
+
+.chrome-tab.active label {
+    font-weight: normal;
+}
+
+/* Dragging state */
+.chrome-tab.dragging {
+    opacity: 0.5;
+}
+
+/* Drop indicator line */
+.tab-drop-indicator {
+    background: linear-gradient(to bottom, 
+        transparent 0%, 
+        rgba(0, 127, 255, 0.8) 20%, 
+        rgba(0, 127, 255, 1) 50%, 
+        rgba(0, 127, 255, 0.8) 80%, 
+        transparent 100%);
+    min-width: 3px;
+    border-radius: 2px;
+}
+
+
+/* Modified marker */
+.chrome-tab.modified {
+    font-style: normal;
+}
+
+/* Reset all buttons inside tab (fixes size regression) */
+.chrome-tab button {
+    background: none;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    margin: 0;
+    min-width: 0;
+    min-height: 0;
+}
+
+/* close button specific */
+.chrome-tab .chrome-tab-close-button {
+    min-width: 10px;
+    min-height: 10px;
+    padding: 4px;
+    opacity: 0.10;
+    color: #FFFFFF;
+}
+
+.chrome-tab:hover .chrome-tab-close-button {
+    opacity: 1;
+}
+
+.chrome-tab.active .chrome-tab-close-button {
+    opacity: 1;
+    color: #FFFFFF;
+}
+
+/* ========================
+   Separators
+   ======================== */
+.chrome-tab-separator {
+    min-width: 1px;
+    background-color: rgba(255,255,255,0.15);
+    margin-top: 6px;
+    margin-bottom: 6px;
+}
+
+.chrome-tab-separator.hidden {
+    min-width: 0px;
+    background-color: transparent;
+}
+.chrome-tab-separator:first-child {
+    background-color: transparent;
+    min-width: 0;
+}
+
+.chrome-tab-separator:last-child {
+    background-color: transparent;
+    min-width: 0;
+}
+/* ========================
+   Tab close button
+   ======================== */
+.chrome-tab-close-button {
+    opacity: 0;
+    transition: opacity 300ms ease, background-color 300ms ease;
+}
+
+.chrome-tab:hover .chrome-tab-close-button {
+    opacity: 1;
+    border-radius: 20px;
+}
+
+.chrome-tab-close-button:hover  {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.chrome-tab.active .chrome-tab-close-button:hover {
+    opacity: 1;
+    background-color: rgba(255,255,255,0.1);
 }
 
 """
+
+
 
 
 # ============================================================
@@ -105,12 +256,19 @@ class IndexedFile:
         self.path = path
         self.encoding = self.detect_encoding(path)
         self.raw = open(path, "rb")
-        self.mm = mmap.mmap(self.raw.fileno(), 0, access=mmap.ACCESS_READ)
-
-        print(f"File opened and mapped in {time.time()-start:.2f}s")
-
-
         
+        # Check if file is empty
+        file_size = os.path.getsize(path)
+        if file_size == 0:
+            # Empty file - don't create mmap
+            self.mm = None
+            self.is_empty = True
+            print(f"File opened (empty file) in {time.time()-start:.2f}s")
+        else:
+            self.mm = mmap.mmap(self.raw.fileno(), 0, access=mmap.ACCESS_READ)
+            self.is_empty = False
+            print(f"File opened and mapped in {time.time()-start:.2f}s")
+
         # Use array.array instead of list - much faster for millions of integers
         # 'Q' = unsigned long long (8 bytes, perfect for file offsets)
         self.index = array('Q')
@@ -118,6 +276,10 @@ class IndexedFile:
     def detect_encoding(self, path):
         with open(path, "rb") as f:
             data = f.read(4096)  # small peek is enough
+
+        # Handle empty files
+        if len(data) == 0:
+            return "utf-8"
 
         # --- BOM detection ---
         if data.startswith(b"\xff\xfe"):
@@ -135,10 +297,11 @@ class IndexedFile:
                 return "utf-16le"
 
         # --- Heuristic UTF-16BE detection (no BOM) ---
-        zeros_in_even = sum(1 for i in range(0, len(data), 2) if data[i] == 0)
-        ratio_be = zeros_in_even / (len(data) / 2)
-        if ratio_be > 0.4:
-            return "utf-16be"
+        if len(data) >= 2:  # Need at least 2 bytes for this check
+            zeros_in_even = sum(1 for i in range(0, len(data), 2) if data[i] == 0)
+            ratio_be = zeros_in_even / (len(data) / 2)
+            if ratio_be > 0.4:
+                return "utf-16be"
 
         # Default
         return "utf-8"
@@ -148,6 +311,13 @@ class IndexedFile:
         start_time = time.time()
         enc = self.encoding
         
+        if self.is_empty:
+            print(f"Indexing empty file ({enc})...")
+            # Empty file has 0 lines (or 1 empty line depending on interpretation, 
+            # but for indexing purposes we can just leave index as [0])
+            self.index = array('Q', [0])
+            return
+
         print(f"Indexing {len(self.mm) / (1024**3):.2f}GB file ({enc})...")
 
 
@@ -168,6 +338,10 @@ class IndexedFile:
 
     def _index_utf8(self, progress_callback=None):
         """Fast UTF-8 indexing using mmap.find() - optimized for huge files"""
+        if self.is_empty:
+            self.index = array('Q', [0])
+            return
+
         mm = self.mm
         total_size = len(mm)
         
@@ -206,6 +380,10 @@ class IndexedFile:
 
     def _index_utf16(self, progress_callback=None):
         """Fast UTF-16 indexing using mmap.find() directly - no memory copies"""
+        if self.is_empty:
+            self.index = array('Q', [0])
+            return
+
         mm = self.mm
         total_size = len(mm)
         
@@ -225,19 +403,18 @@ class IndexedFile:
         # Use array.array for fast integer storage
         self.index = array('Q', [start_pos])
         
-        # Use mmap.find() to scan for newlines
         pos = start_pos
         last_report = 0
-        report_interval = 50_000_000  # Report every 50MB for less overhead
+        report_interval = 50 * 1024 * 1024  # 50MB
         
         while pos < total_size:
-            # Report progress less frequently
+            # Report progress less frequently (every 50MB instead of 10MB)
             if progress_callback and pos - last_report > report_interval:
                 last_report = pos
                 progress = pos / total_size
                 GLib.idle_add(progress_callback, progress)
             
-            # Find next newline directly in mmap (no copy!)
+            # Find next newline directly in mmap (fast C-level search)
             newline_pos = mm.find(newline_bytes, pos)
             
             if newline_pos == -1:
@@ -259,6 +436,9 @@ class IndexedFile:
         return len(self.index) - 1
 
     def __getitem__(self, line):
+        if self.is_empty:
+            return ""
+
         if line < 0 or line >= self.total_lines():
             return ""
 
@@ -428,9 +608,9 @@ class VirtualBuffer(GObject.Object):
         if self.line_offsets:
             # The last offset tells us the total shift
             net_insertions = self.line_offsets[-1][1]
-            return base + net_insertions
+            return max(1, base + net_insertions)
         
-        return base
+        return max(1, base)
 
     def get_line(self, ln):
         # Check if it's an inserted line first
@@ -880,6 +1060,218 @@ class VirtualBuffer(GObject.Object):
         
         self.selection.clear()
         self.emit("changed")
+    
+    def delete_word_backward(self):
+        """Delete from cursor to start of current word (Ctrl+Backspace)"""
+        import unicodedata
+        
+        def is_word_char(ch):
+            if ch == '_':
+                return True
+            cat = unicodedata.category(ch)
+            return cat[0] in ('L', 'N', 'M')
+        
+        if self.selection.has_selection():
+            self.delete_selection()
+            return
+        
+        ln = self.cursor_line
+        col = self.cursor_col
+        line = self.get_line(ln)
+        
+        if col == 0:
+            if ln > 0:
+                prev_line = self.get_line(ln - 1)
+                new_line = prev_line + line
+                
+                if ln - 1 in self.inserted_lines:
+                    self.inserted_lines[ln - 1] = new_line
+                else:
+                    self.edits[ln - 1] = new_line
+                
+                new_ins = {}
+                for k, v in self.inserted_lines.items():
+                    if k < ln:
+                        new_ins[k] = v
+                    elif k == ln:
+                        pass
+                    else:
+                        new_ins[k - 1] = v
+                
+                new_ed = {}
+                for k, v in self.edits.items():
+                    if k < ln:
+                        new_ed[k] = v
+                    elif k == ln:
+                        pass
+                    else:
+                        new_ed[k - 1] = v
+                
+                new_del = set()
+                for k in self.deleted_lines:
+                    if k < ln:
+                        new_del.add(k)
+                    elif k == ln:
+                        pass
+                    else:
+                        new_del.add(k - 1)
+                
+                self.inserted_lines = new_ins
+                self.edits = new_ed
+                self.deleted_lines = new_del
+                self._add_offset(ln + 1, -1)
+                
+                self.cursor_line = ln - 1
+                self.cursor_col = len(prev_line)
+            
+            self.emit("changed")
+            return
+        
+        start_col = col
+        while start_col > 0 and line[start_col - 1].isspace():
+            start_col -= 1
+        
+        if start_col > 0:
+            if is_word_char(line[start_col - 1]):
+                while start_col > 0 and is_word_char(line[start_col - 1]):
+                    start_col -= 1
+            elif not line[start_col - 1].isspace():
+                while start_col > 0 and not line[start_col - 1].isspace() and not is_word_char(line[start_col - 1]):
+                    start_col -= 1
+        
+        new_line = line[:start_col] + line[col:]
+        
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = new_line
+        else:
+            self.edits[ln] = new_line
+        
+        self.cursor_col = start_col
+        self.emit("changed")
+    
+    def delete_word_forward(self):
+        """Delete from cursor to end of current word (Ctrl+Delete)"""
+        import unicodedata
+        
+        def is_word_char(ch):
+            if ch == '_':
+                return True
+            cat = unicodedata.category(ch)
+            return cat[0] in ('L', 'N', 'M')
+        
+        if self.selection.has_selection():
+            self.delete_selection()
+            return
+        
+        ln = self.cursor_line
+        col = self.cursor_col
+        line = self.get_line(ln)
+        
+        # If at end of line, delete the newline
+        if col >= len(line):
+            if ln < self.total() - 1:
+                next_line = self.get_line(ln + 1)
+                new_line = line + next_line
+                
+                if ln in self.inserted_lines:
+                    self.inserted_lines[ln] = new_line
+                else:
+                    self.edits[ln] = new_line
+                
+                new_ins = {}
+                for k, v in self.inserted_lines.items():
+                    if k <= ln:
+                        new_ins[k] = v
+                    elif k == ln + 1:
+                        pass
+                    else:
+                        new_ins[k - 1] = v
+                
+                new_ed = {}
+                for k, v in self.edits.items():
+                    if k <= ln:
+                        new_ed[k] = v
+                    elif k == ln + 1:
+                        pass
+                    else:
+                        new_ed[k - 1] = v
+                
+                new_del = set()
+                for k in self.deleted_lines:
+                    if k <= ln:
+                        new_del.add(k)
+                    elif k == ln + 1:
+                        pass
+                    else:
+                        new_del.add(k - 1)
+                
+                self.inserted_lines = new_ins
+                self.edits = new_ed
+                self.deleted_lines = new_del
+                self._add_offset(ln + 2, -1)
+            
+            self.emit("changed")
+            return
+        
+        end_col = col
+        while end_col < len(line) and line[end_col].isspace():
+            end_col += 1
+        
+        if end_col < len(line):
+            if is_word_char(line[end_col]):
+                while end_col < len(line) and is_word_char(line[end_col]):
+                    end_col += 1
+            elif not line[end_col].isspace():
+                while end_col < len(line) and not line[end_col].isspace() and not is_word_char(line[end_col]):
+                    end_col += 1
+        
+        new_line = line[:col] + line[end_col:]
+        
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = new_line
+        else:
+            self.edits[ln] = new_line
+        
+        self.emit("changed")
+    
+    def delete_to_line_end(self):
+        """Delete from cursor to end of line (Ctrl+Shift+Delete)"""
+        if self.selection.has_selection():
+            self.delete_selection()
+            return
+        
+        ln = self.cursor_line
+        col = self.cursor_col
+        line = self.get_line(ln)
+        
+        new_line = line[:col]
+        
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = new_line
+        else:
+            self.edits[ln] = new_line
+        
+        self.emit("changed")
+    
+    def delete_to_line_start(self):
+        """Delete from cursor to start of line (Ctrl+Shift+Backspace)"""
+        if self.selection.has_selection():
+            self.delete_selection()
+            return
+        
+        ln = self.cursor_line
+        col = self.cursor_col
+        line = self.get_line(ln)
+        
+        new_line = line[col:]
+        
+        if ln in self.inserted_lines:
+            self.inserted_lines[ln] = new_line
+        else:
+            self.edits[ln] = new_line
+        
+        self.cursor_col = 0
+        self.emit("changed")
         
 
 
@@ -1014,6 +1406,107 @@ class VirtualBuffer(GObject.Object):
         self.cursor_line = ln + 1
         self.cursor_col = 0
         self.selection.clear()
+        self.emit("changed")
+
+    def indent_selection(self):
+        """Indent selected lines or current line"""
+        if not self.selection.has_selection():
+            # Just insert 4 spaces at cursor (handled by insert_text usually, but we can do it here)
+            self.insert_text("    ")
+            return
+
+        start_line, start_col, end_line, end_col = self.selection.get_bounds()
+        
+        # Indent all lines in range
+        for ln in range(start_line, end_line + 1):
+            line = self.get_line(ln)
+            new_line = "    " + line
+            
+            if ln in self.inserted_lines:
+                self.inserted_lines[ln] = new_line
+            else:
+                self.edits[ln] = new_line
+        
+        # Adjust selection and cursor
+        # If selection started at 0, keep it at 0 to include the new indentation
+        if start_col > 0:
+            self.selection.start_col += 4
+            
+        self.selection.end_col += 4
+        self.cursor_col += 4
+        self.emit("changed")
+
+    def unindent_selection(self):
+        """Unindent selected lines or current line"""
+        if not self.selection.has_selection():
+            # Unindent current line
+            ln = self.cursor_line
+            line = self.get_line(ln)
+            removed = 0
+            if line.startswith("    "):
+                new_line = line[4:]
+                removed = 4
+            elif line.startswith("   "):
+                new_line = line[3:]
+                removed = 3
+            elif line.startswith("  "):
+                new_line = line[2:]
+                removed = 2
+            elif line.startswith(" "):
+                new_line = line[1:]
+                removed = 1
+            else:
+                return # Nothing to unindent
+            
+            if ln in self.inserted_lines:
+                self.inserted_lines[ln] = new_line
+            else:
+                self.edits[ln] = new_line
+            
+            self.cursor_col = max(0, self.cursor_col - removed)
+            self.emit("changed")
+            return
+
+        start_line, start_col, end_line, end_col = self.selection.get_bounds()
+        
+        removed_start = 0
+        removed_end = 0
+        
+        # Unindent all lines in range
+        for ln in range(start_line, end_line + 1):
+            line = self.get_line(ln)
+            removed = 0
+            if line.startswith("    "):
+                new_line = line[4:]
+                removed = 4
+            elif line.startswith("   "):
+                new_line = line[3:]
+                removed = 3
+            elif line.startswith("  "):
+                new_line = line[2:]
+                removed = 2
+            elif line.startswith(" "):
+                new_line = line[1:]
+                removed = 1
+            else:
+                new_line = line
+            
+            if removed > 0:
+                if ln in self.inserted_lines:
+                    self.inserted_lines[ln] = new_line
+                else:
+                    self.edits[ln] = new_line
+            
+            if ln == start_line:
+                removed_start = removed
+            if ln == end_line:
+                removed_end = removed
+        
+        # We don't perfectly adjust selection cols for multi-line unindent 
+        # because each line might lose different amount. 
+        # But we should try to keep it valid.
+        self.selection.start_col = max(0, self.selection.start_col - removed_start)
+        self.selection.end_col = max(0, self.selection.end_col - removed_end)
         self.emit("changed")
         
     def move_word_left_with_text(self):
@@ -4884,6 +5377,31 @@ class VirtualTextView(Gtk.DrawingArea):
             self.queue_draw()
             return True
 
+        if keyval == Gdk.KEY_Tab:
+            # Check for Shift+Tab (Unindent)
+            if (state & Gdk.ModifierType.SHIFT_MASK):
+                self.buf.unindent_selection()
+                self.queue_draw()
+                return True
+            
+            # Check for Multi-line Indent
+            if self.buf.selection.has_selection():
+                start_line, _, end_line, _ = self.buf.selection.get_bounds()
+                if start_line != end_line:
+                    self.buf.indent_selection()
+                    self.queue_draw()
+                    return True
+            
+            # Normal Tab (Insert spaces)
+            self.buf.insert_text("    ")
+            self.queue_draw()
+            return True
+
+        if keyval == Gdk.KEY_ISO_Left_Tab:
+            self.buf.unindent_selection()
+            self.queue_draw()
+            return True
+
         # Ctrl+A - Select All
         if ctrl_pressed and name == "a":
             self.buf.select_all()
@@ -4915,14 +5433,30 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # Editing keys
         if name == "BackSpace":
-            self.buf.backspace()
+            if ctrl_pressed and shift_pressed:
+                # Ctrl+Shift+Backspace: Delete to start of line
+                self.buf.delete_to_line_start()
+            elif ctrl_pressed:
+                # Ctrl+Backspace: Delete word backward
+                self.buf.delete_word_backward()
+            else:
+                # Normal backspace
+                self.buf.backspace()
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
             return True
 
         if name == "Delete":
-            self.buf.delete_key()
+            if ctrl_pressed and shift_pressed:
+                # Ctrl+Shift+Delete: Delete to end of line
+                self.buf.delete_to_line_end()
+            elif ctrl_pressed:
+                # Ctrl+Delete: Delete word forward
+                self.buf.delete_word_forward()
+            else:
+                # Normal delete
+                self.buf.delete_key()
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
@@ -6465,87 +6999,908 @@ class LoadingDialog(Adw.Window):
         self.progress.set_text(f"{int(fraction * 100)}%")
 
 
+
+# ============================================================
+#   CHROME TABS
+# ============================================================
+
+# Global variable for drag and drop
+DRAGGED_TAB = None
+
+class ChromeTab(Gtk.Box):
+    """A custom tab widget that behaves like Chrome tabs"""
+   
+    __gsignals__ = {
+        'close-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'activate-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
+    }
+   
+    def __init__(self, title="Untitled", closeable=True):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self.set_hexpand(False)
+        self.set_halign(Gtk.Align.START)
+        self.add_css_class("chrome-tab")
+       
+        # Create overlay for label and close button
+        overlay = Gtk.Overlay()
+
+        # Title label (uses full width)
+        self.label = Gtk.Label()
+        self.label.set_text(title)
+        self.label.set_margin_end(24)
+        self.label.set_max_width_chars(20)
+        self.label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.label.set_single_line_mode(True)
+        self.label.set_hexpand(True)
+        self.label.set_halign(Gtk.Align.CENTER)
+        
+        # Wrapper button for the tab content (handles clicks and prevents window drag)
+        self.tab_button = Gtk.Button()
+        self.tab_button.add_css_class("flat")
+        self.tab_button.set_child(self.label)
+        self.tab_button.set_hexpand(True)
+        self.tab_button.set_vexpand(True)
+        
+        overlay.set_child(self.tab_button)
+        
+        # Close button (overlaid on top right)
+        if closeable:
+            self.close_button = Gtk.Button()
+            self.close_button.set_icon_name("window-close-symbolic")
+            self.close_button.add_css_class("flat")
+            self.close_button.add_css_class("chrome-tab-close-button")
+            self.close_button.set_size_request(24, 24)
+            self.close_button.set_halign(Gtk.Align.END)
+            self.close_button.set_valign(Gtk.Align.CENTER)
+            self.close_button.set_margin_end(0)
+            self.close_button.connect('clicked', self._on_close_clicked)
+            overlay.add_overlay(self.close_button)
+       
+        self.append(overlay)
+       
+        self._is_active = False
+        self._original_title = title
+        self.tab_bar = None  # Will be set by ChromeTabBar
+        
+        # Setup drag source on the button
+        drag_source = Gtk.DragSource()
+        drag_source.set_actions(Gdk.DragAction.MOVE)
+        drag_source.connect('prepare', self._on_drag_prepare)
+        drag_source.connect('drag-begin', self._on_drag_begin)
+        drag_source.connect('drag-end', self._on_drag_end)
+        self.tab_button.add_controller(drag_source)
+        
+        # Explicitly claim clicks to prevent window dragging
+        click_gesture = Gtk.GestureClick()
+        click_gesture.connect('pressed', self._on_tab_pressed)
+        click_gesture.connect('released', self._on_tab_released)
+        self.tab_button.add_controller(click_gesture)
+       
+    def _on_tab_pressed(self, gesture, n_press, x, y):
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        if self.tab_bar:
+            self.tab_bar.hide_separators_for_tab(self)
+        
+    def _on_tab_released(self, gesture, n_press, x, y):
+        self.emit('activate-requested')
+       
+    def _on_close_clicked(self, button):
+        self.emit('close-requested')
+       
+    def set_title(self, title):
+        self._original_title = title
+        self.update_label()
+       
+    def get_title(self):
+        return self._original_title
+    
+    def update_label(self):
+        """Update label text based on modified state"""
+        if self.has_css_class("modified"):
+            self.label.set_text(f"*{self._original_title}")
+        else:
+            self.label.set_text(self._original_title)
+       
+    def set_active(self, active):
+        self._is_active = active
+        if active:
+            self.add_css_class("active")
+        else:
+            self.remove_css_class("active")
+           
+    def set_modified(self, modified):
+        if modified:
+            self.add_css_class("modified")
+        else:
+            self.remove_css_class("modified")
+        self.update_label()
+    
+    # Drag and drop handlers
+    def _on_drag_prepare(self, source, x, y):
+        """Prepare drag operation - return content provider"""
+        return Gdk.ContentProvider.new_for_value("TAB")
+    
+    def _on_drag_begin(self, source, drag):
+        """Called when drag begins - set visual feedback"""
+        global DRAGGED_TAB
+        DRAGGED_TAB = self
+        
+        # Add a CSS class for visual feedback
+        self.add_css_class("dragging")
+        
+        # Create drag icon from the tab widget
+        paintable = Gtk.WidgetPaintable.new(self)
+        source.set_icon(paintable, 0, 0)
+    
+    def _on_drag_end(self, source, drag, delete_data):
+        """Called when drag ends - cleanup"""
+        global DRAGGED_TAB
+        DRAGGED_TAB = None
+        self.remove_css_class("dragging")
+
+
+class ChromeTabBar(Adw.WrapBox):
+    """
+    Chrome-like tab bar with correct separator model.
+    separators[i] is BEFORE tab[i]
+    and there is one final separator after last tab.
+    """
+
+    __gsignals__ = {
+        'tab-reordered': (GObject.SignalFlags.RUN_FIRST, None, (object, int)),
+    }
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
+
+        self.set_margin_start(4)
+        self.set_child_spacing(0)
+
+        self.tabs = []
+        self.separators = []   # separator BEFORE each tab + 1 final separator
+        
+        # Drop indicator for drag and drop
+        self.drop_indicator = Gtk.Box()
+        self.drop_indicator.set_size_request(3, 24)
+        self.drop_indicator.add_css_class("tab-drop-indicator")
+        self.drop_indicator.set_visible(False)
+        self.drop_indicator_position = -1
+
+        # Create initial left separator (this one will be hidden)
+        first_sep = Gtk.Box()
+        first_sep.set_size_request(1, 1)
+        first_sep.add_css_class("chrome-tab-separator")
+        self.append(first_sep)
+        self.separators.append(first_sep)
+        
+        # Setup drop target on the tab bar itself
+        drop_target = Gtk.DropTarget.new(str, Gdk.DragAction.MOVE)
+        drop_target.connect('drop', self._on_tab_bar_drop)
+        drop_target.connect('motion', self._on_tab_bar_motion)
+        drop_target.connect('leave', self._on_tab_bar_leave)
+        self.add_controller(drop_target)
+
+    def add_tab(self, tab):
+        idx = len(self.tabs)
+
+        # Insert tab AFTER separator[idx]
+        before_sep = self.separators[idx]
+        self.insert_child_after(tab, before_sep)
+
+        # Insert separator AFTER the tab
+        new_sep = Gtk.Box()
+        new_sep.set_size_request(1, 1)
+        new_sep.add_css_class("chrome-tab-separator")
+        self.insert_child_after(new_sep, tab)
+
+        # update internal lists
+        self.tabs.append(tab)
+        self.separators.insert(idx + 1, new_sep)
+        
+        # Set tab_bar reference for drag and drop
+        tab.tab_bar = self
+        tab.separator = new_sep
+
+        # setup hover handlers
+        self._connect_hover(tab)
+
+        self._update_separators()
+
+    def remove_tab(self, tab):
+        if tab not in self.tabs:
+            return
+
+        idx = self.tabs.index(tab)
+
+        # Remove tab widget
+        self.remove(tab)
+
+        # Remove separator AFTER this tab
+        sep = self.separators[idx + 1]
+        self.remove(sep)
+        del self.separators[idx + 1]
+
+        # Keep separator[0] (always exists)
+        self.tabs.remove(tab)
+
+        self._update_separators()
+
+    def _connect_hover(self, tab):
+        motion = Gtk.EventControllerMotion()
+
+        def on_enter(ctrl, x, y):
+            i = self.tabs.index(tab)
+            self._hide_pair(i)
+
+        def on_leave(ctrl):
+            self._update_separators()
+
+        motion.connect("enter", on_enter)
+        motion.connect("leave", on_leave)
+        tab.add_controller(motion)
+
+    def set_tab_active(self, tab):
+        for t in self.tabs:
+            t.set_active(t is tab)
+
+        # update separators *immediately*
+        self._update_separators()
+
+    def _hide_pair(self, i):
+        """Hide left + right separators for tab[i]."""
+
+        # Hide left separator if not first tab
+        if i > 0:
+            self.separators[i].add_css_class("hidden")
+
+        # Hide right separator if not last tab
+        if i + 1 < len(self.separators) - 1:
+            self.separators[i + 1].add_css_class("hidden")
+
+    def hide_separators_for_tab(self, tab):
+        """Immediately hide separators around this tab (used on press)"""
+        if tab in self.tabs:
+            i = self.tabs.index(tab)
+            self._hide_pair(i)
+    
+    def reorder_tab(self, tab, new_index):
+        """Reorder a tab to a new position"""
+        if tab not in self.tabs:
+            return
+        
+        old_index = self.tabs.index(tab)
+        if old_index == new_index:
+            return
+        
+        # Get the separator associated with this tab
+        tab_separator = tab.separator
+        
+        # Remove from old position in list
+        self.tabs.pop(old_index)
+        
+        # Insert at new position in list
+        self.tabs.insert(new_index, tab)
+        
+        # Reorder widgets in the WrapBox
+        if new_index == 0:
+            anchor = self.separators[0]
+        else:
+            prev_tab = self.tabs[new_index - 1]
+            anchor = prev_tab.separator
+        
+        self.reorder_child_after(tab, anchor)
+        self.reorder_child_after(tab_separator, tab)
+        
+        # Rebuild separator list to match new tab order
+        self.separators = [self.separators[0]] + [t.separator for t in self.tabs]
+        
+        # Update separators
+        self._update_separators()
+        
+        # Emit signal to notify parent
+        self.emit('tab-reordered', tab, new_index)
+
+    def _update_separators(self):
+        # Reset all
+        for sep in self.separators:
+            sep.remove_css_class("hidden")
+
+        # Hide edge separators permanently
+        if self.separators:
+            self.separators[0].add_css_class("hidden")
+            if len(self.separators) > 1:
+                self.separators[-1].add_css_class("hidden")
+
+        # Hide around active tab
+        for i, tab in enumerate(self.tabs):
+            if tab.has_css_class("active"):
+                self._hide_pair(i)
+    
+    def _calculate_drop_position(self, x, y):
+        """Calculate the drop position based on mouse coordinates"""
+        for i, tab in enumerate(self.tabs):
+            success, bounds = tab.compute_bounds(self)
+            if not success:
+                continue
+                
+            tab_center = bounds.origin.x + bounds.size.width / 2
+            
+            if x < tab_center:
+                return i
+        
+        return len(self.tabs)
+    
+    def _show_drop_indicator(self, position):
+        """Show the drop indicator line at the specified position"""
+        if position == self.drop_indicator_position:
+            return
+        
+        # Remove indicator from old position
+        if self.drop_indicator.get_parent():
+            self.remove(self.drop_indicator)
+        
+        self.drop_indicator_position = position
+        
+        # Insert indicator at new position
+        if position == 0:
+            self.insert_child_after(self.drop_indicator, self.separators[0])
+        elif position < len(self.tabs):
+            self.insert_child_after(self.drop_indicator, self.separators[position])
+        else:
+            if len(self.separators) > len(self.tabs):
+                self.insert_child_after(self.drop_indicator, self.separators[-1])
+        
+        self.drop_indicator.set_visible(True)
+    
+    def _hide_drop_indicator(self):
+        """Hide the drop indicator"""
+        self.drop_indicator.set_visible(False)
+        if self.drop_indicator.get_parent():
+            self.remove(self.drop_indicator)
+        self.drop_indicator_position = -1
+    
+    def _on_tab_bar_motion(self, target, x, y):
+        """Handle drag motion over the tab bar"""
+        position = self._calculate_drop_position(x, y)
+        self._show_drop_indicator(position)
+        return Gdk.DragAction.MOVE
+    
+    def _on_tab_bar_leave(self, target):
+        """Handle drag leaving the tab bar"""
+        self._hide_drop_indicator()
+    
+    def _on_tab_bar_drop(self, target, value, x, y):
+        """Handle drop on the tab bar"""
+        global DRAGGED_TAB
+        
+        dragged_tab = DRAGGED_TAB if DRAGGED_TAB else value
+        
+        if not isinstance(dragged_tab, ChromeTab):
+            return False
+        
+        if dragged_tab not in self.tabs:
+            return False
+        
+        # Calculate drop position
+        drop_position = self._calculate_drop_position(x, y)
+        
+        # Get current position of dragged tab
+        current_position = self.tabs.index(dragged_tab)
+        
+        # Adjust drop position if dragging from before the drop point
+        if current_position < drop_position:
+            drop_position -= 1
+        
+        # Reorder the tab
+        if current_position != drop_position:
+            self.reorder_tab(dragged_tab, drop_position)
+        
+        # Hide the drop indicator
+        self._hide_drop_indicator()
+        
+        return True
+
+
 # ============================================================
 #   WINDOW
 # ============================================================
+
+class EditorPage:
+    """A single editor page containing buffer and view"""
+    def __init__(self):
+        self.buf = VirtualBuffer()
+        self.view = VirtualTextView(self.buf)
+        self.current_encoding = "utf-8"
+        self.current_file_path = None
+        
+    def get_title(self):
+        if self.current_file_path:
+            return os.path.basename(self.current_file_path)
+        return "Untitled"
+
+class SaveChangesDialog(Adw.AlertDialog):
+    """Dialog to prompt user to save changes before closing"""
+    
+    def __init__(self, parent, modified_editors):
+        super().__init__()
+        
+        self.modified_editors = modified_editors
+        
+        # Set dialog properties
+        self.set_heading("Save Changes?")
+        self.set_body("Open documents contain unsaved changes.\nChanges which are not saved will be permanently lost.")
+        
+        # Add response buttons
+        self.add_response("cancel", "Cancel")
+        self.add_response("discard", "Discard")
+        self.add_response("save", "Save")
+        
+        # Style the responses
+        self.set_response_appearance("discard", Adw.ResponseAppearance.DESTRUCTIVE)
+        self.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+        
+        self.set_default_response("save")
+        self.set_close_response("cancel")
+        
+        # Create list of modified files
+        if len(modified_editors) > 0:
+            # Create a box to hold the file list
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            box.set_margin_top(12)
+            box.set_margin_bottom(12)
+            
+            for editor in modified_editors:
+                # Create a check button for each file
+                file_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+                file_box.set_margin_start(12)
+                file_box.set_margin_end(12)
+                
+                check = Gtk.CheckButton()
+                check.set_active(True)
+                check._editor = editor
+                file_box.append(check)
+                
+                # File info box
+                info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+                info_box.set_hexpand(True)
+                
+                # Filename
+                if editor.current_file_path:
+                    filename = os.path.basename(editor.current_file_path)
+                    filepath = editor.current_file_path
+                else:
+                    filename = "Untitled (new)"
+                    filepath = "~/Documents"
+                
+                name_label = Gtk.Label(label=filename)
+                name_label.set_halign(Gtk.Align.START)
+                name_label.set_wrap(True)
+                name_label.set_max_width_chars(40)
+                info_box.append(name_label)
+                
+                # File path
+                path_label = Gtk.Label(label=filepath)
+                path_label.set_halign(Gtk.Align.START)
+                path_label.add_css_class("dim-label")
+                path_label.add_css_class("caption")
+                path_label.set_wrap(True)
+                path_label.set_max_width_chars(40)
+                path_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+                info_box.append(path_label)
+                
+                file_box.append(info_box)
+                box.append(file_box)
+            
+            # Set the extra child
+            self.set_extra_child(box)
+
 
 class EditorWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
         self.set_title("Virtual Text Editor")
         self.set_default_size(800, 600)
+
+        # Create ToolbarView
+        toolbar_view = Adw.ToolbarView()
         
-        # Track current encoding
-        self.current_encoding = "utf-8"
+        # Header Bar
+        self.header = Adw.HeaderBar()
+        self.window_title = Adw.WindowTitle(title="Virtual Text Editor", subtitle="")
+        self.header.set_title_widget(self.window_title)
+        toolbar_view.add_top_bar(self.header)
 
-        self.buf = VirtualBuffer()
-        self.view = VirtualTextView(self.buf)
-        self.vscroll = Gtk.Scrollbar(orientation=Gtk.Orientation.VERTICAL, adjustment=self.view.vadj)
-        self.hscroll = Gtk.Scrollbar(orientation=Gtk.Orientation.HORIZONTAL, adjustment=self.view.hadj)
-
-        self.vscroll.add_css_class("overlay-scrollbar")
-        self.hscroll.add_css_class("hscrollbar-overlay")
-        self.vscroll.set_visible(False)
-        self.hscroll.set_visible(False)
-        
-        # Add drag detection to vertical scrollbar
-        drag_gesture = Gtk.GestureDrag()
-        drag_gesture.connect("drag-begin", self.on_vscroll_drag_begin)
-        drag_gesture.connect("drag-end", self.on_vscroll_drag_end)
-        self.vscroll.add_controller(drag_gesture)
-
-
-        # IMPORTANT: give the view references to both scrollbars
-        self.view.vscroll = self.vscroll
-        self.view.hscroll = self.hscroll
-
-        self.buf.connect("changed", self.on_buffer_changed)
-
-        layout = Adw.ToolbarView()
-        self.set_content(layout)
-
-        header = Adw.HeaderBar()
-        layout.add_top_bar(header)
-
+        # Open button
         open_btn = Gtk.Button(label="Open")
+        open_btn.add_css_class("flat")  
         open_btn.connect("clicked", self.open_file)
-        header.pack_start(open_btn)
+        self.header.pack_start(open_btn)
+
+        # New Tab button
+        btn_new = Gtk.Button()
+        btn_new.set_icon_name("tab-new-symbolic")
+        btn_new.set_tooltip_text("New Tab (Ctrl+T)")
+        btn_new.connect("clicked", self.on_new_tab)
+        self.header.pack_start(btn_new)
         
         # Add menu button
         menu_button = Gtk.MenuButton()
         menu_button.set_icon_name("open-menu-symbolic")
         menu_button.set_menu_model(self.create_menu())
-        header.pack_end(menu_button)
+        self.header.pack_end(menu_button)
+
+        # Tab dropdown button (for file list)
+        self.tab_dropdown = Gtk.MenuButton()
+        self.tab_dropdown.set_icon_name("pan-down-symbolic")
+        self.tab_dropdown.add_css_class("flat")
+        self.tab_dropdown.set_size_request(24, 32)
+        self.header.pack_end(self.tab_dropdown)
+        
+        
+        # Tab List (ChromeTabBar) as a top bar
+        self.tab_bar = ChromeTabBar()
+        self.tab_bar.connect('tab-reordered', self.on_tab_reordered)
+        toolbar_view.add_top_bar(self.tab_bar)
+
+        # Tab View (Content)
+        self.tab_view = Adw.TabView()
+        self.tab_view.set_vexpand(True)
+        self.tab_view.set_hexpand(True)
+        self.tab_view.connect("notify::selected-page", self.on_page_selection_changed)
+        toolbar_view.set_content(self.tab_view)
+
+        self.set_content(toolbar_view)
         
         # Setup actions
         self.setup_actions()
+        
+        # Add initial tab
+        self.add_tab()
+        
+        # Add key controller for shortcuts (Ctrl+Tab)
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect("key-pressed", self.on_window_key_pressed)
+        self.add_controller(key_ctrl)
+        
+        # Handle window close request
+        self.connect("close-request", self.on_close_request)
 
-        # Clean GTK4 layout: scrollbars OUTSIDE the text viewport
+    def on_window_key_pressed(self, controller, keyval, keycode, state):
+        # Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+T / Ctrl+O / Ctrl+Shift+S / Ctrl+W
+        if state & Gdk.ModifierType.CONTROL_MASK:
+            # Tab switching
+            if keyval == Gdk.KEY_Tab or keyval == Gdk.KEY_ISO_Left_Tab:
+                direction = 1
+                if (state & Gdk.ModifierType.SHIFT_MASK) or keyval == Gdk.KEY_ISO_Left_Tab:
+                    direction = -1
+                
+                n_pages = self.tab_view.get_n_pages()
+                if n_pages > 1:
+                    current_page = self.tab_view.get_selected_page()
+                    current_idx = self.tab_view.get_page_position(current_page)
+                    
+                    new_idx = (current_idx + direction) % n_pages
+                    new_page = self.tab_view.get_nth_page(new_idx)
+                    self.tab_view.set_selected_page(new_page)
+                    return True
+            
+            # Ctrl+T: New Tab
+            elif keyval == Gdk.KEY_t or keyval == Gdk.KEY_T:
+                self.on_new_tab(None)
+                return True
+                
+            # Ctrl+O: Open File
+            elif keyval == Gdk.KEY_o or keyval == Gdk.KEY_O:
+                self.open_file(None)
+                return True
+                
+            # Ctrl+Shift+S: Save As
+            elif (keyval == Gdk.KEY_s or keyval == Gdk.KEY_S) and (state & Gdk.ModifierType.SHIFT_MASK):
+                self.on_save_as(None, None)
+                return True
+            
+            # Ctrl+W: Close Tab
+            elif keyval == Gdk.KEY_w or keyval == Gdk.KEY_W:
+                page = self.tab_view.get_selected_page()
+                if page:
+                    self.close_tab(page)
+                return True
+                
+        return False
+    
+    def on_close_request(self, window):
+        """Handle window close request - check for unsaved changes"""
+        # Collect all modified editors
+        modified_editors = []
+        for page in [self.tab_view.get_nth_page(i) for i in range(self.tab_view.get_n_pages())]:
+            for tab in self.tab_bar.tabs:
+                if hasattr(tab, '_page') and tab._page == page:
+                    if tab.has_css_class("modified"):
+                        editor = page.get_child()._editor
+                        modified_editors.append(editor)
+                    break
+        
+        # If there are modified files, show save dialog
+        if modified_editors:
+            def on_response(response):
+                if response == "cancel":
+                    return
+                elif response == "discard":
+                    # Just close the window
+                    self.destroy()
+                elif response == "save":
+                    # Save all checked files
+                    # For simplicity, we'll just save all modified files
+                    for editor in modified_editors:
+                        if editor.current_file_path:
+                            self.save_file(editor, editor.current_file_path)
+                        else:
+                            # For untitled files, we would need save-as dialogs
+                            # For now, just skip them
+                            pass
+                    self.destroy()
+            
+            self.show_save_changes_dialog(modified_editors, on_response)
+            return True  # Prevent default close
+        
+        return False  # Allow close
+
+    def get_current_page(self):
+        page = self.tab_view.get_selected_page()
+        if page:
+            return page.get_child()._editor
+        return None
+
+    def on_new_tab(self, btn):
+        self.add_tab()
+        
+    def add_tab(self, path=None):
+        editor = EditorPage()
+        
+        # Create grid layout for editor
         grid = Gtk.Grid()
         grid.set_column_spacing(0)
         grid.set_row_spacing(0)
-
-        # Text view occupies top-left cell
-        grid.attach(self.view, 0, 0, 1, 1)
-
-        # Vertical scrollbar on right
-        self.vscroll.set_hexpand(False)
-        self.vscroll.set_vexpand(True)
-        grid.attach(self.vscroll, 1, 0, 1, 1)
-
-        # Horizontal scrollbar at bottom
-        self.hscroll.set_hexpand(True)
-        self.hscroll.set_vexpand(False)
-        grid.attach(self.hscroll, 0, 1, 1, 1)
-
-        # Corner filler (bottom-right)
+        
+        # Setup scrollbars
+        vscroll = Gtk.Scrollbar(orientation=Gtk.Orientation.VERTICAL, adjustment=editor.view.vadj)
+        hscroll = Gtk.Scrollbar(orientation=Gtk.Orientation.HORIZONTAL, adjustment=editor.view.hadj)
+        
+        vscroll.add_css_class("overlay-scrollbar")
+        hscroll.add_css_class("hscrollbar-overlay")
+        vscroll.set_visible(False)
+        hscroll.set_visible(False)
+        
+        # Add drag detection to vertical scrollbar
+        drag_gesture = Gtk.GestureDrag()
+        drag_gesture.connect("drag-begin", lambda g, x, y: self.on_vscroll_drag_begin(g, x, y, editor))
+        drag_gesture.connect("drag-end", lambda g, x, y: self.on_vscroll_drag_end(g, x, y, editor))
+        vscroll.add_controller(drag_gesture)
+        
+        # Give view references to scrollbars
+        editor.view.vscroll = vscroll
+        editor.view.hscroll = hscroll
+        
+        # Connect buffer changed
+        editor.buf.connect("changed", lambda *_: self.on_buffer_changed(editor))
+        
+        # Layout grid
+        grid.attach(editor.view, 0, 0, 1, 1)
+        vscroll.set_hexpand(False)
+        vscroll.set_vexpand(True)
+        grid.attach(vscroll, 1, 0, 1, 1)
+        hscroll.set_hexpand(True)
+        hscroll.set_vexpand(False)
+        grid.attach(hscroll, 0, 1, 1, 1)
         corner = Gtk.Box()
         corner.set_size_request(12, 12)
         grid.attach(corner, 1, 1, 1, 1)
-        # Match viewport/editor background
         grid.set_css_classes(["editor-surface"])
-        # Put grid into main window
-        layout.set_content(grid)
+        
+        # Store editor reference in grid
+        grid._editor = editor
+        
+        page = self.tab_view.append(grid)
+        page.set_title(editor.get_title())
+        self.tab_view.set_selected_page(page)
+        
+        # Add ChromeTab to ChromeTabBar
+        self.add_tab_button(page)
+        
+        # Focus the new editor view
+        editor.view.grab_focus()
+        
+        # Load file if path provided
+        if path:
+            self.load_file_into_editor(editor, path)
+        
+        # Update UI state
+        self.update_ui_state()
+        
+        return editor
+
+    def add_tab_button(self, page):
+        editor = page.get_child()._editor
+        title = editor.get_title()
+        
+        tab = ChromeTab(title=title)
+        tab._page = page
+        
+        # Connect signals
+        tab.connect('activate-requested', self.on_tab_activated)
+        tab.connect('close-requested', self.on_tab_close_requested)
+        
+        self.tab_bar.add_tab(tab)
+        
+        # Set active state
+        self.update_active_tab()
+        
+        # Update dropdown
+        self.update_tab_dropdown()
+
+    def on_tab_activated(self, tab):
+        if hasattr(tab, '_page'):
+            self.tab_view.set_selected_page(tab._page)
+            # Focus the editor view
+            editor = tab._page.get_child()._editor
+            editor.view.grab_focus()
+
+    def on_page_selection_changed(self, tab_view, pspec):
+        self.update_active_tab()
+        self.update_header_title()
+        # Focus the selected editor
+        editor = self.get_current_page()
+        if editor:
+            editor.view.grab_focus()
+
+    def on_tab_close_requested(self, tab):
+        if hasattr(tab, '_page'):
+            self.close_tab(tab._page)
+
+    def on_tab_reordered(self, tab_bar, tab, new_index):
+        """Sync Adw.TabView order with ChromeTabBar order"""
+        if hasattr(tab, '_page'):
+            # Reorder the page in Adw.TabView
+            self.tab_view.reorder_page(tab._page, new_index)
+            # Update dropdown to reflect new order
+            self.update_tab_dropdown()
+
+    def show_save_changes_dialog(self, modified_editors, callback):
+        """Show dialog for saving changes with list of modified files"""
+        dialog = SaveChangesDialog(self, modified_editors)
+        
+        def on_response(dialog_obj, response):
+            callback(response)
+        
+        dialog.choose(self, None, on_response)
+    
+    def close_tab(self, page):
+        # Get the editor for this page
+        editor = page.get_child()._editor
+        
+        # Check if this tab is modified
+        is_modified = False
+        for tab in self.tab_bar.tabs:
+            if hasattr(tab, '_page') and tab._page == page:
+                is_modified = tab.has_css_class("modified")
+                break
+        
+        # If modified, show save dialog
+        if is_modified:
+            self.show_save_changes_dialog([editor], lambda response: self.finish_close_tab(page, response))
+        else:
+            self.finish_close_tab(page, "discard")
+    
+    def finish_close_tab(self, page, response):
+        """Complete the tab closing operation after save dialog"""
+        if response == "cancel":
+            return
+        
+        editor = page.get_child()._editor
+        
+        if response == "save":
+            # If file has path, save it; otherwise show save-as dialog
+            if editor.current_file_path:
+                self.save_file(editor, editor.current_file_path)
+            else:
+                # Show save-as dialog
+                dialog = Gtk.FileDialog()
+                
+                def done(dialog, result):
+                    try:
+                        f = dialog.save_finish(result)
+                        path = f.get_path()
+                        self.save_file(editor, path)
+                        # After saving, close the tab
+                        self.perform_close_tab(page)
+                    except:
+                        # User cancelled save-as, don't close
+                        return
+                
+                dialog.save(self, None, done)
+                return
+        
+        # If discard or after successful save, close the tab
+        self.perform_close_tab(page)
+    
+    def perform_close_tab(self, page):
+        """Actually remove the tab from the view"""
+        # Don't close the last tab - instead create a new empty one
+        if self.tab_view.get_n_pages() <= 1:
+            # Create a new empty tab first
+            self.add_tab()
+        
+        # Remove from TabView
+        self.tab_view.close_page(page)
+        
+        # Remove from ChromeTabBar
+        for tab in self.tab_bar.tabs:
+            if hasattr(tab, '_page') and tab._page == page:
+                self.tab_bar.remove_tab(tab)
+                break
+        
+        self.update_active_tab()
+        self.update_ui_state()
+        self.update_tab_dropdown()
+
+    def update_active_tab(self):
+        selected_page = self.tab_view.get_selected_page()
+        for tab in self.tab_bar.tabs:
+            if hasattr(tab, '_page'):
+                is_active = (tab._page == selected_page)
+                tab.set_active(is_active)
+            
+        # Force update of separators to hide them around the new active tab
+        self.tab_bar._update_separators()
+
+    def update_ui_state(self):
+        """Update UI elements based on state (e.g. tab bar visibility)"""
+        n_tabs = len(self.tab_bar.tabs)
+        self.tab_bar.set_visible(n_tabs > 1)
+        self.update_header_title()
+
+    def update_header_title(self):
+        """Update header bar title and subtitle based on current tab"""
+        editor = self.get_current_page()
+        if editor:
+            if editor.current_file_path:
+                # Show filename in title, full path in subtitle
+                filename = os.path.basename(editor.current_file_path)
+                self.window_title.set_title(filename)
+                self.window_title.set_subtitle(editor.current_file_path)
+            else:
+                # Show "Untitled - Virtual Text Editor" for new files
+                self.window_title.set_title("Untitled - Virtual Text Editor")
+                self.window_title.set_subtitle("")
+        else:
+            self.window_title.set_title("Virtual Text Editor")
+            self.window_title.set_subtitle("")
+
+    def update_tab_title(self, page):
+        """Update tab title based on file path"""
+        editor = page.get_child()._editor
+        path = editor.current_file_path
+        
+        # Get filename for tab title
+        if path:
+            filename = os.path.basename(path)
+        else:
+            filename = "Untitled"
+        
+        page.set_title(filename)
+        
+        # Update chrome tab label
+        for tab in self.tab_bar.tabs:
+            if hasattr(tab, '_page') and tab._page == page:
+                tab.set_title(filename)
+                break
+        
+        # Update header if this is the active page
+        if page == self.tab_view.get_selected_page():
+            self.update_header_title()
+        
+        # Update dropdown
+        self.update_tab_dropdown()
     
     def create_menu(self):
         """Create the application menu"""
@@ -6569,6 +7924,24 @@ class EditorWindow(Adw.ApplicationWindow):
         
         return menu
     
+    def update_tab_dropdown(self):
+        """Update the tab dropdown menu with file list"""
+        self.tab_dropdown.set_visible(len(self.tab_bar.tabs) >= 8)
+
+        if len(self.tab_bar.tabs) < 8:
+            return
+
+        menu = Gio.Menu()
+        for i, tab in enumerate(self.tab_bar.tabs):
+            title = tab.get_title()
+            if tab.has_css_class("modified"):
+                title = "*" + title
+            if len(title) > 32:
+                title = title[:28] + "…"
+            menu.append(title, f"win.tab_activate::{i}")
+
+        self.tab_dropdown.set_menu_model(menu)
+    
     def setup_actions(self):
         """Setup window actions for menu items"""
         # Save As action
@@ -6580,105 +7953,200 @@ class EditorWindow(Adw.ApplicationWindow):
         encoding_action = Gio.SimpleAction.new_stateful(
             "encoding",
             GLib.VariantType.new("s"),
-            GLib.Variant.new_string(self.current_encoding)
+            GLib.Variant.new_string("utf-8")
         )
         encoding_action.connect("activate", self.on_encoding_changed)
         self.add_action(encoding_action)
+        
+        # Tab activate action (for dropdown menu)
+        tab_activate_action = Gio.SimpleAction.new("tab_activate", GLib.VariantType.new("s"))
+        tab_activate_action.connect("activate", self.on_tab_activate_from_menu)
+        self.add_action(tab_activate_action)
+    
+    def on_tab_activate_from_menu(self, action, parameter):
+        """Handle tab activation from dropdown menu"""
+        index = int(parameter.get_string())
+        if 0 <= index < len(self.tab_bar.tabs):
+            tab = self.tab_bar.tabs[index]
+            if hasattr(tab, '_page'):
+                self.tab_view.set_selected_page(tab._page)
+                # Focus the editor view
+                editor = tab._page.get_child()._editor
+                editor.view.grab_focus()
     
     def on_save_as(self, action, parameter):
         """Handle Save As menu action"""
+        editor = self.get_current_page()
+        if not editor:
+            return
+
         dialog = Gtk.FileDialog()
         dialog.set_title("Save As")
         
+        # Set initial folder and filename based on current file
+        # This bypasses the "Recent" view issue by opening directly in the file's folder
+        if editor.current_file_path:
+            current_file = Gio.File.new_for_path(editor.current_file_path)
+            parent_folder = current_file.get_parent()
+            
+            if parent_folder:
+                dialog.set_initial_folder(parent_folder)
+            
+            # Set the filename
+            dialog.set_initial_name(os.path.basename(editor.current_file_path))
+        else:
+            # No current file, use a default name
+            dialog.set_initial_name("untitled.txt")
+        
         def done(dialog, result):
             try:
-                f = dialog.save_finish(result)
-            except:
+                gfile = dialog.save_finish(result)
+            except Exception as e:
+                print(f"Dialog cancelled or error: {e}")
                 return
-            path = f.get_path()
-            self.save_file(path)
+
+            print(f"\n=== DEBUG ON_SAVE_AS ===")
+            print(f"GFile: {gfile}")
+            print(f"URI: {gfile.get_uri()}")
+            
+            path = gfile.get_path()
+            print(f"Path: {path}")
+
+            if path is None:
+                print("Cannot resolve local path for save destination")
+                print(f"=== END DEBUG ===\n")
+                return
+
+            print(f"Calling save_file with path: {path}")
+            print(f"=== END DEBUG ===\n")
+            
+            self.save_file(editor, path)
         
         dialog.save(self, None, done)
     
-    def save_file(self, path):
-        """Save the current buffer to a file with the current encoding"""
+    def save_file(self, editor, path):
+        """Save the editor buffer to a file using GIO (GTK4-safe)."""
         try:
-            total_lines = self.buf.total()
-            lines = []
-            for i in range(total_lines):
-                lines.append(self.buf.get_line(i))
+            # Convert path → Gio.File
+            gfile = Gio.File.new_for_path(path)
             
+            print(f"\n=== DEBUG SAVE FILE ===")
+            print(f"Saving to path: {path}")
+            print(f"GFile path: {gfile.get_path()}")
+            print(f"GFile URI: {gfile.get_uri()}")
+
+            # Get text
+            total_lines = editor.buf.total()
+            lines = [editor.buf.get_line(i) for i in range(total_lines)]
             content = "\n".join(lines)
             
-            # Write with current encoding
-            with open(path, "w", encoding=self.current_encoding) as f:
-                f.write(content)
+            print(f"Total lines: {total_lines}")
+            print(f"Content length: {len(content)} characters")
+            print(f"First 200 chars of content: {content[:200]}")
+            print(f"Encoding: {editor.current_encoding}")
+
+            # Open output stream (atomic replace)
+            # None = no etag checking
+            stream = gfile.replace(None, False, Gio.FileCreateFlags.NONE, None)
+
+            # Encode using current encoding
+            data = content.encode(editor.current_encoding, errors="replace")
             
-            self.set_title(os.path.basename(path))
-            print(f"File saved as {path} with encoding {self.current_encoding}")
+            print(f"Encoded data length: {len(data)} bytes")
+
+            # Write & close
+            bytes_written = stream.write_bytes(GLib.Bytes.new(data), None)
+            print(f"Bytes written: {bytes_written}")
+            stream.close(None)
+            
+            print(f"Stream closed successfully")
+
+            # Update state
+            editor.current_file_path = path
+
+            # Update tab title and clear modified status
+            for page in [self.tab_view.get_nth_page(i) for i in range(self.tab_view.get_n_pages())]:
+                if page.get_child()._editor == editor:
+                    self.update_tab_title(page)
+                    # Clear modified status in chrome tab
+                    for tab in self.tab_bar.tabs:
+                        if hasattr(tab, '_page') and tab._page == page:
+                            tab.set_modified(False)
+                            self.update_tab_dropdown()
+                            break
+                    break
+
+            print(f"File saved as {path} with encoding {editor.current_encoding}")
+            print(f"=== END DEBUG ===\n")
+
         except Exception as e:
             print(f"Error saving file: {e}")
+            import traceback
+            traceback.print_exc()
+
     
     def on_encoding_changed(self, action, parameter):
         """Handle encoding selection from menu"""
+        editor = self.get_current_page()
+        if not editor:
+            return
+            
         encoding = parameter.get_string()
-        self.current_encoding = encoding
+        editor.current_encoding = encoding
         action.set_state(parameter)
         
         print(f"Encoding changed to: {encoding} (will be used for next save)")
-        # Note: We don't change self.buf.file.encoding because that would
-        # re-decode the file with the wrong encoding, showing garbage.
-        # The encoding change only affects how the file is saved.
 
+    def on_buffer_changed(self, editor):
+        editor.view.queue_draw()
 
-    def on_buffer_changed(self, *_):
-        self.view.queue_draw()
-
-        width = self.view.get_width()
-        height = self.view.get_height()
+        width = editor.view.get_width()
+        height = editor.view.get_height()
         if width <= 0 or height <= 0:
-            GLib.idle_add(self.on_buffer_changed)
+            GLib.idle_add(lambda: self.on_buffer_changed(editor))
             return
 
-        # Invalidate wrap cache when buffer changes
-        if self.view.renderer.wrap_enabled:
-            # Only clear wrap points; DO NOT touch total_visual_lines_cache
-            self.view.renderer.wrap_cache.clear()
-            # Keep total_visual_lines_cache and lock flag as-is
-            self.view.renderer.total_visual_lines_locked = False
+        # Mark the tab as modified
+        for page in [self.tab_view.get_nth_page(i) for i in range(self.tab_view.get_n_pages())]:
+            if page.get_child()._editor == editor:
+                # Update chrome tab modified status
+                for tab in self.tab_bar.tabs:
+                    if hasattr(tab, '_page') and tab._page == page:
+                        tab.set_modified(True)
+                        self.update_tab_dropdown()
+                        break
+                break
 
-            # CRITICAL FIX: Do NOT call update_scrollbar here.
-            # The View handles its own precise scroll maintenance and
-            # calling update_scrollbar causes jumping/flicker at EOF.
+        # Invalidate wrap cache when buffer changes
+        if editor.view.renderer.wrap_enabled:
+            editor.view.renderer.wrap_cache.clear()
+            editor.view.renderer.total_visual_lines_locked = False
             return
 
         # Non-wrap mode: updating scrollbar is cheap and correct
-        self.view.update_scrollbar()
+        editor.view.update_scrollbar()
     
-    def on_vscroll_drag_begin(self, gesture, x, y):
-        """Handle scrollbar drag begin - skip expensive calculations during drag"""
-        self.view.scrollbar_dragging = True
-        self.view.last_drag_value = None
+    def on_vscroll_drag_begin(self, gesture, x, y, editor):
+        """Handle scrollbar drag begin"""
+        editor.view.scrollbar_dragging = True
+        editor.view.last_drag_value = None
     
-    def on_vscroll_drag_end(self, gesture, x, y):
-        """Handle scrollbar drag end - do the final calculation"""
-        self.view.scrollbar_dragging = False
+    def on_vscroll_drag_end(self, gesture, x, y, editor):
+        """Handle scrollbar drag end"""
+        editor.view.scrollbar_dragging = False
         
-        # Show progress for the final calculation
-        if self.buf.total() > 10000:
-            self.view.calculating = True
-            self.view.calculation_message = "Calculating final position..."
-            self.view.queue_draw()
+        if editor.buf.total() > 10000:
+            editor.view.calculating = True
+            editor.view.calculation_message = "Calculating final position..."
+            editor.view.queue_draw()
         
-        # If there was a pending value during drag, process it now
-        if self.view.last_drag_value is not None:
-            self.view.pending_scroll_value = self.view.last_drag_value
-            self.view.last_drag_value = None
+        if editor.view.last_drag_value is not None:
+            editor.view.pending_scroll_value = editor.view.last_drag_value
+            editor.view.last_drag_value = None
             
-            if not self.view.scroll_update_pending:
-                self.view.scroll_update_pending = True
-                GLib.idle_add(self.view._process_scroll_update)
-
+            if not editor.view.scroll_update_pending:
+                editor.view.scroll_update_pending = True
+                GLib.idle_add(editor.view._process_scroll_update)
 
     def open_file(self, *_):
         dialog = Gtk.FileDialog()
@@ -6690,67 +8158,98 @@ class EditorWindow(Adw.ApplicationWindow):
                 return
             path = f.get_path()
             
-            loading_dialog = LoadingDialog(self)
-            loading_dialog.present()
+            # Check if the current active tab is an empty, unmodified Untitled
+            current_page = self.tab_view.get_selected_page()
+            if current_page:
+                editor = current_page.get_child()._editor
+                
+                # Check if current tab is modified
+                is_modified = False
+                for tab in self.tab_bar.tabs:
+                    if hasattr(tab, '_page') and tab._page == current_page:
+                        is_modified = tab.has_css_class("modified")
+                        break
+                
+                # Check if it's an empty untitled file that's unmodified
+                if (not editor.current_file_path and 
+                    not is_modified and
+                    editor.buf.total() == 1 and 
+                    len(editor.buf.get_line(0)) == 0):
+                    # Replace this tab with the opened file
+                    self.load_file_into_editor(editor, path)
+                    return
             
-            idx = IndexedFile(path)
-            
-            def progress_callback(fraction):
-                loading_dialog.update_progress(fraction)
-                return False
-            
-            def index_complete():
-                self.buf.load(idx)
-
-                self.view.scroll_line = 0
-                self.view.scroll_x = 0
-                
-                # Clear all renderer caches for the new file
-                self.view.renderer.wrap_cache.clear()
-                self.view.renderer.visual_line_map = []
-                self.view.renderer.total_visual_lines_cache = None
-                self.view.renderer.total_visual_lines_locked = False
-                self.view.renderer.visual_line_anchor = (0, 0)
-                self.view.renderer.max_line_width = 0
-                self.view.renderer.needs_full_width_scan = True
-                
-                # Clear optimization caches
-                self.view.renderer.estimated_total_cache = None
-                self.view.renderer.edits_since_cache_invalidation = 0
-                
-                # Set current encoding to match the loaded file
-                self.current_encoding = idx.encoding
-                # Update the encoding action state
-                encoding_action = self.lookup_action("encoding")
-                if encoding_action:
-                    encoding_action.set_state(GLib.Variant.new_string(self.current_encoding))
-                
-                # Trigger width scan for the new file
-                self.view.file_loaded()
-                
-                # Set flag to update scrollbar on next draw
-                self.view.needs_scrollbar_init = True
-
-                self.view.queue_draw()
-
-                self.set_title(os.path.basename(path))
-                loading_dialog.close()
-                
-                return False
-
-            def index_in_thread():
-                try:
-                    idx.index_file(progress_callback)
-                    GLib.idle_add(index_complete)
-                except Exception as e:
-                    print(f"Error indexing file: {e}")
-                    GLib.idle_add(loading_dialog.close)
-            
-            thread = Thread(target=index_in_thread)
-            thread.daemon = True
-            thread.start()
+            # Otherwise, create new tab for the file
+            self.add_tab(path)
 
         dialog.open(self, None, done)
+    
+    def load_file_into_editor(self, editor, path):
+        """Load a file into an existing editor"""
+        loading_dialog = LoadingDialog(self)
+        loading_dialog.present()
+        
+        idx = IndexedFile(path)
+        
+        def progress_callback(fraction):
+            loading_dialog.update_progress(fraction)
+            return False
+        
+        def index_complete():
+            editor.buf.load(idx)
+
+            editor.view.scroll_line = 0
+            editor.view.scroll_x = 0
+            
+            # Clear all renderer caches for the new file
+            editor.view.renderer.wrap_cache.clear()
+            editor.view.renderer.visual_line_map = []
+            editor.view.renderer.total_visual_lines_cache = None
+            editor.view.renderer.total_visual_lines_locked = False
+            editor.view.renderer.visual_line_anchor = (0, 0)
+            editor.view.renderer.max_line_width = 0
+            editor.view.renderer.needs_full_width_scan = True
+            
+            # Clear optimization caches
+            editor.view.renderer.estimated_total_cache = None
+            editor.view.renderer.edits_since_cache_invalidation = 0
+            
+            # Set current encoding to match the loaded file
+            editor.current_encoding = idx.encoding
+            editor.current_file_path = path
+            
+            # Trigger width scan for the new file
+            editor.view.file_loaded()
+            
+            # Set flag to update scrollbar on next draw
+            editor.view.needs_scrollbar_init = True
+
+            editor.view.queue_draw()
+
+            # Update tab title
+            for page in [self.tab_view.get_nth_page(i) for i in range(self.tab_view.get_n_pages())]:
+                if page.get_child()._editor == editor:
+                    self.update_tab_title(page)
+                    break
+            
+            loading_dialog.close()
+            
+            # Focus the editor
+            editor.view.grab_focus()
+            
+            return False
+
+        def index_in_thread():
+            try:
+                idx.index_file(progress_callback)
+                GLib.idle_add(index_complete)
+            except Exception as e:
+                print(f"Error indexing file: {e}")
+                GLib.idle_add(loading_dialog.close)
+        
+        thread = Thread(target=index_in_thread)
+        thread.daemon = True
+        thread.start()
 
 
 # ============================================================
@@ -6759,7 +8258,9 @@ class EditorWindow(Adw.ApplicationWindow):
 
 class VirtualTextEditor(Adw.Application):
     def __init__(self):
-        super().__init__(application_id="io.github.fastrizwaan.vite")
+        super().__init__(application_id="io.github.fastrizwaan.vite",
+                         flags=Gio.ApplicationFlags.HANDLES_OPEN)
+        self.files_to_open = []
 
     def do_activate(self):
         provider = Gtk.CssProvider()
@@ -6774,7 +8275,30 @@ class VirtualTextEditor(Adw.Application):
         win = self.props.active_window
         if not win:
             win = EditorWindow(self)
+            
+            # Open files from command line if any
+            if self.files_to_open:
+                # Close the initial empty tab
+                if win.tab_view.get_n_pages() == 1:
+                    first_page = win.tab_view.get_nth_page(0)
+                    win.tab_view.close_page(first_page)
+                    for tab in win.tab_bar.tabs:
+                        if hasattr(tab, '_page') and tab._page == first_page:
+                            win.tab_bar.remove_tab(tab)
+                            break
+                
+                # Open each file in a new tab
+                for file_path in self.files_to_open:
+                    win.add_tab(file_path)
+                
+                self.files_to_open = []
+        
         win.present()
+    
+    def do_open(self, files, n_files, hint):
+        """Handle files passed via command line"""
+        self.files_to_open = [f.get_path() for f in files]
+        self.activate()
 
 
 if __name__ == "__main__":
