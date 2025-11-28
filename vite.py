@@ -108,6 +108,8 @@ class IndexedFile:
         self.mm = mmap.mmap(self.raw.fileno(), 0, access=mmap.ACCESS_READ)
 
         print(f"File opened and mapped in {time.time()-start:.2f}s")
+
+
         
         # Use array.array instead of list - much faster for millions of integers
         # 'Q' = unsigned long long (8 bytes, perfect for file offsets)
@@ -148,6 +150,7 @@ class IndexedFile:
         
         print(f"Indexing {len(self.mm) / (1024**3):.2f}GB file ({enc})...")
 
+
         if enc.startswith("utf-16"):
             self._index_utf16(progress_callback)
         else:
@@ -159,6 +162,9 @@ class IndexedFile:
         print(f"Indexed {len(self.index)-1:,} lines in {elapsed:.2f}s ({len(self.mm)/(1024**3)/elapsed:.2f} GB/s)")
         print(f"Average line length: {len(self.mm)/(len(self.index)-1):.0f} bytes")
         print(f"Index memory: {index_size_mb:.1f} MB ({index_size_mb*100/len(self.mm)*1024:.2f}% of file size)")
+
+
+
 
     def _index_utf8(self, progress_callback=None):
         """Fast UTF-8 indexing using mmap.find() - optimized for huge files"""
@@ -287,6 +293,17 @@ class Selection:
         self.active = False
         self.selecting_with_keyboard = False
     
+    def set_wrap_enabled(self, enabled):
+        """Enable or disable word wrap."""
+        if self.wrap_enabled == enabled:
+            return
+        
+        self.wrap_enabled = enabled
+        self.wrap_cache = {}
+        self.visual_line_map = []
+        # self.total_visual_lines_cache = None
+        self.visual_line_anchor = (0, 0)
+
     def set_start(self, line, col):
         """Set selection start point"""
         self.start_line = line
@@ -2591,6 +2608,15 @@ class Renderer:
         self.total_visual_lines_cache = None  # Cache for total visual lines
         self.visual_line_anchor = (0, 0)  # (visual_line, logical_line) for fast lookup
         
+        # OPTIMIZATION: Performance tracking for large files
+        self.use_estimation_threshold = 50000  # Use estimation for files larger than this
+        self.estimated_total_cache = None  # Fast estimated total for huge files
+        self.edits_since_cache_invalidation = 0  # Track edits to avoid over-invalidating
+        
+        # AGGRESSIVE OPTIMIZATION: Fast approximation during rapid scrolling
+        self.use_fast_approximation = False  # Toggle for approximate wrapping
+        self.avg_wraps_per_line = 1.2  # Running average for approximation
+        
         # Calculate average character width dynamically
         layout.set_text("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", -1)
         ink, logical = layout.get_pixel_extents()
@@ -2766,10 +2792,31 @@ class Renderer:
         self.wrap_cache[ln] = wrap_points
         return wrap_points
     
-    def get_visual_line_count_for_logical(self, cr, buf, ln, ln_width, viewport_width):
-        """Get the number of visual lines for a specific logical line."""
+    def get_visual_line_count_for_logical(self, cr, buf, ln, ln_width, viewport_width, allow_approximation=False):
+        """Get the number of visual lines for a specific logical line.
+        
+        Args:
+            allow_approximation: If True and file is huge, use fast approximation
+        """
         if not self.wrap_enabled:
             return 1
+        
+        # AGGRESSIVE OPTIMIZATION: For huge files during scrolling, use approximation
+        if allow_approximation and self.use_fast_approximation:
+            # Quick approximation based on line length
+            text = buf.get_line(ln)
+            if not text:
+                return 1
+            
+            # Approximate: chars per visual line
+            max_width = viewport_width - ln_width
+            if max_width <= 0:
+                return 1
+            
+            chars_per_line = max(1, int(max_width / self.avg_char_width))
+            approx_wraps = max(1, (len(text) + chars_per_line - 1) // chars_per_line)
+            
+            return approx_wraps
         
         wrap_points = self.get_wrap_points_for_line(cr, buf, ln, ln_width, viewport_width)
         return len(wrap_points)
@@ -2777,19 +2824,97 @@ class Renderer:
     def get_total_visual_lines(self, cr, buf, ln_width, viewport_width):
         """Get total number of visual lines.
         
-        For word wrap to behave like real line rendering, we need accurate counts.
-        Uses progressive calculation and caching.
+        OPTIMIZED: Uses fast estimation for large files (50k+ lines)
+        to avoid expensive calculation on every scroll/cursor movement.
         """
         if not self.wrap_enabled:
             return buf.total()
         
-        # Return cached value if available and valid
-        if self.total_visual_lines_cache is not None and self.total_visual_lines_cache > 0:
+        # FIRST CHECK: Return locked value immediately if cache is locked
+        if hasattr(self, 'total_visual_lines_locked') and self.total_visual_lines_locked:
+            if hasattr(self, 'total_visual_lines_cache') and self.total_visual_lines_cache is not None:
+                return self.total_visual_lines_cache
+        
+        # SECOND CHECK: Return cached value if available and valid
+        if hasattr(self, 'total_visual_lines_cache') and self.total_visual_lines_cache is not None and self.total_visual_lines_cache > 0:
             return self.total_visual_lines_cache
         
         total_logical = buf.total()
         
-        # For small files, calculate exactly
+        # OPTIMIZATION: For huge files (>10M lines), use minimal sampling
+        if total_logical > 100_000:
+            # Check if we have a cached estimate
+            if self.estimated_total_cache is not None:
+                return self.estimated_total_cache
+            
+            # Ultra-fast estimation for huge files: sample only 50 lines
+            sample_size = 50
+            sample_step = max(1, total_logical // sample_size)
+            sample_total = 0
+            samples_taken = 0
+            
+            for i in range(0, total_logical, sample_step):
+                if samples_taken >= sample_size:
+                    break
+                wrap_count = self.get_visual_line_count_for_logical(
+                    cr, buf, i, ln_width, viewport_width,
+                    allow_approximation=True  # Use fast approximation for sampling
+                )
+                sample_total += wrap_count
+                samples_taken += 1
+            
+            if samples_taken > 0:
+                avg_wraps = sample_total / samples_taken
+                estimated = int(total_logical * avg_wraps)
+                
+                # Add 2% safety margin to ensure we can scroll to end
+                estimated = int(estimated * 1.02)
+                
+                # Cache the estimate
+                self.estimated_total_cache = estimated
+                return estimated
+            else:
+                # Fallback: assume 1:1
+                return total_logical
+        
+        # OPTIMIZATION: For large files (50k-10M lines), use moderate sampling
+        if total_logical > self.use_estimation_threshold:
+            # Check if we have a cached estimate
+            if self.estimated_total_cache is not None:
+                return self.estimated_total_cache
+            
+            # Create estimate by sampling lines throughout the file
+            # Reduce sample size for better performance
+            sample_size = min(100, total_logical)  # Reduced from 200
+            sample_step = max(1, total_logical // sample_size)
+            sample_total = 0
+            samples_taken = 0
+            
+            for i in range(0, total_logical, sample_step):
+                if samples_taken >= sample_size:
+                    break
+                wrap_count = self.get_visual_line_count_for_logical(
+                    cr, buf, i, ln_width, viewport_width,
+                    allow_approximation=True  # Use fast approximation for sampling
+                )
+                sample_total += wrap_count
+                samples_taken += 1
+            
+            if samples_taken > 0:
+                avg_wraps = sample_total / samples_taken
+                estimated = int(total_logical * avg_wraps)
+                
+                # Add 2% safety margin to ensure we can scroll to end
+                estimated = int(estimated * 1.02)
+                
+                # Cache the estimate
+                self.estimated_total_cache = estimated
+                return estimated
+            else:
+                # Fallback: assume 1:1
+                return total_logical
+        
+        # For small files (< 50k lines), calculate exactly
         if total_logical <= 5000:
             total_visual = 0
             for ln in range(total_logical):
@@ -2797,94 +2922,96 @@ class Renderer:
             self.total_visual_lines_cache = total_visual
             return total_visual
         
-        # For large files, use cached values + estimation for uncached
-        # Count cached lines and estimate the rest
+        # For medium files (5k-50k lines), use cached values + estimation
         cached_count = 0
         cached_visual = 0
         
         for ln, wrap_points in self.wrap_cache.items():
-            if ln < total_logical:  # Ensure cache isn't stale
+            if ln < total_logical:
                 cached_count += 1
                 cached_visual += len(wrap_points)
         
-        # Estimate uncached lines
         uncached_count = total_logical - cached_count
         if uncached_count <= 0:
             self.total_visual_lines_cache = cached_visual
             return cached_visual
 
-        # Better estimation using file statistics if available
-        if hasattr(buf, 'file') and buf.file and hasattr(buf.file, 'mm'):
-            # Use total file size to estimate average line length
-            total_bytes = len(buf.file.mm)
-            avg_bytes_per_line = total_bytes / max(1, total_logical)
+        # Sample for better estimation
+        if cached_count < 100:
+            sample_size = min(100, total_logical)  # Reduced from 200
+            sample_visual = 0
+            sample_step = max(1, total_logical // sample_size)
             
-            # Subtract 1 byte for newline (approximate)
-            avg_content_len = max(0, avg_bytes_per_line - 1)
+            for i in range(sample_size):
+                ln = (i * sample_step) % total_logical
+                sample_visual += self.get_visual_line_count_for_logical(cr, buf, ln, ln_width, viewport_width)
             
-            # Estimate visual lines based on average line length and viewport width
-            max_text_width = max(100, viewport_width - ln_width)
-            chars_per_line = max(1, int(max_text_width / self.avg_char_width))
-            
-            # Estimate visual lines per logical line
-            # (avg_content_len + chars_per_line - 1) // chars_per_line
-            est_visual_per_line = max(1, (avg_content_len + chars_per_line - 1) // chars_per_line)
-            
-            estimated_uncached = int(uncached_count * est_visual_per_line)
-            total_visual = cached_visual + estimated_uncached
+            avg_visual_per_line = sample_visual / sample_size
+            total_visual = int(total_logical * avg_visual_per_line)
         elif cached_count > 0:
-            # Use average from cached lines
             avg_visual_per_line = cached_visual / cached_count
             estimated_uncached = int(uncached_count * avg_visual_per_line)
             total_visual = cached_visual + estimated_uncached
         else:
-            # No cache and no file stats - use simple estimate (sample first 100 lines)
-            sample_size = min(100, total_logical)
-            sample_visual = 0
-            for ln in range(sample_size):
-                sample_visual += self.get_visual_line_count_for_logical(cr, buf, ln, ln_width, viewport_width)
-            avg_visual_per_line = sample_visual / sample_size
-            total_visual = int(total_logical * avg_visual_per_line)
+            total_visual = total_logical
         
         # Ensure at least one visual line per logical line
         total_visual = max(total_visual, total_logical)
+        
+        # Add small buffer for estimation errors
+        total_visual = int(total_visual * 1.01) + 10
+        
         self.total_visual_lines_cache = total_visual
         return total_visual
     
-    def get_accurate_total_visual_lines_at_end(self, cr, buf, ln_width, viewport_width, visible_lines):
+    def get_accurate_total_visual_lines_at_end(self, cr, buf, ln_width, viewport_width, visible_lines, lines_to_calc=None):
         """Calculate accurate total visual lines for scrolling to end of document.
         
         This ensures no extra scrollable space at the end by computing exact
         visual line counts for the last portion of the document.
+        
+        Args:
+            lines_to_calc: Number of logical lines to calculate exactly from the end.
+                          If None, defaults to visible_lines * 3.
         """
         total_logical = buf.total()
         if total_logical == 0:
             return 0
         
-        # Calculate visual lines for all logical lines from the end
-        # going backwards until we've covered enough to fill the viewport
-        total_visual = 0
+        # Determine how many lines to calculate exactly
+        if lines_to_calc is None:
+            lines_to_calc = visible_lines * 3
         
         # For accuracy near the end, compute exact values for last N logical lines
-        # that would roughly fill 2x the viewport
-        lines_to_compute_exact = min(total_logical, visible_lines * 3)
+        lines_to_compute_exact = min(total_logical, lines_to_calc)
         start_line = max(0, total_logical - lines_to_compute_exact)
         
-        # Estimate visual lines for lines before start_line
+        # Estimate visual lines for lines before start_line using cached data
         estimated_before = 0
+        cached_count = 0
+        cached_visual = 0
+        
         if start_line > 0:
-            if start_line in self.wrap_cache:
-                # We have some cached data, use it
-                for ln in range(start_line):
-                    if ln in self.wrap_cache:
-                        estimated_before += len(self.wrap_cache[ln])
-                    else:
-                        text = buf.get_line(ln)
-                        max_text_width = max(100, viewport_width - ln_width)
-                        estimated_before += self.estimate_visual_line_count(text, max_text_width) if text else 1
+            # Count how many cached lines we have before start_line
+            for ln in range(start_line):
+                if ln in self.wrap_cache:
+                    cached_count += 1
+                    cached_visual += len(self.wrap_cache[ln])
+            
+            # Estimate uncached lines before start_line
+            uncached_before = start_line - cached_count
+            if uncached_before > 0:
+                if cached_count > 0:
+                    # Use average from cached lines
+                    avg_visual_per_line = cached_visual / cached_count
+                    estimated_uncached = int(uncached_before * avg_visual_per_line)
+                else:
+                    # No cached data - assume 1:1 ratio as conservative estimate
+                    estimated_uncached = uncached_before
+                
+                estimated_before = cached_visual + estimated_uncached
             else:
-                # Simple estimate: assume average of 1 visual line per logical line
-                estimated_before = start_line
+                estimated_before = cached_visual
         
         # Calculate exact visual lines for the end portion
         exact_at_end = 0
@@ -2932,30 +3059,52 @@ class Renderer:
             while current_ln < logical_line:
                 # Optimization: if we have a huge gap, skip using estimation
                 dist = logical_line - current_ln
-                if dist > 5000 and hasattr(buf, 'file') and buf.file and hasattr(buf.file, 'mm'):
+                
+                # Check if we can use optimization (either have cache or file stats)
+                can_optimize = False
+                if hasattr(self, 'total_visual_lines_cache') and self.total_visual_lines_cache:
+                    can_optimize = True
+                elif hasattr(buf, 'file') and buf.file and hasattr(buf.file, 'mm'):
+                    can_optimize = True
+
+                if dist > 5000 and can_optimize:
                      # Estimate a chunk
                      chunk_size = dist - 1000 # Leave 1000 lines for exact calc
                      
-                     # Use global average for estimation
-                     total_bytes = len(buf.file.mm)
-                     avg_bytes_per_line = total_bytes / max(1, total_logical)
-                     avg_content_len = max(0, avg_bytes_per_line - 1)
-                     max_text_width = max(100, viewport_width - ln_width)
-                     chars_per_line = max(1, int(max_text_width / self.avg_char_width))
-                     est_visual_per_line = max(1, (avg_content_len + chars_per_line - 1) // chars_per_line)
+                     # Determine the best estimation ratio
+                     est_visual_per_line = 1.0
+                     
+                     # BEST: Use the cached total if available (matches visual_to_logical_line)
+                     if hasattr(self, 'total_visual_lines_cache') and self.total_visual_lines_cache:
+                         est_visual_per_line = self.total_visual_lines_cache / max(1, total_logical)
+                     
+                     # FALLBACK: Use byte-based estimation
+                     elif hasattr(buf, 'file') and buf.file and hasattr(buf.file, 'mm'):
+                         total_bytes = len(buf.file.mm)
+                         avg_bytes_per_line = total_bytes / max(1, total_logical)
+                         avg_content_len = max(0, avg_bytes_per_line - 1)
+                         max_text_width = max(100, viewport_width - ln_width)
+                         chars_per_line = max(1, int(max_text_width / self.avg_char_width))
+                         est_visual_per_line = max(1.0, (avg_content_len + chars_per_line - 1) / chars_per_line)
                      
                      visual_line += int(chunk_size * est_visual_per_line)
                      current_ln += chunk_size
                      continue
 
-                visual_line += self.get_visual_line_count_for_logical(cr, buf, current_ln, ln_width, viewport_width)
+                visual_line += self.get_visual_line_count_for_logical(
+                    cr, buf, current_ln, ln_width, viewport_width, 
+                    allow_approximation=self.use_fast_approximation
+                )
                 current_ln += 1
                 
         elif start_ln > logical_line:
             # Going backward
             current_ln = start_ln - 1
             while current_ln >= logical_line:
-                visual_line -= self.get_visual_line_count_for_logical(cr, buf, current_ln, ln_width, viewport_width)
+                visual_line -= self.get_visual_line_count_for_logical(
+                    cr, buf, current_ln, ln_width, viewport_width,
+                    allow_approximation=self.use_fast_approximation
+                )
                 current_ln -= 1
     
         # Update anchor
@@ -3002,6 +3151,57 @@ class Renderer:
             return (vline, 0, 0, len(text))
 
         total_logical = buf.total()
+
+        # OPTIMIZATION: If we are close to the end (and have a cached total), scan backwards from the end.
+        # This avoids cumulative estimation errors from the start of the file.
+        if hasattr(self, 'total_visual_lines_cache') and self.total_visual_lines_cache:
+            total_visual = self.total_visual_lines_cache
+            dist_from_end = total_visual - visual_line
+            
+            # If within 5000 visual lines of the end, scan backwards from the last line
+            if 0 <= dist_from_end < 5000:
+                current_visual = total_visual
+                ln = total_logical - 1
+                
+                while ln >= 0:
+                    # Get visual count for this line
+                    if ln in self.wrap_cache:
+                        num_visual = len(self.wrap_cache[ln])
+                    else:
+                        # For backward scan near end, we want accuracy, so calculate if close
+                        if dist_from_end < 100:
+                            wrap_points = self.get_wrap_points_for_line(cr, buf, ln, ln_width, viewport_width)
+                            num_visual = len(wrap_points)
+                        else:
+                            text = buf.get_line(ln)
+                            max_text_width = max(100, viewport_width - ln_width)
+                            num_visual = self.estimate_visual_line_count(text, max_text_width)
+                    
+                    # Subtract this line's visual height
+                    current_visual -= num_visual
+                    
+                    # Check if we passed the target
+                    if current_visual <= visual_line:
+                        # Found it! The target visual_line is within this logical line 'ln'
+                        vis_idx = visual_line - current_visual
+                        
+                        # Ensure valid index
+                        if ln not in self.wrap_cache:
+                             wrap_points = self.get_wrap_points_for_line(cr, buf, ln, ln_width, viewport_width)
+                        else:
+                             wrap_points = self.wrap_cache[ln]
+                        
+                        if vis_idx >= len(wrap_points):
+                            vis_idx = max(0, len(wrap_points) - 1)
+                            
+                        self.visual_line_anchor = (current_visual, ln)
+                        col_start, col_end = wrap_points[vis_idx]
+                        return (ln, vis_idx, col_start, col_end)
+                    
+                    ln -= 1
+                    
+                # Fallback if loop finishes (shouldn't happen if total_visual is correct)
+                return (0, 0, 0, 0)
 
         anchor_vis, anchor_log = self.visual_line_anchor if self.visual_line_anchor else (0, 0)
         
@@ -3063,63 +3263,94 @@ class Renderer:
 
         # Binary search optimization for large jumps
         distance = visual_line - current_visual
-        if distance > 1000 and hasattr(buf, 'file') and buf.file and hasattr(buf.file, 'mm'):
-            # Use binary search with estimation
-            total_bytes = len(buf.file.mm)
-            avg_bytes_per_line = total_bytes / max(1, total_logical)
-            avg_content_len = max(0, avg_bytes_per_line - 1)
-            max_text_width = max(100, viewport_width - ln_width)
-            chars_per_line = max(1, int(max_text_width / self.avg_char_width))
-            est_visual_per_line = max(1, (avg_content_len + chars_per_line - 1) // chars_per_line)
+        
+        # Check if we can use optimization (either have cache or file stats)
+        can_optimize = False
+        if hasattr(self, 'total_visual_lines_cache') and self.total_visual_lines_cache:
+            can_optimize = True
+        elif hasattr(buf, 'file') and buf.file and hasattr(buf.file, 'mm'):
+            can_optimize = True
+            
+        if distance > 1000 and can_optimize:
+            # Determine the best estimation ratio
+            est_visual_per_line = 1.0
+            
+            # BEST: Use the cached total if available (this matches the scrollbar exactly)
+            if hasattr(self, 'total_visual_lines_cache') and self.total_visual_lines_cache:
+                est_visual_per_line = self.total_visual_lines_cache / max(1, total_logical)
+            
+            # FALLBACK: Use byte-based estimation if we have file stats
+            elif hasattr(buf, 'file') and buf.file and hasattr(buf.file, 'mm'):
+                total_bytes = len(buf.file.mm)
+                avg_bytes_per_line = total_bytes / max(1, total_logical)
+                avg_content_len = max(0, avg_bytes_per_line - 1)
+                max_text_width = max(100, viewport_width - ln_width)
+                chars_per_line = max(1, int(max_text_width / self.avg_char_width))
+                est_visual_per_line = max(1.0, (avg_content_len + chars_per_line - 1) / chars_per_line)
             
             # Estimate logical line from visual line
+            # visual_diff = logical_diff * est_visual_per_line
+            # logical_diff = visual_diff / est_visual_per_line
             estimated_logical = start_log + int(distance / est_visual_per_line)
             estimated_logical = max(start_log, min(estimated_logical, total_logical - 1))
             
             # Binary search around the estimate
-            search_range = 100  # Reduced from 200 for faster search
+            # Increase range to handle estimation errors (2% of file or at least 5000 lines)
+            search_range = max(5000, total_logical // 50)
             left = max(start_log, estimated_logical - search_range)
             right = min(total_logical - 1, estimated_logical + search_range)
             
             # Use pure estimation for initial visual position at left
-            # This avoids iterating through potentially thousands of lines
-            estimated_visual_at_left = current_visual + int((left - start_log) * est_visual_per_line)
-            test_visual = estimated_visual_at_left
+            # Calculate relative to start_log which is the anchor
+            # current_visual is the visual line at start_log
             
             # Binary search with estimation
+            test_visual = current_visual # Default if loop doesn't run or finds nothing
+            
             while left < right:
                 mid = (left + right) // 2
                 
-                # Estimate visual line at mid using average
-                mid_visual = estimated_visual_at_left + int((mid - left) * est_visual_per_line)
+                # Estimate visual line at mid relative to start_log
+                mid_visual = current_visual + int((mid - start_log) * est_visual_per_line)
                 
                 if mid_visual < visual_line:
                     left = mid + 1
-                    test_visual = mid_visual + est_visual_per_line
+                    # Track the visual line at the new left
+                    test_visual = current_visual + int((left - start_log) * est_visual_per_line)
                 else:
                     right = mid
+                    # If we move right down, we don't update test_visual because 
+                    # we want the visual line corresponding to the final 'left'
             
             # Now we have an approximate logical line
-            # Do precise calculation only for a small range around it
-            current_visual = test_visual
+            current_visual = int(test_visual)
             start_log = max(0, left - 10)  # Start a bit before for safety
             
-            # Recalculate current_visual for start_log
+            # Recalculate current_visual for start_log using the SAME estimation
+            # This ensures we are consistent with the jump
+            # FIX: Estimate up to (start_log - 10) to avoid double counting in the loop below
+            fine_tune_window = 10
+            base_log = max(0, start_log - fine_tune_window)
+            
             current_visual = 0
-            if start_log > 0:
-                # Use estimation for the bulk
-                current_visual = int(start_log * est_visual_per_line)
+            if base_log > 0:
+                current_visual = int(base_log * est_visual_per_line)
             
             # Fine-tune with actual calculation for last few lines
-            for ln in range(max(0, start_log - 10), start_log):
+            # This bridges the gap between our estimation and the actual state at start_log
+            for ln in range(base_log, start_log):
                 if ln in self.wrap_cache:
                     current_visual += len(self.wrap_cache[ln])
                 else:
                     text = buf.get_line(ln)
+                    max_text_width = max(100, viewport_width - ln_width)
                     current_visual += self.estimate_visual_line_count(text, max_text_width)
 
         # Linear search with estimation (optimized for remaining distance)
+        scan_count = 0
         for ln in range(start_log, total_logical):
+            scan_count += 1
+
             if ln in self.wrap_cache:
                 wrap_points = self.wrap_cache[ln]
                 num_visual_in_line = len(wrap_points)
@@ -3239,8 +3470,8 @@ class Renderer:
         for ln in lines_to_remove:
             del self.wrap_cache[ln]
         
-        # Clear total visual lines cache
-        self.total_visual_lines_cache = None
+        # DON'T clear total visual lines cache - causes jumping
+        # self.total_visual_lines_cache = None
         
         # Reset anchor if invalidation affects it
         if from_line <= self.visual_line_anchor[1]:
@@ -3723,10 +3954,20 @@ class VirtualTextView(Gtk.DrawingArea):
         self.scroll_line = 0  # Logical line at top of viewport
         self.scroll_visual_offset = 0  # Visual line offset within the logical line
         self.scroll_x = 0
-        
+        self.renderer.wrap_enabled = True
+        self.needs_scrollbar_init = False  # Flag to update scrollbar after file load
+
         # Throttling for scrollbar updates
         self.scroll_update_pending = False
         self.pending_scroll_value = None
+        
+        # OPTIMIZATION: Skip calculations during scrollbar drag
+        self.scrollbar_dragging = False
+        self.last_drag_value = None
+        
+        # OPTIMIZATION: Calculation progress tracking
+        self.calculating = False
+        self.calculation_message = ""
 
         self.set_focusable(True)
         self.set_vexpand(True)
@@ -3802,14 +4043,43 @@ class VirtualTextView(Gtk.DrawingArea):
         self.connect('resize', self.on_resize)
 
     def on_buffer_changed(self, *args):
-        # Clear wrap cache as content has changed
+        # Optimize: Only invalidate affected lines in wrap cache, not the entire cache
         if self.renderer.wrap_enabled:
-            self.renderer.wrap_cache.clear()
-            self.renderer.total_visual_lines_cache = -1
-            self.renderer.visual_line_anchor = (0, 0)
+            # Only invalidate the current line and a small range around it
+            # This is much faster than clearing the entire cache
+            cursor_line = self.buf.cursor_line
             
-        # Update scrollbars after width changes
-        self.update_scrollbar()
+            # Only invalidate the current line and a few lines around it (in case of multi-line changes)
+            for ln in range(max(0, cursor_line - 5), min(self.buf.total(), cursor_line + 6)):
+                if ln in self.renderer.wrap_cache:
+                    del self.renderer.wrap_cache[ln]
+            
+            # OPTIMIZATION: Smart cache invalidation for large files
+            total_logical = self.buf.total()
+            if total_logical > self.renderer.use_estimation_threshold:
+                # Large file: don't invalidate estimate on every edit
+                # The estimate is robust to small changes
+                self.renderer.edits_since_cache_invalidation += 1
+                
+                # Only invalidate every 1000 edits or so
+                if self.renderer.edits_since_cache_invalidation > 1000:
+                    self.renderer.estimated_total_cache = None
+                    self.renderer.total_visual_lines_cache = None
+                    self.renderer.edits_since_cache_invalidation = 0
+            else:
+                # Small/medium file: invalidate normally but keep lock flag
+                # Don't reset total_visual_lines_cache - let it recalculate lazily
+                pass
+            
+            # Don't reset anchor - it's still valid for most of the file
+            # Only reset if we're far from it
+            if self.renderer.visual_line_anchor:
+                anchor_vis, anchor_log = self.renderer.visual_line_anchor
+                if abs(anchor_log - cursor_line) > 1000:
+                    self.renderer.visual_line_anchor = (0, 0)
+        
+        # Don't update scrollbar on every keystroke - it's expensive
+        # Only queue a redraw
         self.queue_draw()
 
 
@@ -3818,7 +4088,42 @@ class VirtualTextView(Gtk.DrawingArea):
         val = adj.get_value()
         
         if self.renderer.wrap_enabled:
-            # Throttle updates during rapid scrolling
+            # OPTIMIZATION: During scrollbar drag, use improved approximation
+            if self.scrollbar_dragging:
+                self.last_drag_value = int(val)
+                # Improved approximation using wrap cache for better accuracy
+                total_logical = self.buf.total()
+                if total_logical > 0:
+                    # Try to use wrap cache for better approximation
+                    if len(self.renderer.wrap_cache) > 10:
+                        # Binary search on wrap cache to find approximate position
+                        sorted_cache = sorted(self.renderer.wrap_cache.items())
+                        estimated_total = self.renderer.estimated_total_cache or total_logical
+                        
+                        # Find the logical line that corresponds to this visual line
+                        # using cached wrap information
+                        target_ratio = val / max(1, estimated_total)
+                        approx_logical = int(target_ratio * total_logical)
+                        
+                        # Refine using nearby cache entries
+                        for i, (cached_ln, wrap_points) in enumerate(sorted_cache):
+                            if cached_ln >= approx_logical:
+                                # Use this as a better approximation
+                                approx_logical = cached_ln
+                                break
+                        
+                        self.scroll_line = max(0, min(approx_logical, total_logical - 1))
+                    else:
+                        # Fallback to simple ratio
+                        estimated_total = self.renderer.estimated_total_cache or total_logical
+                        approx_logical = int((val / max(1, estimated_total)) * total_logical)
+                        self.scroll_line = max(0, min(approx_logical, total_logical - 1))
+                    
+                    self.scroll_visual_offset = 0
+                    self.queue_draw()
+                return
+            
+            # Not dragging: normal throttled update
             self.pending_scroll_value = int(val)
             
             if not self.scroll_update_pending:
@@ -3841,20 +4146,141 @@ class VirtualTextView(Gtk.DrawingArea):
         """Process pending scroll update (called via GLib.idle_add)."""
         if self.pending_scroll_value is None:
             self.scroll_update_pending = False
+            # Disable fast approximation when scrolling stops
+            if self.renderer.use_fast_approximation:
+                self.renderer.use_fast_approximation = False
+            # Clear any progress indicator
+            self.calculating = False
             return False
         
+        # OPTIMIZATION: Enable fast approximation for huge files during scrolling
+        total_logical = self.buf.total()
+        # Lower threshold - enable approximation for files > 10k lines during scrolling
+        if total_logical > 10000 and not self.renderer.use_fast_approximation:
+            self.renderer.use_fast_approximation = True
+        
         visual_line = self.pending_scroll_value
+        
+        # OPTIMIZATION: For huge files (>10M lines), skip expensive calculations entirely
+        # Just use the approximation and only recalculate when scrolling stops
+        if total_logical > 10_000_000:
+            # Use simple approximation - no expensive calculations
+            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+            cr = cairo.Context(surface)
+            ln_width = self.renderer.calculate_line_number_width(cr, total_logical)
+            viewport_width = self.get_width()
+            visible = max(1, self.get_height() // self.renderer.line_h)
+            
+            # Get cached estimate (already computed in get_total_visual_lines)
+            estimated_total = self.renderer.estimated_total_cache or total_logical
+            max_scroll_visual = max(0, estimated_total - visible)
+            
+            # Clamp visual line to valid range
+            visual_line = max(0, min(visual_line, max_scroll_visual))
+            
+            # Simple ratio-based conversion (fast)
+            target_ratio = visual_line / max(1, estimated_total)
+            approx_logical = int(target_ratio * total_logical)
+            approx_logical = max(0, min(approx_logical, total_logical - 1))
+            
+            # Clear the pending value
+            self.pending_scroll_value = None
+            
+            if approx_logical != self.scroll_line:
+                self.scroll_line = approx_logical
+                self.scroll_visual_offset = 0
+                self.queue_draw()
+            
+            self.scroll_update_pending = False
+            return False
+        
+        # For huge files, show progress and defer the actual calculation
+        if total_logical > 50000 and not self.calculating:
+            self.calculating = True
+            self.calculation_message = f"Scrolling to line {visual_line:,}..."
+            self.queue_draw()
+            # Schedule the actual calculation for next idle
+            return True  # Keep this idle handler, will process on next call
+        
+        # Clear the pending value since we're processing it now
         self.pending_scroll_value = None
         
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
-        ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
+        ln_width = self.renderer.calculate_line_number_width(cr, total_logical)
         viewport_width = self.get_width()
+        visible = max(1, self.get_height() // self.renderer.line_h)
+        
+        # Check if we're near the end and need accurate recalculation
+        total_visual = self.renderer.get_total_visual_lines(cr, self.buf, ln_width, viewport_width)
+        max_scroll_visual = max(0, total_visual - visible)
+        
+        # Check cache coverage
+        cache_coverage = len(self.renderer.wrap_cache) / max(1, total_logical)
+        
+        # If scrolling to near the end (>70%) or cache coverage is poor (<20%), recalculate accurately
+        # More aggressive when cache is poor or scrolling to very end
+        needs_recalc = False
+        if visual_line > max_scroll_visual * 0.7:
+            needs_recalc = True
+        elif cache_coverage < 0.2 and visual_line > max_scroll_visual * 0.5:
+            # Poor cache and in second half - recalculate
+            needs_recalc = True
+        
+        if needs_recalc:
+            # Show progress indicator for expensive calculation
+            if total_logical > 50000:
+                self.calculating = True
+                self.calculation_message = "Calculating scroll position..."
+                self.queue_draw()
+            
+            # Calculate accurate total from the end
+            # DON'T clear cache - this causes jumping
+            # Just recalculate and update it
+            # Use more lines for accurate calculation if cache is poor
+            lines_to_calc = visible * 3
+            if cache_coverage < 0.1:
+                # Very poor cache - calculate more lines (5x viewport)
+                lines_to_calc = visible * 5
+            elif cache_coverage < 0.2:
+                # Poor cache - calculate 4x viewport
+                lines_to_calc = visible * 4
+                
+            accurate_total = self.renderer.get_accurate_total_visual_lines_at_end(
+                cr, self.buf, ln_width, viewport_width, visible, lines_to_calc
+            )
+            
+            # Clear progress indicator
+            self.calculating = False
+            
+            # Always update the cache with the accurate value
+            self.renderer.total_visual_lines_cache = accurate_total
+            
+            # Update total_visual if different
+            if accurate_total != total_visual:
+                total_visual = accurate_total
+                max_scroll_visual = max(0, total_visual - visible)
+                
+                # Update scrollbar with new accurate total
+                self.vadj.handler_block_by_func(self.on_vadj_changed)
+                try:
+                    self.vadj.set_upper(total_visual)
+                    # Also clamp value if needed
+                    if self.vadj.get_value() > max_scroll_visual:
+                        self.vadj.set_value(max_scroll_visual)
+                finally:
+                    self.vadj.handler_unblock_by_func(self.on_vadj_changed)
+        
+        # Clamp visual line to valid range
+        visual_line = max(0, min(visual_line, max_scroll_visual))
         
         # Convert visual line to logical line
         logical_line, vis_idx, col_start, col_end = self.renderer.visual_to_logical_line(
             cr, self.buf, visual_line, ln_width, viewport_width
         )
+        
+        # Clear progress indicator
+        self.calculating = False
         
         if logical_line != self.scroll_line or vis_idx != self.scroll_visual_offset:
             self.scroll_line = logical_line
@@ -3878,6 +4304,7 @@ class VirtualTextView(Gtk.DrawingArea):
             self.renderer.wrap_cache = {}
             self.renderer.visual_line_map = []
             self.renderer.total_visual_lines_cache = None
+            self.renderer.total_visual_lines_locked = False  # Clear lock flag
             self.renderer.visual_line_anchor = (0, 0)
         self.update_scrollbar()
         return False
@@ -3887,7 +4314,8 @@ class VirtualTextView(Gtk.DrawingArea):
         """Called after a new file is loaded to trigger width calculation"""
         self.renderer.needs_full_width_scan = True
         self.queue_draw()
-        self.update_scrollbar()
+        # Don't call update_scrollbar here - view dimensions aren't ready yet
+        # The resize signal will trigger it when view is properly sized
         
     def update_scrollbar(self):
         """Update scrollbar values and visibility."""
@@ -3902,6 +4330,14 @@ class VirtualTextView(Gtk.DrawingArea):
         line_h = self.renderer.line_h
         visible = max(1, height // line_h)
         total_lines = self.buf.total()
+        
+        # Check lock status
+        # Check lock status
+        if self.renderer.wrap_enabled:
+            # Variables used for debug printing only, can be removed or kept if needed later
+            # For now, just removing the empty if block
+            pass
+
         
         # When word wrap is enabled, use visual line count for scrollbar
         if self.renderer.wrap_enabled:
@@ -3918,7 +4354,6 @@ class VirtualTextView(Gtk.DrawingArea):
             self.vadj.set_step_increment(1)
             self.vadj.set_page_increment(visible)
             
-            max_scroll = max(0, total_visual - visible)
             max_scroll = max(0, total_visual - visible)
             
             # Calculate current visual line for scrollbar position
@@ -4243,7 +4678,6 @@ class VirtualTextView(Gtk.DrawingArea):
         if event and self.im.filter_keypress(event):
             return True
 
-
         name = Gdk.keyval_name(keyval)
         shift_pressed = (state & Gdk.ModifierType.SHIFT_MASK) != 0
         ctrl_pressed = (state & Gdk.ModifierType.CONTROL_MASK) != 0
@@ -4251,52 +4685,177 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # Alt+Z - Toggle word wrap
         if alt_pressed and (name == "z" or name == "Z"):
-            self.renderer.wrap_enabled = not self.renderer.wrap_enabled
-
-            # Save current cursor position
             saved_cursor_line = self.buf.cursor_line
             saved_cursor_col = self.buf.cursor_col
+
+            # Save previous estimate
+            width = self.get_width()
+            height = self.get_height()
+            previous_estimated_total = None
+            if self.renderer.wrap_enabled and width > 0 and height > 0:
+                surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+                cr = cairo.Context(surface)
+                total_lines = self.buf.total()
+                ln_width = self.renderer.calculate_line_number_width(cr, total_lines)
+                viewport_width = width
+                previous_estimated_total = self.renderer.get_total_visual_lines(
+                    cr, self.buf, ln_width, viewport_width
+                )
+
+            self.renderer.wrap_enabled = not self.renderer.wrap_enabled
 
             # Clear wrap caches
             self.renderer.wrap_cache = {}
             self.renderer.visual_line_map = []
-            self.renderer.total_visual_lines_cache = None
+            self.renderer.total_visual_lines_locked = False
             self.renderer.visual_line_anchor = (0, 0)
 
-            # Keep cursor at same logical line, adjust scroll position
-            # Set scroll_line to cursor line (or slightly above to keep it visible)
-            visible_lines = max(1, self.get_height() // self.renderer.line_h)
-            self.scroll_line = max(0, saved_cursor_line - visible_lines // 2)
-            self.scroll_visual_offset = 0
+            visible_lines = max(1, height // self.renderer.line_h) if height > 0 else 50
+            total_lines = self.buf.total()
 
             if self.renderer.wrap_enabled:
+                # Enabling wrap mode
                 self.renderer.max_line_width = 0
                 self.scroll_x = 0
+                self.scroll_visual_offset = 0
                 self.hadj.set_value(0)
-                
-                # Approximate visual line for scrollbar
-                # We'll let keep_cursor_visible fine-tune it
-                total_logical = self.buf.total()
-                if total_logical > 0:
-                    ratio = self.scroll_line / total_logical
-                    # Use current upper as estimate (will be updated by update_scrollbar)
-                    approx_vis = int(ratio * max(total_logical, self.vadj.get_upper()))
-                    self.vadj.set_value(approx_vis)
+
+                if width > 0 and height > 0 and total_lines > 0:
+                    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+                    cr = cairo.Context(surface)
+                    ln_width = self.renderer.calculate_line_number_width(cr, total_lines)
+
+                    # Near EOF
+                    if saved_cursor_line > total_lines * 0.8:
+                        buffer = visible_lines * 3
+                        start_line = max(0, saved_cursor_line - buffer)
+                        end_line = total_lines
+                        for ln in range(start_line, end_line):
+                            self.renderer.get_wrap_points_for_line(
+                                cr, self.buf, ln, ln_width, width
+                            )
+
+                        saved_cache = self.renderer.wrap_cache.copy()
+                        self.renderer.wrap_cache = {}
+                        total_visual = self.renderer.get_total_visual_lines(
+                            cr, self.buf, ln_width, width
+                        )
+                        self.renderer.wrap_cache = saved_cache
+
+                        if previous_estimated_total and previous_estimated_total > total_visual:
+                            total_visual = previous_estimated_total
+
+                        self.renderer.total_visual_lines_cache = total_visual
+
+                    else:
+                        buffer = visible_lines * 3
+                        start_line = max(0, saved_cursor_line - buffer)
+                        end_line = min(total_lines, saved_cursor_line + buffer)
+                        for ln in range(start_line, end_line):
+                            self.renderer.get_wrap_points_for_line(
+                                cr, self.buf, ln, ln_width, width
+                            )
+
+                        total_visual = self.renderer.get_total_visual_lines(
+                            cr, self.buf, ln_width, width
+                        )
+
+                # -------------------------------------------------------
+                # PATCHED SECTION — accurate cursor anchoring after wrap
+                # -------------------------------------------------------
+                if width > 0 and height > 0 and total_lines > 0:
+                    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+                    cr = cairo.Context(surface)
+                    ln_width = self.renderer.calculate_line_number_width(cr, total_lines)
+
+                    cursor_visual = self.renderer.logical_to_visual_line(
+                        cr, self.buf, saved_cursor_line, saved_cursor_col,
+                        ln_width, width
+                    )
+
+                    # Convert back to logical + visual offset
+                    new_log, new_vis_off, _, _ = self.renderer.visual_to_logical_line(
+                        cr, self.buf, cursor_visual, ln_width, width
+                    )
+
+                    self.scroll_line = new_log
+                    self.scroll_visual_offset = new_vis_off
+
+                    # Sync vadj to cursor’s true visual line
+                    self.vadj.handler_block_by_func(self.on_vadj_changed)
+                    try:
+                        upper = max(cursor_visual + 1, int(self.vadj.get_upper()))
+                        self.vadj.set_upper(upper)
+                        self.vadj.set_value(cursor_visual)
+                    finally:
+                        self.vadj.handler_unblock_by_func(self.on_vadj_changed)
                 else:
-                    self.vadj.set_value(0)
+                    # fallback (tiny or zero viewport) — keep original behavior
+                    estimated_scroll = max(0, saved_cursor_line - visible_lines // 2)
+                    self.scroll_line = estimated_scroll
+                    self.scroll_visual_offset = 0
+                # -------------------------------------------------------
+
             else:
-                # Force recalculation of max line width when disabling wrap
+                # Disabling wrap
+                self.scroll_visual_offset = 0
+                estimated_scroll = max(0, saved_cursor_line - visible_lines // 2)
+                self.scroll_line = estimated_scroll
+
                 surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
                 cr = cairo.Context(surface)
                 self.renderer.scan_for_max_width(cr, self.buf)
-                
-                # In unwrapped mode, vadj uses logical lines
-                self.vadj.set_value(self.scroll_line)
 
+            # Update scrollbar
             self.update_scrollbar()
-            self.keep_cursor_visible()  # Ensure cursor stays visible after wrap toggle
+
+            # Correction pass
+            cursor_corrected = False
+            if self.renderer.wrap_enabled and width > 0 and height > 0:
+                surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+                cr = cairo.Context(surface)
+                ln_width = self.renderer.calculate_line_number_width(cr, total_lines)
+
+                cursor_visual = self.renderer.logical_to_visual_line(
+                    cr, self.buf, saved_cursor_line, saved_cursor_col, ln_width, width
+                )
+
+                current_estimate = self.vadj.get_upper()
+
+                if total_lines > 5000 and cursor_visual > current_estimate * 0.95:
+                    if saved_cursor_line > 0:
+                        actual_ratio = cursor_visual / saved_cursor_line
+                        corrected_total = int(total_lines * actual_ratio)
+                        corrected_total = int(corrected_total * 1.02) + 100
+
+                        self.renderer.total_visual_lines_cache = corrected_total
+
+                        self.vadj.handler_block_by_func(self.on_vadj_changed)
+                        try:
+                            self.vadj.set_upper(corrected_total)
+                            max_scroll = max(0, corrected_total - visible_lines)
+                            target_visual = max(0, cursor_visual - visible_lines // 2)
+                            target_visual = min(target_visual, max_scroll)
+                            self.vadj.set_value(target_visual)
+
+                            new_log, new_vis_off, _, _ = self.renderer.visual_to_logical_line(
+                                cr, self.buf, target_visual, ln_width, width
+                            )
+                            self.scroll_line = new_log
+                            self.scroll_visual_offset = new_vis_off
+
+                            cursor_corrected = True
+                        finally:
+                            self.vadj.handler_unblock_by_func(self.on_vadj_changed)
+
+            if not cursor_corrected:
+                self.keep_cursor_visible()
+
             self.queue_draw()
             return True
+
+        # ... rest of your key handling unchanged ...
+
 
 
         # Alt+Arrow keys for text movement
@@ -4374,7 +4933,6 @@ class VirtualTextView(Gtk.DrawingArea):
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
-            self.update_scrollbar() 
             return True
 
         # Navigation with selection support
@@ -5504,7 +6062,11 @@ class VirtualTextView(Gtk.DrawingArea):
 
 
     def keep_cursor_visible(self):
-        """Keep cursor visible by scrolling if necessary."""
+        """Keep cursor visible by scrolling if necessary.
+        
+        OPTIMIZED: Quick check for obviously visible cursor to avoid
+        expensive visual line calculations during normal typing.
+        """
         cl = self.buf.cursor_line
         cc = self.buf.cursor_col
 
@@ -5519,6 +6081,19 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # Handle word wrap mode
         if self.renderer.wrap_enabled:
+            # OPTIMIZATION: Quick check first - is cursor "probably" visible?
+            # This avoids expensive calculations for 90% of normal typing
+            logical_diff = cl - self.scroll_line
+            
+            # If cursor is on visible logical lines and not at far edge
+            # assume it's visible (worst case: slight delay in auto-scroll)
+            if 0 < logical_diff < visible_lines - 1:
+                # Cursor is on a middle logical line that's definitely visible
+                # Skip expensive visual line calculations
+                return
+            
+            # If cursor is on first or last visible logical line, or outside,
+            # we need to do the exact check
             surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
             cr = cairo.Context(surface)
             ln_width = self.renderer.calculate_line_number_width(cr, total_lines)
@@ -5538,22 +6113,29 @@ class VirtualTextView(Gtk.DrawingArea):
             # Check if cursor is above visible area
             if cursor_visual_line < scroll_visual_line:
                 # Scroll up to cursor
-                # We need to find the logical line and visual offset for this visual line
-                # But logical_to_visual_line returns a visual line index.
-                # We need the reverse: visual_to_logical_line
-                
                 new_log, new_vis_off, _, _ = self.renderer.visual_to_logical_line(
                     cr, self.buf, cursor_visual_line, ln_width, viewport_width
                 )
                 
                 self.scroll_line = new_log
                 self.scroll_visual_offset = new_vis_off
+                
+                # Update vadj directly without calling update_scrollbar
+                # This prevents recalculation and jumping
                 self.vadj.set_value(cursor_visual_line)
                 
             # Check if cursor is below visible area
             elif cursor_visual_line >= scroll_visual_line + visible_lines:
-                # Scroll down so cursor is at bottom
+                # Scroll down so cursor is visible
                 new_top_visual = cursor_visual_line - visible_lines + 1
+                
+                # Only calculate total_visual if we need to clamp to max_scroll
+                # This is a MAJOR optimization for huge files
+                total_visual = self.renderer.get_total_visual_lines(cr, self.buf, ln_width, viewport_width)
+                max_scroll_visual = max(0, total_visual - visible_lines)
+                
+                # Ensure we don't scroll past the end
+                new_top_visual = min(new_top_visual, max_scroll_visual)
                 
                 new_log, new_vis_off, _, _ = self.renderer.visual_to_logical_line(
                     cr, self.buf, new_top_visual, ln_width, viewport_width
@@ -5561,6 +6143,9 @@ class VirtualTextView(Gtk.DrawingArea):
                 
                 self.scroll_line = new_log
                 self.scroll_visual_offset = new_vis_off
+                
+                # Update vadj directly without calling update_scrollbar
+                # This prevents recalculation and jumping
                 self.vadj.set_value(new_top_visual)
                 
             # Reset horizontal scroll to 0 when wrapping
@@ -5651,37 +6236,109 @@ class VirtualTextView(Gtk.DrawingArea):
                 ln_width = self.renderer.calculate_line_number_width(cr, total_lines)
                 viewport_width = self.get_width()
                 
-                # Calculate current visual line
-                current_visual = self.renderer.logical_to_visual_line(
-                    cr, self.buf, self.scroll_line, 0, ln_width, viewport_width
-                )
-                current_visual += self.scroll_visual_offset
-                
-                # Calculate total visual lines for bounds checking
-                total_visual = self.renderer.get_total_visual_lines(cr, self.buf, ln_width, viewport_width)
-                max_scroll_visual = max(0, total_visual - visible)
-                
-                # Apply scroll steps to visual line
-                new_visual = current_visual + steps
-                new_visual = max(0, min(new_visual, max_scroll_visual))
-                
-                if new_visual != current_visual:
-                    # Convert back to logical line + visual offset
-                    new_log, new_vis_off, _, _ = self.renderer.visual_to_logical_line(
-                        cr, self.buf, new_visual, ln_width, viewport_width
+                # OPTIMIZATION: For huge files (>10M lines), use fast approximation
+                if total_lines > 10_000_000:
+                    # Use cached estimate - no expensive calculations
+                    estimated_total = self.renderer.estimated_total_cache or total_lines
+                    max_scroll_visual = max(0, estimated_total - visible)
+                    
+                    # Calculate approximate current visual line
+                    current_ratio = self.scroll_line / max(1, total_lines)
+                    current_visual = int(current_ratio * estimated_total)
+                    
+                    # Apply scroll steps
+                    new_visual = current_visual + steps
+                    new_visual = max(0, min(new_visual, max_scroll_visual))
+                    
+                    if new_visual != current_visual:
+                        # Convert back to logical line using simple ratio
+                        new_ratio = new_visual / max(1, estimated_total)
+                        new_log = int(new_ratio * total_lines)
+                        new_log = max(0, min(new_log, total_lines - 1))
+                        
+                        self.scroll_line = new_log
+                        self.scroll_visual_offset = 0
+                        
+                        # Update scrollbar
+                        self.vadj.handler_block_by_func(self.on_vadj_changed)
+                        try:
+                            self.vadj.set_value(new_visual)
+                        finally:
+                            self.vadj.handler_unblock_by_func(self.on_vadj_changed)
+                        
+                        self.queue_draw()
+                else:
+                    # Normal scrolling for smaller files
+                    # Calculate current visual line
+                    current_visual = self.renderer.logical_to_visual_line(
+                        cr, self.buf, self.scroll_line, 0, ln_width, viewport_width
                     )
+                    current_visual += self.scroll_visual_offset
                     
-                    self.scroll_line = new_log
-                    self.scroll_visual_offset = new_vis_off
+                    # Calculate total visual lines for bounds checking
+                    total_visual = self.renderer.get_total_visual_lines(cr, self.buf, ln_width, viewport_width)
+                    max_scroll_visual = max(0, total_visual - visible)
                     
-                    # Update scrollbar with visual line position
-                    self.vadj.handler_block_by_func(self.on_vadj_changed)
-                    try:
-                        self.vadj.set_value(new_visual)
-                    finally:
-                        self.vadj.handler_unblock_by_func(self.on_vadj_changed)
+                    # Apply scroll steps to visual line
+                    new_visual = current_visual + steps
                     
-                    self.queue_draw()
+                    # Check cache coverage
+                    cache_coverage = len(self.renderer.wrap_cache) / max(1, total_lines)
+                    
+                    # If scrolling down and approaching the estimated end, recalculate accurately
+                    # More aggressive when cache is poor
+                    needs_recalc = False
+                    if steps > 0 and new_visual > max_scroll_visual * 0.7:
+                        needs_recalc = True
+                    elif steps > 0 and cache_coverage < 0.2 and new_visual > max_scroll_visual * 0.5:
+                        needs_recalc = True
+                    
+                    if needs_recalc:
+                        # We're near the end - recalculate total visual lines accurately
+                        # Only clear cache if it's not manually locked
+                        if not (hasattr(self.renderer, 'total_visual_lines_locked') and self.renderer.total_visual_lines_locked):
+                            self.renderer.total_visual_lines_cache = None
+                        
+                        # Determine how many lines to calculate based on cache coverage
+                        lines_to_calc = visible * 3
+                        if cache_coverage < 0.1:
+                            lines_to_calc = visible * 5
+                        elif cache_coverage < 0.2:
+                            lines_to_calc = visible * 4
+                        
+                        # Calculate accurate total by sampling more lines near the end
+                        accurate_total = self.renderer.get_accurate_total_visual_lines_at_end(
+                            cr, self.buf, ln_width, viewport_width, visible, lines_to_calc
+                        )
+                        
+                        # Use the larger of the two values (never reduce scroll range)
+                        if accurate_total > total_visual:
+                            total_visual = accurate_total
+                            self.renderer.total_visual_lines_cache = accurate_total
+                            max_scroll_visual = max(0, total_visual - visible)
+                            
+                            # Update scrollbar with new accurate total
+                            self.vadj.set_upper(total_visual)
+                    
+                    new_visual = max(0, min(new_visual, max_scroll_visual))
+                    
+                    if new_visual != current_visual:
+                        # Convert back to logical line + visual offset
+                        new_log, new_vis_off, _, _ = self.renderer.visual_to_logical_line(
+                            cr, self.buf, new_visual, ln_width, viewport_width
+                        )
+                        
+                        self.scroll_line = new_log
+                        self.scroll_visual_offset = new_vis_off
+                        
+                        # Update scrollbar with visual line position
+                        self.vadj.handler_block_by_func(self.on_vadj_changed)
+                        try:
+                            self.vadj.set_value(new_visual)
+                        finally:
+                            self.vadj.handler_unblock_by_func(self.on_vadj_changed)
+                        
+                        self.queue_draw()
             else:
                 # No wrap mode: scroll by logical lines
                 max_scroll = max(0, total_lines - visible)
@@ -5712,7 +6369,6 @@ class VirtualTextView(Gtk.DrawingArea):
     def draw_view(self, area, cr, w, h):
         import time
         draw_start = time.time()
-
         
         cr.set_source_rgb(0.10, 0.10, 0.10)
         cr.rectangle(0, 0, w, h)
@@ -5737,11 +6393,32 @@ class VirtualTextView(Gtk.DrawingArea):
         )
         render_elapsed = time.time() - render_start
         
+        # Draw progress overlay if calculating
+        if self.calculating and self.calculation_message:
+            # Semi-transparent dark overlay
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.7)
+            overlay_h = 60
+            overlay_y = (h - overlay_h) // 2
+            cr.rectangle(0, overlay_y, w, overlay_h)
+            cr.fill()
+            
+            # Progress text
+            layout = PangoCairo.create_layout(cr)
+            layout.set_font_description(self.renderer.font)
+            layout.set_text(self.calculation_message, -1)
+            text_w, text_h = layout.get_pixel_size()
+            
+            cr.set_source_rgb(1.0, 1.0, 1.0)
+            cr.move_to((w - text_w) // 2, overlay_y + (overlay_h - text_h) // 2)
+            PangoCairo.show_layout(cr, layout)
+        
         elapsed = time.time() - draw_start
-        # Update scrollbars after drawing (this updates visibility based on content)
-        #GLib.idle_add(lambda: (self.update_scrollbar(), False))
-        # Update scrollbars after drawing (this updates visibility based on content)
-        #GLib.idle_add(lambda: (self.update_scrollbar(), False))
+        
+        # Update scrollbar after first draw when file is loaded
+        if self.needs_scrollbar_init:
+            if w > 0 and h > 0:
+                self.needs_scrollbar_init = False
+                GLib.idle_add(self.update_scrollbar)
 
 
 
@@ -5810,6 +6487,12 @@ class EditorWindow(Adw.ApplicationWindow):
         self.hscroll.add_css_class("hscrollbar-overlay")
         self.vscroll.set_visible(False)
         self.hscroll.set_visible(False)
+        
+        # Add drag detection to vertical scrollbar
+        drag_gesture = Gtk.GestureDrag()
+        drag_gesture.connect("drag-begin", self.on_vscroll_drag_begin)
+        drag_gesture.connect("drag-end", self.on_vscroll_drag_end)
+        self.vscroll.add_controller(drag_gesture)
 
 
         # IMPORTANT: give the view references to both scrollbars
@@ -5953,18 +6636,49 @@ class EditorWindow(Adw.ApplicationWindow):
 
         width = self.view.get_width()
         height = self.view.get_height()
-
         if width <= 0 or height <= 0:
             GLib.idle_add(self.on_buffer_changed)
             return
 
         # Invalidate wrap cache when buffer changes
         if self.view.renderer.wrap_enabled:
+            # Only clear wrap points; DO NOT touch total_visual_lines_cache
             self.view.renderer.wrap_cache.clear()
-            self.view.renderer.total_visual_lines_cache = None
-        
-        # Use update_scrollbar which handles both wrap and non-wrap modes correctly
+            # Keep total_visual_lines_cache and lock flag as-is
+            self.view.renderer.total_visual_lines_locked = False
+
+            # CRITICAL FIX: Do NOT call update_scrollbar here.
+            # The View handles its own precise scroll maintenance and
+            # calling update_scrollbar causes jumping/flicker at EOF.
+            return
+
+        # Non-wrap mode: updating scrollbar is cheap and correct
         self.view.update_scrollbar()
+    
+    def on_vscroll_drag_begin(self, gesture, x, y):
+        """Handle scrollbar drag begin - skip expensive calculations during drag"""
+        self.view.scrollbar_dragging = True
+        self.view.last_drag_value = None
+    
+    def on_vscroll_drag_end(self, gesture, x, y):
+        """Handle scrollbar drag end - do the final calculation"""
+        self.view.scrollbar_dragging = False
+        
+        # Show progress for the final calculation
+        if self.buf.total() > 10000:
+            self.view.calculating = True
+            self.view.calculation_message = "Calculating final position..."
+            self.view.queue_draw()
+        
+        # If there was a pending value during drag, process it now
+        if self.view.last_drag_value is not None:
+            self.view.pending_scroll_value = self.view.last_drag_value
+            self.view.last_drag_value = None
+            
+            if not self.view.scroll_update_pending:
+                self.view.scroll_update_pending = True
+                GLib.idle_add(self.view._process_scroll_update)
+
 
     def open_file(self, *_):
         dialog = Gtk.FileDialog()
@@ -5991,6 +6705,19 @@ class EditorWindow(Adw.ApplicationWindow):
                 self.view.scroll_line = 0
                 self.view.scroll_x = 0
                 
+                # Clear all renderer caches for the new file
+                self.view.renderer.wrap_cache.clear()
+                self.view.renderer.visual_line_map = []
+                self.view.renderer.total_visual_lines_cache = None
+                self.view.renderer.total_visual_lines_locked = False
+                self.view.renderer.visual_line_anchor = (0, 0)
+                self.view.renderer.max_line_width = 0
+                self.view.renderer.needs_full_width_scan = True
+                
+                # Clear optimization caches
+                self.view.renderer.estimated_total_cache = None
+                self.view.renderer.edits_since_cache_invalidation = 0
+                
                 # Set current encoding to match the loaded file
                 self.current_encoding = idx.encoding
                 # Update the encoding action state
@@ -6000,19 +6727,15 @@ class EditorWindow(Adw.ApplicationWindow):
                 
                 # Trigger width scan for the new file
                 self.view.file_loaded()
-
-                # update scrollbars after loading new file
-                #GLib.idle_add(lambda: (self.hscroll.update_visibility(),
-                 #      self.vscroll.update_visibility(),
-                  #     False))
-
+                
+                # Set flag to update scrollbar on next draw
+                self.view.needs_scrollbar_init = True
 
                 self.view.queue_draw()
-                self.vscroll.queue_draw()
-                self.hscroll.queue_draw()
 
                 self.set_title(os.path.basename(path))
                 loading_dialog.close()
+                
                 return False
 
             def index_in_thread():
