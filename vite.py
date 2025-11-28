@@ -13,10 +13,10 @@ from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo, GLib, Gio
 
 CSS_OVERLAY_SCROLLBAR = """
 /* ========================
-   Scrollbars (unchanged)
+   Scrollbars
    ======================== */
 .overlay-scrollbar {
-    background-color: rgb(25,25,25);
+    background-color: transparent;
     min-width: 8px;
 }
 
@@ -38,7 +38,7 @@ CSS_OVERLAY_SCROLLBAR = """
 }
 
 .hscrollbar-overlay {
-    background-color: rgb(25,25,25);
+    background-color: transparent;
     min-width: 8px;
 }
 
@@ -63,7 +63,7 @@ CSS_OVERLAY_SCROLLBAR = """
    Editor background
    ======================== */
 .editor-surface {
-    background-color: rgb(25,25,25);
+    background-color: @window_bg_color;
 }
 
 /* ========================
@@ -80,7 +80,7 @@ CSS_OVERLAY_SCROLLBAR = """
 
     min-height: 24px;
     background: transparent;
-    color: #c0c0c0;
+    color: @window_fg_color;
     min-height: 24px;
     border-radius: 8px;
 
@@ -92,9 +92,9 @@ CSS_OVERLAY_SCROLLBAR = """
 }
 
 .chrome-tab:hover {
-    color: #c0c0c0;
+    color: @window_fg_color;
     min-height: 24px;
-    background: rgba(255,255,255,0.10);
+    background: alpha(@window_fg_color, 0.10);
     padding-left: 12px;
     padding-right: 8px;
     padding-top:4px;
@@ -104,8 +104,8 @@ CSS_OVERLAY_SCROLLBAR = """
 
 /* ACTIVE TAB (pilled) */
 .chrome-tab.active {
-    background: rgba(255,255,255,0.12);
-    color: white;
+    background: alpha(@window_fg_color, 0.12);
+    color: @window_fg_color;
     min-height: 24px;
     padding-left: 12px;
     padding-right: 8px;
@@ -157,7 +157,7 @@ CSS_OVERLAY_SCROLLBAR = """
     min-height: 10px;
     padding: 4px;
     opacity: 0.10;
-    color: #FFFFFF;
+    color: @window_fg_color;
 }
 
 .chrome-tab:hover .chrome-tab-close-button {
@@ -166,7 +166,7 @@ CSS_OVERLAY_SCROLLBAR = """
 
 .chrome-tab.active .chrome-tab-close-button {
     opacity: 1;
-    color: #FFFFFF;
+    color: @window_fg_color;
 }
 
 /* ========================
@@ -174,7 +174,7 @@ CSS_OVERLAY_SCROLLBAR = """
    ======================== */
 .chrome-tab-separator {
     min-width: 1px;
-    background-color: rgba(255,255,255,0.15);
+    background-color: alpha(@window_fg_color, 0.15);
     margin-top: 6px;
     margin-bottom: 6px;
 }
@@ -206,13 +206,90 @@ CSS_OVERLAY_SCROLLBAR = """
 }
 
 .chrome-tab-close-button:hover  {
-    background-color: rgba(255, 255, 255, 0.1);
+    background-color: alpha(@window_fg_color, 0.1);
 }
 
 .chrome-tab.active .chrome-tab-close-button:hover {
     opacity: 1;
-    background-color: rgba(255,255,255,0.1);
+    background-color: alpha(@window_fg_color, 0.1);
 }
+
+
+/* Corrected dropdown selectors - removed space after colon */
+.linked dropdown:first-child > button  {
+    border-top-left-radius: 0px; 
+    border-bottom-left-radius: 0px; 
+    border-top-right-radius: 0px; 
+    border-bottom-right-radius: 0px;
+}
+
+/* Explicit rule to ensure middle dropdowns have NO radius */
+.linked dropdown:not(:first-child):not(:last-child) > button {
+    border-radius: 0;
+}
+
+
+
+
+/* Corrected menubutton selectors - removed space after colon */
+.linked menubutton:first-child > button  {
+    border-top-left-radius: 10px; 
+    border-bottom-left-radius: 10px; 
+    border-top-right-radius: 0px; 
+    border-bottom-right-radius: 0px;
+}
+
+.linked menubutton:last-child > button {
+    border-top-left-radius: 0px; 
+    border-bottom-left-radius: 0px; 
+    border-top-right-radius: 10px; 
+    border-bottom-right-radius: 10px; 
+} 
+
+/* Additional recommended fixes for consistent styling */
+.linked menubutton button {
+    background: @theme_bg_color; padding:0px; padding-right: 3px; margin-left: 0px;
+}
+
+.linked menubutton button:hover {
+    background: alpha(@window_fg_color, 0.12);
+     padding:0px; padding-right: 3px;
+}
+
+.linked menubutton button:active, 
+.linked menubutton button:checked {
+    background-color: rgba(127, 127, 127, 0.3);
+    padding:0px; padding-right: 3px;
+}
+
+.linked menubutton button:checked:hover {
+       background: alpha(@window_fg_color, 0.2);
+}
+
+
+/* Corrected button selectors - removed space after colon */
+.linked button  {
+    border-top-left-radius: 10px; 
+    border-bottom-left-radius: 10px; 
+    border-top-right-radius: 0px; 
+    border-bottom-right-radius: 0px;
+    
+}
+
+/* Additional recommended fixes for consistent styling */
+.linked button {
+    background: @theme_bg_color; padding-left: 10px; padding-right:3px; 
+}
+
+.linked button:hover {
+    background: alpha(@window_fg_color, 0.1);
+
+}
+
+
+
+
+
 
 """
 
@@ -3115,12 +3192,34 @@ class Renderer:
         ink, logical = layout.get_pixel_extents()
         self.avg_char_width = logical.width / 62.0
         
-        # Colors
-        self.editor_background_color = (0.10, 0.10, 0.10)
-        self.text_foreground_color   = (0.90, 0.90, 0.90)
-        self.linenumber_foreground_color = (0.60, 0.60, 0.60)
-        self.selection_background_color = (0.2, 0.4, 0.6)
-        self.selection_foreground_color = (1.0, 1.0, 1.0)
+        # Colors - will be updated based on theme
+        self.update_colors_for_theme()
+
+    def update_colors_for_theme(self, is_dark=None):
+        """Update colors based on current theme.
+        
+        Args:
+            is_dark: If None, auto-detect from system. Otherwise use provided value.
+        """
+        if is_dark is None:
+            # Auto-detect from Adw.StyleManager
+            style_manager = Adw.StyleManager.get_default()
+            is_dark = style_manager.get_dark()
+        
+        if is_dark:
+            # Dark theme colors
+            self.editor_background_color = (0.10, 0.10, 0.10)
+            self.text_foreground_color   = (0.90, 0.90, 0.90)
+            self.linenumber_foreground_color = (0.60, 0.60, 0.60)
+            self.selection_background_color = (0.2, 0.4, 0.6)
+            self.selection_foreground_color = (1.0, 1.0, 1.0)
+        else:
+            # Light theme colors
+            self.editor_background_color = (0.98, 0.98, 0.98)
+            self.text_foreground_color   = (0.10, 0.10, 0.10)
+            self.linenumber_foreground_color = (0.50, 0.50, 0.50)
+            self.selection_background_color = (0.6, 0.8, 1.0)
+            self.selection_foreground_color = (0.0, 0.0, 0.0)
 
     def create_text_layout(self, cr, text="", auto_dir=True):
         """Create a Pango layout with standard settings.
@@ -3217,9 +3316,10 @@ class Renderer:
         if is_rtl:
             available = max(0, view_w - ln_width)
             # Unified formula: right-align and apply scroll offset
-            return ln_width + max(0, available - text_w) - scroll_x
+            return max(ln_width, ln_width + max(0, available - text_w) - scroll_x)
         else:
-            return ln_width - scroll_x
+            # Ensure text never overlaps line numbers
+            return max(ln_width, ln_width - scroll_x)
 
     def calculate_line_number_width(self, cr, total_lines):
         """Calculate width needed for line numbers based on total lines"""
@@ -7097,7 +7197,7 @@ class ChromeTab(Gtk.Box):
     def update_label(self):
         """Update label text based on modified state"""
         if self.has_css_class("modified"):
-            self.label.set_text(f"*{self._original_title}")
+            self.label.set_text(f" ⃰{self._original_title}")
         else:
             self.label.set_text(self._original_title)
        
@@ -7407,16 +7507,78 @@ class ChromeTabBar(Adw.WrapBox):
 
 class EditorPage:
     """A single editor page containing buffer and view"""
-    def __init__(self):
+    def __init__(self, untitled_title="Untitled"):
         self.buf = VirtualBuffer()
         self.view = VirtualTextView(self.buf)
         self.current_encoding = "utf-8"
         self.current_file_path = None
+        self.untitled_title = untitled_title  # Store custom Untitled title
         
     def get_title(self):
         if self.current_file_path:
             return os.path.basename(self.current_file_path)
-        return "Untitled"
+        return self.untitled_title
+
+class RecentFilesManager:
+    """Manages recently opened/saved files list"""
+    
+    def __init__(self, max_files=10):
+        self.max_files = max_files
+        self.recent_files = []
+        self.config_dir = os.path.join(GLib.get_user_config_dir(), "vite")
+        self.config_file = os.path.join(self.config_dir, "recent_files.txt")
+        self.load()
+    
+    def load(self):
+        """Load recent files from config file"""
+        try:
+            os.makedirs(self.config_dir, exist_ok=True)
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r') as f:
+                    self.recent_files = [line.strip() for line in f.readlines() if line.strip()]
+                    # Keep only files that still exist
+                    self.recent_files = [f for f in self.recent_files if os.path.exists(f)]
+        except Exception as e:
+            print(f"Error loading recent files: {e}")
+            self.recent_files = []
+    
+    def save(self):
+        """Save recent files to config file"""
+        try:
+            os.makedirs(self.config_dir, exist_ok=True)
+            with open(self.config_file, 'w') as f:
+                for file_path in self.recent_files:
+                    f.write(file_path + '\n')
+        except Exception as e:
+            print(f"Error saving recent files: {e}")
+    
+    def add(self, file_path):
+        """Add a file to recent files list"""
+        if not file_path:
+            return
+        
+        # Remove if already exists
+        if file_path in self.recent_files:
+            self.recent_files.remove(file_path)
+        
+        # Add to beginning
+        self.recent_files.insert(0, file_path)
+        
+        # Trim to max_files
+        self.recent_files = self.recent_files[:self.max_files]
+        
+        # Save to disk
+        self.save()
+    
+    def get_recent_files(self):
+        """Get list of recent files"""
+        return self.recent_files.copy()
+    
+    def clear(self):
+        """Clear all recent files"""
+        self.recent_files = []
+        self.save()
+
 
 class SaveChangesDialog(Adw.AlertDialog):
     """Dialog to prompt user to save changes before closing"""
@@ -7425,6 +7587,7 @@ class SaveChangesDialog(Adw.AlertDialog):
         super().__init__()
         
         self.modified_editors = modified_editors
+        self.checkboxes = []  # Store checkboxes to check which files to save
         
         # Set dialog properties
         self.set_heading("Save Changes?")
@@ -7458,6 +7621,7 @@ class SaveChangesDialog(Adw.AlertDialog):
                 check = Gtk.CheckButton()
                 check.set_active(True)
                 check._editor = editor
+                self.checkboxes.append(check)  # Store for later
                 file_box.append(check)
                 
                 # File info box
@@ -7500,6 +7664,9 @@ class EditorWindow(Adw.ApplicationWindow):
         super().__init__(application=app)
         self.set_title("Virtual Text Editor")
         self.set_default_size(800, 600)
+        
+        # Initialize recent files manager
+        self.recent_files_manager = RecentFilesManager()
 
         # Create ToolbarView
         toolbar_view = Adw.ToolbarView()
@@ -7510,14 +7677,34 @@ class EditorWindow(Adw.ApplicationWindow):
         self.header.set_title_widget(self.window_title)
         toolbar_view.add_top_bar(self.header)
 
-        # Open button
-        open_btn = Gtk.Button(label="Open")
-        open_btn.add_css_class("flat")  
-        open_btn.connect("clicked", self.open_file)
-        self.header.pack_start(open_btn)
+        # Container for linked buttons
+        open_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        open_box.add_css_class("linked")            # <- This merges the buttons visually
+        open_box.set_margin_start(2)
+        open_box.set_margin_top(1) 
+        # Left "Open" button
+        self.open_button = Gtk.Button(label="Open")
+        self.open_button.connect("clicked", self.open_file)
+        self.open_button.add_css_class("flat")      # Keep Libadwaita look
+        self.open_button.set_margin_start(0)
+        self.open_button.set_margin_end(0)        
+        open_box.append(self.open_button)
 
+        # Right dropdown arrow button
+        self.open_menu_button = Gtk.MenuButton()
+        self.open_menu_button.set_icon_name("pan-down-symbolic")
+        self.open_menu_button.set_margin_start(0)
+        self.open_menu_button.set_margin_end(0)
+        self.update_recent_files_menu()                # <- Correct
+        self.open_menu_button.add_css_class("flat")
+        open_box.append(self.open_menu_button)
+
+        # Put in headerbar
+        self.header.pack_start(open_box)
         # New Tab button
         btn_new = Gtk.Button()
+        btn_new.set_margin_top(1)
+        btn_new.set_margin_bottom(1)  
         btn_new.set_icon_name("tab-new-symbolic")
         btn_new.set_tooltip_text("New Tab (Ctrl+T)")
         btn_new.connect("clicked", self.on_new_tab)
@@ -7527,13 +7714,13 @@ class EditorWindow(Adw.ApplicationWindow):
         menu_button = Gtk.MenuButton()
         menu_button.set_icon_name("open-menu-symbolic")
         menu_button.set_menu_model(self.create_menu())
+#        menu_button.set_size_request(16, 20)
         self.header.pack_end(menu_button)
 
         # Tab dropdown button (for file list)
         self.tab_dropdown = Gtk.MenuButton()
         self.tab_dropdown.set_icon_name("pan-down-symbolic")
         self.tab_dropdown.add_css_class("flat")
-        self.tab_dropdown.set_size_request(24, 32)
         self.header.pack_end(self.tab_dropdown)
         
         
@@ -7564,6 +7751,10 @@ class EditorWindow(Adw.ApplicationWindow):
         
         # Handle window close request
         self.connect("close-request", self.on_close_request)
+        
+        # Connect to theme changes
+        style_manager = Adw.StyleManager.get_default()
+        style_manager.connect("notify::dark", self.on_theme_changed)
 
     def on_window_key_pressed(self, controller, keyval, keycode, state):
         # Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+T / Ctrl+O / Ctrl+Shift+S / Ctrl+W
@@ -7622,7 +7813,7 @@ class EditorWindow(Adw.ApplicationWindow):
         
         # If there are modified files, show save dialog
         if modified_editors:
-            def on_response(response):
+            def on_response(response, dialog):
                 if response == "cancel":
                     return
                 elif response == "discard":
@@ -7630,20 +7821,79 @@ class EditorWindow(Adw.ApplicationWindow):
                     self.destroy()
                 elif response == "save":
                     # Save all checked files
-                    # For simplicity, we'll just save all modified files
-                    for editor in modified_editors:
-                        if editor.current_file_path:
-                            self.save_file(editor, editor.current_file_path)
-                        else:
-                            # For untitled files, we would need save-as dialogs
-                            # For now, just skip them
-                            pass
+                    if dialog and hasattr(dialog, 'checkboxes'):
+                        for check in dialog.checkboxes:
+                            if check.get_active() and hasattr(check, '_editor'):
+                                editor = check._editor
+                                if editor.current_file_path:
+                                    self.save_file(editor, editor.current_file_path)
+                                # For untitled files without path, we skip them
+                                # (could be enhanced to show save-as dialogs)
                     self.destroy()
             
             self.show_save_changes_dialog(modified_editors, on_response)
             return True  # Prevent default close
         
         return False  # Allow close
+    
+    def on_theme_changed(self, style_manager, pspec):
+        """Handle theme change - update all editor renderers"""
+        is_dark = style_manager.get_dark()
+        
+        # Update all editor renderers
+        for i in range(self.tab_view.get_n_pages()):
+            page = self.tab_view.get_nth_page(i)
+            editor = page.get_child()._editor
+            editor.view.renderer.update_colors_for_theme(is_dark)
+            editor.view.queue_draw()
+    
+    def update_recent_files_menu(self):
+        """Update the recent files dropdown menu"""
+        menu = Gio.Menu()
+        recent_files = self.recent_files_manager.get_recent_files()
+        
+        if recent_files:
+            for file_path in recent_files:
+                # Create menu item with filename
+                filename = os.path.basename(file_path)
+                menu_item = Gio.MenuItem.new(filename, None)
+                # Store the full path as action target
+                menu_item.set_action_and_target_value(
+                    "win.open_recent",
+                    GLib.Variant.new_string(file_path)
+                )
+                menu.append_item(menu_item)
+            
+            # Add separator and clear option
+            menu.append_section(None, Gio.Menu())
+            menu.append("Clear Recent Files", "win.clear_recent")
+        else:
+            menu.append("No recent files", None)
+        
+        self.open_menu_button.set_menu_model(menu)
+    
+    def find_tab_with_file(self, file_path):
+        """Find and return the page that has the given file open, or None"""
+        if not file_path:
+            return None
+        
+        for i in range(self.tab_view.get_n_pages()):
+            page = self.tab_view.get_nth_page(i)
+            editor = page.get_child()._editor
+            if editor.current_file_path == file_path:
+                return page
+        return None
+    
+    def activate_tab_with_file(self, file_path):
+        """Activate the tab that has the given file open. Returns True if found."""
+        page = self.find_tab_with_file(file_path)
+        if page:
+            self.tab_view.set_selected_page(page)
+            # Focus the editor
+            editor = page.get_child()._editor
+            editor.view.grab_focus()
+            return True
+        return False
 
     def get_current_page(self):
         page = self.tab_view.get_selected_page()
@@ -7654,8 +7904,53 @@ class EditorWindow(Adw.ApplicationWindow):
     def on_new_tab(self, btn):
         self.add_tab()
         
+    def get_next_untitled_number(self):
+        """Get the next available Untitled number based on existing tabs"""
+        # Collect all existing Untitled numbers
+        existing_numbers = []
+        
+        for i in range(self.tab_view.get_n_pages()):
+            page = self.tab_view.get_nth_page(i)
+            editor = page.get_child()._editor
+            if not editor.current_file_path:
+                # This is an Untitled tab
+                title = editor.get_title()
+                if title == "Untitled":
+                    existing_numbers.append(0)  # Plain "Untitled" counts as 0
+                elif title.startswith("Untitled "):
+                    try:
+                        num = int(title.split(" ")[1])
+                        existing_numbers.append(num)
+                    except (IndexError, ValueError):
+                        pass
+        
+        # If no Untitled tabs exist, start with "Untitled" (no number)
+        if not existing_numbers:
+            return 0
+        
+        # If only plain "Untitled" exists, next should be "Untitled 1"
+        if existing_numbers == [0]:
+            return 1
+        
+        # Otherwise, find the next available number starting from 1
+        next_num = 1
+        while next_num in existing_numbers:
+            next_num += 1
+        
+        return next_num
+    
     def add_tab(self, path=None):
-        editor = EditorPage()
+        # Get the next available Untitled number if not loading a file
+        if not path:
+            untitled_num = self.get_next_untitled_number()
+            if untitled_num == 0:
+                untitled_title = "Untitled"
+            else:
+                untitled_title = f"Untitled {untitled_num}"
+        else:
+            untitled_title = "Untitled"  # Won't be used if path is provided
+        
+        editor = EditorPage(untitled_title)
         
         # Create grid layout for editor
         grid = Gtk.Grid()
@@ -7769,8 +8064,13 @@ class EditorWindow(Adw.ApplicationWindow):
         """Show dialog for saving changes with list of modified files"""
         dialog = SaveChangesDialog(self, modified_editors)
         
-        def on_response(dialog_obj, response):
-            callback(response)
+        def on_response(source, result):
+            try:
+                response = dialog.choose_finish(result)
+                callback(response, dialog)
+            except Exception as e:
+                # User closed dialog or error occurred
+                print(f"Dialog error: {e}")
         
         dialog.choose(self, None, on_response)
     
@@ -7787,11 +8087,11 @@ class EditorWindow(Adw.ApplicationWindow):
         
         # If modified, show save dialog
         if is_modified:
-            self.show_save_changes_dialog([editor], lambda response: self.finish_close_tab(page, response))
+            self.show_save_changes_dialog([editor], lambda response, dialog: self.finish_close_tab(page, response, dialog))
         else:
-            self.finish_close_tab(page, "discard")
+            self.finish_close_tab(page, "discard", None)
     
-    def finish_close_tab(self, page, response):
+    def finish_close_tab(self, page, response, dialog):
         """Complete the tab closing operation after save dialog"""
         if response == "cancel":
             return
@@ -7799,16 +8099,31 @@ class EditorWindow(Adw.ApplicationWindow):
         editor = page.get_child()._editor
         
         if response == "save":
+            # Check which files to save from dialog checkboxes
+            if dialog and hasattr(dialog, 'checkboxes'):
+                # Check if this editor's checkbox is selected
+                should_save = False
+                for check in dialog.checkboxes:
+                    if hasattr(check, '_editor') and check._editor == editor:
+                        should_save = check.get_active()
+                        break
+                
+                if not should_save:
+                    # Skip saving this file
+                    self.perform_close_tab(page)
+                    return
+            
             # If file has path, save it; otherwise show save-as dialog
             if editor.current_file_path:
                 self.save_file(editor, editor.current_file_path)
+                self.perform_close_tab(page)
             else:
                 # Show save-as dialog
-                dialog = Gtk.FileDialog()
+                dialog_save = Gtk.FileDialog()
                 
-                def done(dialog, result):
+                def done(dialog_save_obj, result):
                     try:
-                        f = dialog.save_finish(result)
+                        f = dialog_save_obj.save_finish(result)
                         path = f.get_path()
                         self.save_file(editor, path)
                         # After saving, close the tab
@@ -7817,7 +8132,7 @@ class EditorWindow(Adw.ApplicationWindow):
                         # User cancelled save-as, don't close
                         return
                 
-                dialog.save(self, None, done)
+                dialog_save.save(self, None, done)
                 return
         
         # If discard or after successful save, close the tab
@@ -7863,14 +8178,27 @@ class EditorWindow(Adw.ApplicationWindow):
         """Update header bar title and subtitle based on current tab"""
         editor = self.get_current_page()
         if editor:
+            # Check if current tab is modified
+            is_modified = False
+            current_page = self.tab_view.get_selected_page()
+            for tab in self.tab_bar.tabs:
+                if hasattr(tab, '_page') and tab._page == current_page:
+                    is_modified = tab.has_css_class("modified")
+                    break
+            
             if editor.current_file_path:
                 # Show filename in title, full path in subtitle
                 filename = os.path.basename(editor.current_file_path)
+                if is_modified:
+                    filename = " ⃰" + filename
                 self.window_title.set_title(filename)
                 self.window_title.set_subtitle(editor.current_file_path)
             else:
                 # Show "Untitled - Virtual Text Editor" for new files
-                self.window_title.set_title("Untitled - Virtual Text Editor")
+                title = editor.get_title()  # Gets "Untitled" or "Untitled N"
+                if is_modified:
+                    title = "  ⃰" + title
+                self.window_title.set_title(title + " - Virtual Text Editor")
                 self.window_title.set_subtitle("")
         else:
             self.window_title.set_title("Virtual Text Editor")
@@ -7935,7 +8263,7 @@ class EditorWindow(Adw.ApplicationWindow):
         for i, tab in enumerate(self.tab_bar.tabs):
             title = tab.get_title()
             if tab.has_css_class("modified"):
-                title = "*" + title
+                title = " ⃰" + title
             if len(title) > 32:
                 title = title[:28] + "…"
             menu.append(title, f"win.tab_activate::{i}")
@@ -7962,6 +8290,58 @@ class EditorWindow(Adw.ApplicationWindow):
         tab_activate_action = Gio.SimpleAction.new("tab_activate", GLib.VariantType.new("s"))
         tab_activate_action.connect("activate", self.on_tab_activate_from_menu)
         self.add_action(tab_activate_action)
+        
+        # Open recent file action
+        open_recent_action = Gio.SimpleAction.new("open_recent", GLib.VariantType.new("s"))
+        open_recent_action.connect("activate", self.on_open_recent)
+        self.add_action(open_recent_action)
+        
+        # Clear recent files action
+        clear_recent_action = Gio.SimpleAction.new("clear_recent", None)
+        clear_recent_action.connect("activate", self.on_clear_recent)
+        self.add_action(clear_recent_action)
+    
+    def on_open_recent(self, action, parameter):
+        """Handle opening a recent file"""
+        file_path = parameter.get_string()
+        if os.path.exists(file_path):
+            # Check if file is already open - if so, activate that tab
+            if self.activate_tab_with_file(file_path):
+                return
+            
+            # Check if we should replace current empty Untitled
+            current_page = self.tab_view.get_selected_page()
+            if current_page:
+                editor = current_page.get_child()._editor
+                
+                # Check if current tab is modified
+                is_modified = False
+                for tab in self.tab_bar.tabs:
+                    if hasattr(tab, '_page') and tab._page == current_page:
+                        is_modified = tab.has_css_class("modified")
+                        break
+                
+                # Check if it's an empty untitled file that's unmodified
+                if (not editor.current_file_path and 
+                    not is_modified and
+                    editor.buf.total() == 1 and 
+                    len(editor.buf.get_line(0)) == 0):
+                    # Replace this tab with the opened file
+                    self.load_file_into_editor(editor, file_path)
+                    return
+            
+            # Otherwise, create new tab
+            self.add_tab(file_path)
+        else:
+            # File doesn't exist, remove from recent
+            self.recent_files_manager.recent_files.remove(file_path)
+            self.recent_files_manager.save()
+            self.update_recent_files_menu()
+    
+    def on_clear_recent(self, action, parameter):
+        """Handle clearing recent files"""
+        self.recent_files_manager.clear()
+        self.update_recent_files_menu()
     
     def on_tab_activate_from_menu(self, action, parameter):
         """Handle tab activation from dropdown menu"""
@@ -8063,6 +8443,10 @@ class EditorWindow(Adw.ApplicationWindow):
 
             # Update state
             editor.current_file_path = path
+            
+            # Add to recent files
+            self.recent_files_manager.add(path)
+            self.update_recent_files_menu()
 
             # Update tab title and clear modified status
             for page in [self.tab_view.get_nth_page(i) for i in range(self.tab_view.get_n_pages())]:
@@ -8073,6 +8457,9 @@ class EditorWindow(Adw.ApplicationWindow):
                         if hasattr(tab, '_page') and tab._page == page:
                             tab.set_modified(False)
                             self.update_tab_dropdown()
+                            # Update header title if this is the active page
+                            if page == self.tab_view.get_selected_page():
+                                self.update_header_title()
                             break
                     break
 
@@ -8114,6 +8501,9 @@ class EditorWindow(Adw.ApplicationWindow):
                     if hasattr(tab, '_page') and tab._page == page:
                         tab.set_modified(True)
                         self.update_tab_dropdown()
+                        # Update header title if this is the active page
+                        if page == self.tab_view.get_selected_page():
+                            self.update_header_title()
                         break
                 break
 
@@ -8157,6 +8547,10 @@ class EditorWindow(Adw.ApplicationWindow):
             except:
                 return
             path = f.get_path()
+            
+            # Check if file is already open - if so, activate that tab
+            if self.activate_tab_with_file(path):
+                return
             
             # Check if the current active tab is an empty, unmodified Untitled
             current_page = self.tab_view.get_selected_page()
@@ -8231,6 +8625,10 @@ class EditorWindow(Adw.ApplicationWindow):
                 if page.get_child()._editor == editor:
                     self.update_tab_title(page)
                     break
+            
+            # Add to recent files
+            self.recent_files_manager.add(path)
+            self.update_recent_files_menu()
             
             loading_dialog.close()
             
