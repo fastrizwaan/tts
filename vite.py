@@ -643,7 +643,7 @@ class VirtualBuffer(GObject.Object):
         self.last_move_was_partial = False
         self.expected_selection = None
 
-    def load(self, indexed_file):
+    def load(self, indexed_file, emit_changed=True):
         self.file = indexed_file
         self.edits.clear()
         self.deleted_lines.clear()
@@ -652,7 +652,9 @@ class VirtualBuffer(GObject.Object):
         self.cursor_line = 0
         self.cursor_col = 0
         self.selection.clear()
-        self.emit("changed")
+
+        if emit_changed:
+            self.emit("changed")
 
 
     def _logical_to_physical(self, logical_line):
@@ -8098,7 +8100,10 @@ class EditorWindow(Adw.ApplicationWindow):
         
         editor = page.get_child()._editor
         
-        if response == "save":
+        if response == "discard":
+            # Just close the tab without saving
+            self.perform_close_tab(page)
+        elif response == "save":
             # Check which files to save from dialog checkboxes
             if dialog and hasattr(dialog, 'checkboxes'):
                 # Check if this editor's checkbox is selected
@@ -8118,7 +8123,7 @@ class EditorWindow(Adw.ApplicationWindow):
                 self.save_file(editor, editor.current_file_path)
                 self.perform_close_tab(page)
             else:
-                # Show save-as dialog
+                # Show save-as dialog for untitled files
                 dialog_save = Gtk.FileDialog()
                 
                 def done(dialog_save_obj, result):
@@ -8133,10 +8138,9 @@ class EditorWindow(Adw.ApplicationWindow):
                         return
                 
                 dialog_save.save(self, None, done)
+                # Return early - the callback will handle closing
                 return
-        
-        # If discard or after successful save, close the tab
-        self.perform_close_tab(page)
+    
     
     def perform_close_tab(self, page):
         """Actually remove the tab from the view"""
@@ -8145,16 +8149,21 @@ class EditorWindow(Adw.ApplicationWindow):
             # Create a new empty tab first
             self.add_tab()
         
-        # Remove from TabView
-        self.tab_view.close_page(page)
-        
-        # Remove from ChromeTabBar
+        # Remove from ChromeTabBar first (before closing the page)
         for tab in self.tab_bar.tabs:
             if hasattr(tab, '_page') and tab._page == page:
                 self.tab_bar.remove_tab(tab)
                 break
         
-        self.update_active_tab()
+        # Remove from TabView - this will automatically select another page
+        self.tab_view.close_page(page)
+        
+        # Update UI state after the page is closed
+        # Note: We don't call update_active_tab() here because the TabView
+        # automatically selects a new page when close_page() is called,
+        # and trying to set_selected_page on the removed page causes errors.
+        # Instead, we rely on the "notify::selected-page" signal handler
+        # (on_page_selection_changed) to update the active tab.
         self.update_ui_state()
         self.update_tab_dropdown()
 
@@ -8590,7 +8599,7 @@ class EditorWindow(Adw.ApplicationWindow):
             return False
         
         def index_complete():
-            editor.buf.load(idx)
+            editor.buf.load(idx, emit_changed=False)
 
             editor.view.scroll_line = 0
             editor.view.scroll_x = 0
