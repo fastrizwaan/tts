@@ -16,7 +16,7 @@ CSS_OVERLAY_SCROLLBAR = """
    Scrollbars
    ======================== */
 .overlay-scrollbar {
-    background-color: transparent;
+    background-color: @view_bg_color;
     min-width: 8px;
 }
 
@@ -63,7 +63,7 @@ CSS_OVERLAY_SCROLLBAR = """
    Editor background
    ======================== */
 .editor-surface {
-    background-color: @window_bg_color;
+    background-color: @view_bg_color;
 }
 
 /* ========================
@@ -248,11 +248,11 @@ CSS_OVERLAY_SCROLLBAR = """
 
 /* Additional recommended fixes for consistent styling */
 .linked menubutton button {
-    background: @theme_bg_color; padding:0px; padding-right: 3px; margin-left: 0px;
+    background: alpha(@window_fg_color, 0.05); padding:0px; padding-right: 3px; margin-left: 0px;
 }
 
 .linked menubutton button:hover {
-    background: alpha(@window_fg_color, 0.12);
+    background: alpha(@window_fg_color, 0.15);
      padding:0px; padding-right: 3px;
 }
 
@@ -278,11 +278,11 @@ CSS_OVERLAY_SCROLLBAR = """
 
 /* Additional recommended fixes for consistent styling */
 .linked button {
-    background: @theme_bg_color; padding-left: 10px; padding-right:3px; 
+    background: alpha(@window_fg_color, 0.05);; padding-left: 10px; padding-right:3px; 
 }
 
 .linked button:hover {
-    background: alpha(@window_fg_color, 0.1);
+    background: alpha(@window_fg_color, 0.15);
 
 }
 
@@ -3198,30 +3198,52 @@ class Renderer:
         self.update_colors_for_theme()
 
     def update_colors_for_theme(self, is_dark=None):
-        """Update colors based on current theme.
-        
-        Args:
-            is_dark: If None, auto-detect from system. Otherwise use provided value.
-        """
+        """Update colors based on current theme (GTK4)."""
+
+        # Determine theme mode unless explicitly given
         if is_dark is None:
-            # Auto-detect from Adw.StyleManager
             style_manager = Adw.StyleManager.get_default()
             is_dark = style_manager.get_dark()
-        
+
+        # Obtain the GTK widget that owns this renderer
+        view = getattr(self, "view_widget", None)
+        if view is None and hasattr(self, "buf") and hasattr(self.buf, "_view"):
+            view = self.buf._view
+
+        # Default fallback if theme lookup fails
+        default_dark_bg  = (0.10, 0.10, 0.10, 1.0)
+        default_light_bg = (0.98, 0.98, 0.98, 1.0)
+
+
+        # --- Get theme background color for text/view surfaces ---
+        bg = None
+        if view:
+            style = view.get_style_context()
+            ok, col = style.lookup_color("view_bg_color")
+            if ok:
+                bg = (col.red, col.green, col.blue, col.alpha)
+
+
+        # Fallbacks
+        if bg is None:
+            bg = default_dark_bg if is_dark else default_light_bg
+
+
+        # Apply retrieved theme color
+        self.editor_background_color = bg
+
+        # The other colors stay user-defined as before
         if is_dark:
-            # Dark theme colors
-            self.editor_background_color = (0.10, 0.10, 0.10)
-            self.text_foreground_color   = (0.90, 0.90, 0.90)
+            self.text_foreground_color = (0.90, 0.90, 0.90)
             self.linenumber_foreground_color = (0.60, 0.60, 0.60)
             self.selection_background_color = (0.2, 0.4, 0.6)
             self.selection_foreground_color = (1.0, 1.0, 1.0)
         else:
-            # Light theme colors
-            self.editor_background_color = (0.98, 0.98, 0.98)
-            self.text_foreground_color   = (0.10, 0.10, 0.10)
+            self.text_foreground_color = (0.10, 0.10, 0.10)
             self.linenumber_foreground_color = (0.50, 0.50, 0.50)
             self.selection_background_color = (0.6, 0.8, 1.0)
             self.selection_foreground_color = (0.0, 0.0, 0.0)
+
 
     def create_text_layout(self, cr, text="", auto_dir=True):
         """Create a Pango layout with standard settings.
@@ -4079,8 +4101,7 @@ class Renderer:
 
         import math
         import unicodedata
-        
-        # If we need a full width scan (e.g., after loading a file), do it first
+
         # If we need a full width scan (e.g., after loading a file), do it first
         if self.needs_full_width_scan and buf:
             self.scan_for_max_width(cr, buf)
@@ -4102,9 +4123,20 @@ class Renderer:
                 b += len(ch.encode("utf-8"))
             return b
 
-        # Background
-        cr.set_source_rgb(*self.editor_background_color)
-        cr.paint()
+        # --- THEMED BACKGROUND (uses @view_bg_color from CSS) ---
+        view = buf._view if hasattr(buf, "_view") else None
+        r, g, b, a = self.editor_background_color  # fallback from update_colors_for_theme()
+
+        if view:
+            style = view.get_style_context()
+            ok, col = style.lookup_color("view_bg_color")
+            if ok:
+                r, g, b, a = col.red, col.green, col.blue, col.alpha
+
+        cr.set_source_rgba(r, g, b, a)
+        cr.rectangle(0, 0, alloc.width, alloc.height)
+        cr.fill()
+
 
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.font)
@@ -4112,233 +4144,243 @@ class Renderer:
 
         total = buf.total()
         ln_width = self.calculate_line_number_width(cr, total)
-        
+
         # Calculate how many visual lines can fit
         max_vis = (alloc.height // self.line_h) + 1
-        
+
         # Get selection bounds if any
         sel_start_ln, sel_start_col, sel_end_ln, sel_end_col = -1, -1, -1, -1
         if buf.selection.has_selection():
             sel_start_ln, sel_start_col, sel_end_ln, sel_end_col = buf.selection.get_bounds()
 
+        # Gutter colors (tweak these to taste)
+        gutter_bg = (
+            0,
+            0,
+            0,
+            1.0   # FORCE OPAQUE
+        )      # default gutter background
+        gutter_active = (0.1, 0.1, 0.1)  # active line highlight in gutter
+        gutter_separator = (0.06, 0.06, 0.06)  # optional thin separator (drawn later if wanted)
+
+        # Text colors (use your existing color tuples)
+        r_fg, g_fg, b_fg = self.text_foreground_color
+        ln_fg = self.linenumber_foreground_color if hasattr(self, "linenumber_foreground_color") else (r_fg, g_fg, b_fg)
+        sel_rgba = self.selection_background_color if hasattr(self, "selection_background_color") else (0.2, 0.4, 1.0)
+
         # Render loop: Iterate logical lines starting from scroll_line
-        # For each logical line, iterate its visual lines
-        # Skip initial visual lines based on scroll_visual_offset (for the first line only)
-        
         y = 0
         current_vis_count = 0
         cursor_screen_pos = None  # (x, y, height)
-        
+
         # Start iterating from the scroll logical line
         for ln in range(scroll_line, total):
             if current_vis_count >= max_vis:
                 break
-                
-            line_text = buf.get_line(ln)
-            
+
+            line_text = buf.get_line(ln) or ""
+
             # Determine wrap points
             if self.wrap_enabled:
                 wrap_points = self.get_wrap_points_for_line(cr, buf, ln, ln_width, alloc.width)
             else:
                 wrap_points = [(0, len(line_text))]
-            
+
             # Determine which visual lines to draw for this logical line
-            # For the FIRST line (scroll_line), skip 'scroll_visual_offset' lines
             start_vis_idx = 0
             if ln == scroll_line:
                 start_vis_idx = scroll_visual_offset
-                # Ensure offset is valid
                 if start_vis_idx >= len(wrap_points):
                     start_vis_idx = max(0, len(wrap_points) - 1)
-            
+
             # Iterate visual lines for this logical line
             for vis_idx in range(start_vis_idx, len(wrap_points)):
                 if current_vis_count >= max_vis:
                     break
-                
+
                 col_start, col_end = wrap_points[vis_idx]
-                
+
                 # Extract text for this visual line
                 if col_end > col_start:
                     text_segment = line_text[col_start:col_end]
                 else:
                     text_segment = line_text[col_start:] if col_start < len(line_text) else ""
-                
-                # Draw line number only for the first visual line of the logical line
-                if vis_idx == 0:
-                    cr.set_source_rgb(*self.linenumber_foreground_color)
-                    layout.set_text(str(ln + 1), -1)
-                    layout.set_width(-1) # Reset width
-                    w, h = layout.get_pixel_size()
-                    cr.move_to(ln_width - w - 4, y)
-                    PangoCairo.show_layout(cr, layout)
-                else:
-                    # Draw continuation indicator for wrapped lines
-                    cr.set_source_rgb(*self.linenumber_foreground_color)
-                    layout.set_text("⤷", -1)
+
+                # ---- GUTTER: themed, opaque, no bleed-through ----
+                if getattr(self, "show_line_numbers", True):
+
+                    view = buf._view if hasattr(buf, "_view") else None
+                    r, g, b, a = self.editor_background_color  # fallback
+
+                    if view:
+                        style = view.get_style_context()
+                        ok, col = style.lookup_color("view_bg_color")
+                        if ok:
+                            r, g, b, a = col.red, col.green, col.blue, col.alpha
+
+                    # Active line shading
+                    if ln == buf.cursor_line:
+                        r2, g2, b2 = r * 0.85, g * 0.85, b * 0.85
+                    else:
+                        r2, g2, b2 = r, g, b
+
+                    cr.save()
+                    cr.set_source_rgba(r2, g2, b2, a)
+                    cr.rectangle(0, y, ln_width, self.line_h)
+                    cr.fill()
+                    cr.restore()
+
+
+
+
+                    # (optional separator)
+                    # cr.set_source_rgba(0, 0, 0, 0.20)
+                    # cr.rectangle(ln_width - 1, y, 1, self.line_h)
+                    # cr.fill()
+
+
+                # Draw line number or continuation marker
+                if getattr(self, "show_line_numbers", True):
+                    cr.set_source_rgb(*ln_fg)
+                    if vis_idx == 0:
+                        ln_text = str(ln + 1)
+                    else:
+                        ln_text = "⤷"
+                    layout.set_text(ln_text, -1)
                     layout.set_width(-1)
                     w, h = layout.get_pixel_size()
                     cr.move_to(ln_width - w - 4, y)
                     PangoCairo.show_layout(cr, layout)
 
-                # Draw text
+                # Prevent text from ever drawing inside gutter (clip to text area)
+                cr.save()
+                text_area_w = max(0, alloc.width - ln_width)          # guard against negative width
+                if text_area_w > 0:
+                    cr.rectangle(ln_width, y, text_area_w, self.line_h)
+                    cr.clip()
+                else:
+                    # nothing to draw in text area, keep clipped to empty rect
+                    cr.rectangle(0, 0, 0, 0)
+                    cr.clip()
+
+                # Draw text segment
                 cr.set_source_rgb(*self.text_foreground_color)
                 layout.set_text(text_segment if text_segment else " ", -1)
-                
+
                 # RTL detection
                 rtl = line_is_rtl(text_segment)
-                
+
                 text_w, text_h = layout.get_pixel_size()
                 base_x = self.calculate_text_base_x(rtl, text_w, alloc.width, ln_width, scroll_x)
-                
+
                 cr.move_to(base_x, y)
                 PangoCairo.show_layout(cr, layout)
 
-                # Draw selection
+                # Draw selection (if any)
                 if sel_start_ln != -1:
-                    # Check if this visual line is within selection
-                    # We need to map selection columns to this visual line's columns
-                    
-                    # Logic:
-                    # 1. Determine intersection of [col_start, col_end] with selection
-                    # 2. If intersection exists, draw it
-                    
-                    # Adjust selection range for this line
                     s_col = -1
                     e_col = -1
-                    
+
                     if ln > sel_start_ln and ln < sel_end_ln:
-                        # Fully selected line
+                        # Fully selected logical line
                         s_col = 0
                         e_col = len(text_segment)
                         if vis_idx == len(wrap_points) - 1:
-                             e_col += 1 # Include newline
+                            e_col += 1  # include newline glyph width
                     elif ln == sel_start_ln and ln == sel_end_ln:
-                        # Selection within single line
-                        # Map global cols to local segment cols
-                        # Intersection of [sel_start, sel_end] and [col_start, col_end]
-                        
                         seg_sel_start = max(sel_start_col, col_start)
                         seg_sel_end = min(sel_end_col, col_end)
-                        
                         if seg_sel_start < seg_sel_end:
                             s_col = seg_sel_start - col_start
                             e_col = seg_sel_end - col_start
                     elif ln == sel_start_ln:
-                        # Start line
                         if sel_start_col < col_end:
                             s_col = max(0, sel_start_col - col_start)
                             e_col = len(text_segment)
                             if vis_idx == len(wrap_points) - 1:
                                 e_col += 1
                     elif ln == sel_end_ln:
-                        # End line
                         if sel_end_col > col_start:
                             s_col = 0
                             e_col = min(len(text_segment), sel_end_col - col_start)
 
                     if s_col != -1:
-                        # Draw selection rect
-                        # Convert cols to pixels
                         idx1 = visual_byte_index(text_segment, s_col)
                         idx2 = visual_byte_index(text_segment, e_col)
-                        
+
                         r1_strong, r1_weak = layout.get_cursor_pos(idx1)
                         r2_strong, r2_weak = layout.get_cursor_pos(idx2)
-                        
+
                         x1 = r1_strong.x / Pango.SCALE
                         x2 = r2_strong.x / Pango.SCALE
-                        
+
                         # Handle newline selection
                         if e_col > len(text_segment):
-                             x2 += 5 # Width of newline selection
-                        
+                            x2 += 5
+
                         sel_x = base_x + min(x1, x2)
                         sel_w = abs(x2 - x1)
-                        
-                        cr.set_source_rgba(*self.selection_background_color, 0.3)
+
+                        cr.set_source_rgba(*sel_rgba, 0.3)
                         cr.rectangle(sel_x, y, sel_w, self.line_h)
                         cr.fill()
 
-                # Draw Cursor
+                # Draw cursor if it's on this visual line
                 if ln == buf.cursor_line:
-                    # Check if cursor is on this visual line
                     c_col = buf.cursor_col
-                    
-                    # Cursor is on this line if:
-                    # 1. col_start <= c_col < col_end
-                    # 2. OR c_col == col_end AND this is the last visual line (newline)
-                    # 3. OR c_col == col_end AND next visual line starts at col_end (cursor at wrap point)
-                    #    Standard behavior: cursor stays at end of previous line or start of next?
-                    #    Usually start of next. But if we type, it goes to next.
-                    #    Let's say cursor at wrap point belongs to NEXT line (start of next).
-                    #    EXCEPT if it's the very end of file/line.
-                    
                     is_cursor_here = False
                     cursor_rel_col = 0
-                    
+
                     if col_start <= c_col < col_end:
                         is_cursor_here = True
                         cursor_rel_col = c_col - col_start
                     elif c_col == col_end:
-                        # Cursor at end of segment
                         if vis_idx == len(wrap_points) - 1:
-                            # End of logical line -> cursor is here (after last char)
                             is_cursor_here = True
                             cursor_rel_col = c_col - col_start
                         else:
-                            # Wrap point. Cursor should be on NEXT visual line (start of it)
-                            # So NOT here.
+                            # cursor at wrap boundary -> treat as next visual line
                             pass
-                            
+
                     if is_cursor_here:
                         idx = visual_byte_index(text_segment, cursor_rel_col)
-                        # Use get_cursor_pos for proper RTL handling
                         strong_pos, weak_pos = layout.get_cursor_pos(idx)
                         cx = base_x + (strong_pos.x / Pango.SCALE)
-                        
+
                         # Capture cursor screen position for IME
                         cursor_screen_pos = (cx, y, self.line_h)
-                        
-                        # Draw cursor
-                        if cursor_visible:
-                            # Smooth symmetric pulse: cosine avoids phase jump
-                            # phase: 0..2 → opacity: 1 → 0 → 1
-                            opacity = 0.5 + 0.5 * math.cos(cursor_phase * math.pi)
 
+                        if cursor_visible:
+                            opacity = 0.5 + 0.5 * math.cos(cursor_phase * math.pi)
                             r, g, b = self.text_foreground_color
                             cr.set_source_rgba(r, g, b, opacity)
 
-                            # Slightly thicker for HD clarity
-                            cr.rectangle(cx, y, 1, self.line_h)
+                            # Slightly thicker for clarity on HiDPI
+                            cr.rectangle(cx, y, 1.3, self.line_h)
                             cr.fill()
-
-                        
 
                 y += self.line_h
                 current_vis_count += 1
+                cr.restore()
+
+        # Recompute selection bounds for later usage (keeps parity with original)
         has_selection = buf.selection.has_selection()
         if has_selection:
             sel_start_line, sel_start_col, sel_end_line, sel_end_col = buf.selection.get_bounds()
         else:
             sel_start_line = sel_start_col = sel_end_line = sel_end_col = -1
 
-
         # ============================================================
         # PREEDIT (IME)
         # ============================================================
-        
-        # Only draw preedit if cursor is visible on screen
         if hasattr(buf, "preedit_string") and buf.preedit_string and cursor_screen_pos:
             px, py, ph = cursor_screen_pos
-            
-            # Use the captured cursor position directly
-            # We need to recreate layout for preedit text
+
             pe_l = PangoCairo.create_layout(cr)
-            pe_l.set_font_description(self.renderer.font)
+            pe_l.set_font_description(self.font)
             pe_l.set_auto_dir(True)
             pe_l.set_text(buf.preedit_string, -1)
-            
+
             cr.set_source_rgba(1, 1, 1, 0.7)
             cr.move_to(px, py)
             PangoCairo.show_layout(cr, pe_l)
@@ -4349,12 +4391,11 @@ class Renderer:
             cr.line_to(px + uw, py + ph)
             cr.stroke()
 
-            # Preedit cursor
             if hasattr(buf, "preedit_cursor"):
                 pc = buf.preedit_cursor
 
                 pe_l2 = PangoCairo.create_layout(cr)
-                pe_l2.set_font_description(self.renderer.font)
+                pe_l2.set_font_description(self.font)
                 pe_l2.set_auto_dir(True)
                 pe_l2.set_text(buf.preedit_string, -1)
 
@@ -4367,178 +4408,141 @@ class Renderer:
                 cr.line_to(px + cw, py + ph)
                 cr.stroke()
 
-
         # ============================================================
-        # DRAG-AND-DROP PREVIEW OVERLAY
-        # ============================================================
-        # Draw preview overlay at drop position
+        # DRAG-AND-DROP PREVIEW OVERLAY (unchanged logic)
         if hasattr(buf, '_view') and buf._view:
             view = buf._view
             if view.drag_and_drop_mode and view.drop_position_line >= 0:
                 drop_ln = view.drop_position_line
                 drop_col = view.drop_position_col
-                
-                # Check if drop position is within original selection (no-op)
+
                 drop_in_selection = False
                 if buf.selection.has_selection():
                     bounds = buf.selection.get_bounds()
                     if bounds and bounds[0] is not None:
                         sel_start_line, sel_start_col, sel_end_line, sel_end_col = bounds
-                        
+
                         if sel_start_line == sel_end_line:
-                            # Single line selection
                             if drop_ln == sel_start_line and sel_start_col <= drop_col <= sel_end_col:
                                 drop_in_selection = True
                         else:
-                            # Multi-line selection
                             if drop_ln == sel_start_line and drop_col >= sel_start_col:
                                 drop_in_selection = True
                             elif drop_ln == sel_end_line and drop_col <= sel_end_col:
                                 drop_in_selection = True
                             elif sel_start_line < drop_ln < sel_end_line:
                                 drop_in_selection = True
-                
-                # Draw overlay even if over selection, but skip cursor
+
                 # Calculate drop position accounting for wrapped lines
                 if self.wrap_enabled:
-                    # Need to find visual Y position
                     current_y = 0
                     found = False
-                    
-                    ln = scroll_line
+                    ln2 = scroll_line
                     vis_offset = scroll_visual_offset
-                    
-                    while ln <= drop_ln and current_y < alloc.height:
-                        wrap_points = self.get_wrap_points_for_line(cr, buf, ln, ln_width, alloc.width)
-                        
-                        if ln == drop_ln:
-                            # Find which visual sub-line contains drop_col
-                            for vis_idx, (start_col, end_col) in enumerate(wrap_points):
-                                # Skip lines before scroll_visual_offset
-                                if ln == scroll_line and vis_idx < vis_offset:
+
+                    while ln2 <= drop_ln and current_y < alloc.height:
+                        wrap_points2 = self.get_wrap_points_for_line(cr, buf, ln2, ln_width, alloc.width)
+
+                        if ln2 == drop_ln:
+                            for vis_idx2, (start_col2, end_col2) in enumerate(wrap_points2):
+                                if ln2 == scroll_line and vis_idx2 < vis_offset:
                                     continue
-                                
-                                # Check if drop_col is in this wrap segment
-                                if start_col <= drop_col <= end_col:
+                                if start_col2 <= drop_col <= end_col2:
                                     drop_y = current_y
                                     found = True
                                     break
-                                
-                                # Move to next visual line
                                 current_y += self.line_h
                                 if current_y >= alloc.height:
                                     break
                             break
                         else:
-                            # Count visual lines for this logical line
-                            if ln == scroll_line:
-                                # Start from vis_offset
-                                num_vis = len(wrap_points) - vis_offset
+                            if ln2 == scroll_line:
+                                num_vis2 = len(wrap_points2) - vis_offset
                             else:
-                                num_vis = len(wrap_points)
-                            current_y += num_vis * self.line_h
-                            ln += 1
-                    
+                                num_vis2 = len(wrap_points2)
+                            current_y += num_vis2 * self.line_h
+                            ln2 += 1
+
                     if not found:
-                        # Drop position not visible
                         drop_y = -1
                 else:
                     # No wrapping - simple calculation
-                    if scroll_line <= drop_ln < scroll_line + max_vis:
+                    visible_lines = alloc.height // self.line_h
+                    if scroll_line <= drop_ln < scroll_line + visible_lines:
                         drop_y = (drop_ln - scroll_line) * self.line_h
                     else:
                         drop_y = -1
-                
+
                 if drop_y >= 0:
-                    drop_text = buf.get_line(drop_ln)
-                    
-                    # For wrapped lines, we need to use the correct text segment
+                    drop_text = buf.get_line(drop_ln) or ""
+
                     if self.wrap_enabled:
-                        wrap_points = self.get_wrap_points_for_line(cr, buf, drop_ln, ln_width, alloc.width)
-                        
-                        # Find which wrap segment contains drop_col
+                        wrap_points3 = self.get_wrap_points_for_line(cr, buf, drop_ln, ln_width, alloc.width)
                         segment_start = 0
                         segment_end = len(drop_text)
-                        for start_col, end_col in wrap_points:
-                            if start_col <= drop_col <= end_col:
-                                segment_start = start_col
-                                segment_end = end_col
+                        for start_col3, end_col3 in wrap_points3:
+                            if start_col3 <= drop_col <= end_col3:
+                                segment_start = start_col3
+                                segment_end = end_col3
                                 break
-                        
-                        # Use only the text segment for this wrap
                         segment_text = drop_text[segment_start:segment_end] if drop_text else " "
-                        # Column relative to segment start
                         segment_col = drop_col - segment_start
                     else:
                         segment_text = drop_text if drop_text else " "
                         segment_col = drop_col
-                    
-                    # Calculate drop position
-                    layout = self.create_text_layout(cr, segment_text)
-                    is_rtl = detect_rtl_line(segment_text)
-                    text_w, _ = layout.get_pixel_size()
-                    view_w = alloc.width
-                    base_x = self.calculate_text_base_x(is_rtl, text_w, view_w, ln_width, scroll_x)
-                    
-                    # Get x position for drop column (relative to segment)
+
+                    layout2 = self.create_text_layout(cr, segment_text)
+                    is_rtl = line_is_rtl(segment_text)
+                    text_w2, _ = layout2.get_pixel_size()
+                    base_x2 = self.calculate_text_base_x(is_rtl, text_w2, alloc.width, ln_width, scroll_x)
+
                     drop_byte_idx = visual_byte_index(segment_text, min(segment_col, len(segment_text)))
-                    strong_pos, _ = layout.get_cursor_pos(drop_byte_idx)
-                    drop_x = base_x + (strong_pos.x // Pango.SCALE)
-                    
-                    # Determine colors based on copy (Ctrl) vs move mode
+                    strong_pos2, _ = layout2.get_cursor_pos(drop_byte_idx)
+                    drop_x = base_x2 + (strong_pos2.x // Pango.SCALE)
+
                     is_copy = view.ctrl_pressed_during_drag
                     if is_copy:
-                        # Green for copy
                         cursor_color = (0.0, 1.0, 0.3, 0.9)
-                        bg_color = (0.0, 0.8, 0.3, 1.0)  # Opaque green background
+                        bg_color = (0.0, 0.8, 0.3, 1.0)
                         border_color = (0.0, 1.0, 0.3, 1.0)
                     else:
-                        # Orange for move
                         cursor_color = (1.0, 0.6, 0.0, 0.9)
-                        bg_color = (1.0, 0.5, 0.0, 1.0)  # Opaque orange background
+                        bg_color = (1.0, 0.5, 0.0, 1.0)
                         border_color = (1.0, 0.6, 0.0, 1.0)
-                    
-                    # Draw cursor at drop position ONLY if not over selection
+
                     if not drop_in_selection:
                         cr.set_source_rgba(*cursor_color)
                         cr.set_line_width(2)
                         cr.move_to(drop_x, drop_y)
                         cr.line_to(drop_x, drop_y + self.line_h)
                         cr.stroke()
-                    
-                    # Draw viewport border (1 pixel) - always show
+
                     cr.set_source_rgba(*border_color)
                     cr.set_line_width(1)
                     cr.rectangle(0, 0, alloc.width, alloc.height)
                     cr.stroke()
-                    
-                    # Draw the dragged text as overlay with background (no border) - always show
+
                     dragged_text = view.dragged_text
                     if dragged_text:
-                        # Check if multi-line selection
                         is_multiline = '\n' in dragged_text
-                        
-                        # Create layout for dragged text
                         overlay_layout = self.create_text_layout(cr, dragged_text)
                         overlay_w, overlay_h = overlay_layout.get_pixel_size()
-                        
-                        # Offset the overlay below the cursor so pointer is above it
-                        vertical_offset = 20  # Pixels below the cursor
+
+                        vertical_offset = 20
                         drop_y_offset = drop_y + vertical_offset
-                        
-                        # Draw background only for single-line selections
+
                         if not is_multiline:
                             padding = 4
                             cr.set_source_rgba(*bg_color)
-                            cr.rectangle(drop_x - padding, drop_y_offset - padding, 
-                                       overlay_w + 2*padding, self.line_h + 2*padding)
+                            cr.rectangle(drop_x - padding, drop_y_offset - padding,
+                                         overlay_w + 2*padding, self.line_h + 2*padding)
                             cr.fill()
-                        
-                        # Draw the text with transparency
-                        r, g, b = self.text_foreground_color
-                        cr.set_source_rgba(r, g, b, 0.7)  # 70% opacity
+
+                        rr, gg, bb = self.text_foreground_color
+                        cr.set_source_rgba(rr, gg, bb, 0.7)
                         cr.move_to(drop_x, drop_y_offset)
                         PangoCairo.show_layout(cr, overlay_layout)
+
 
 
 # ============================================================
@@ -7742,7 +7746,8 @@ class EditorWindow(Adw.ApplicationWindow):
         btn_new.set_tooltip_text("New Tab (Ctrl+T)")
         btn_new.connect("clicked", self.on_new_tab)
         self.header.pack_start(btn_new)
-        
+        self.add_css_class("view")
+
         # Add menu button
         menu_button = Gtk.MenuButton()
         menu_button.set_icon_name("open-menu-symbolic")
@@ -7753,7 +7758,7 @@ class EditorWindow(Adw.ApplicationWindow):
         # Tab dropdown button (for file list)
         self.tab_dropdown = Gtk.MenuButton()
         self.tab_dropdown.set_icon_name("pan-down-symbolic")
-        self.tab_dropdown.add_css_class("flat")
+
         self.header.pack_end(self.tab_dropdown)
         
         
@@ -8023,12 +8028,12 @@ class EditorWindow(Adw.ApplicationWindow):
         corner = Gtk.Box()
         corner.set_size_request(12, 12)
         grid.attach(corner, 1, 1, 1, 1)
-        grid.set_css_classes(["editor-surface"])
-        
+        self.tab_dropdown.add_css_class("flat")
         # Store editor reference in grid
         grid._editor = editor
         
         page = self.tab_view.append(grid)
+
         page.set_title(editor.get_title())
         self.tab_view.set_selected_page(page)
         
