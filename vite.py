@@ -18,11 +18,11 @@ CSS_OVERLAY_SCROLLBAR = """
 
 /* General scrollbar styling - catches all scrollbars */
 scrollbar {{
-    background-color: {bg_color};
+    background-color: transparent;
 }}
 
 scrollbar trough {{
-    background-color: {bg_color};
+    background-color: transparent;
     border-radius: 0px;
 }}
 
@@ -31,57 +31,57 @@ scrollbar trough {{
 }}
 /* Vertical scrollbar specific */
 .overlay-scrollbar {{
-    background-color: {bg_color};
-    min-width: 8px;
+    background-color: transparent;
+    min-width: 3px;
 }}
 
 .overlay-scrollbar trough {{
     border-radius: 0px;
-    background-color: {bg_color};
+    background-color: transparent   ;
 }}
 
 .overlay-scrollbar trough > slider {{
-    min-width: 8px;
+    min-width: 3px;
     border-radius: 12px;
     background-color: alpha(@window_fg_color, 0.2);
     transition: min-width 200ms ease, background-color 200ms ease;
 }}
 
 .overlay-scrollbar trough > slider:hover {{
-    min-width: 8px;
+    min-width: 7px;
     background-color: alpha(@window_fg_color, 0.50);
 }}
 
 .overlay-scrollbar trough > slider:active {{
-    min-width: 8px;
+    min-width: 7px;
     background-color: rgba(53,132,228,1.0);
 }}
 
 /* Horizontal scrollbar specific */
 .hscrollbar-overlay {{
-    background-color: {bg_color};
-    min-width: 8px;
+    background-color: transparent;
+    min-width: 3px;
 }}
 
 .hscrollbar-overlay trough {{
     border-radius: 0px;
-    background-color: {bg_color};
+    background-color: transparent;
 }}
 
 .hscrollbar-overlay trough > slider {{
-    min-height: 8px;
+    min-height: 3px;
     border-radius: 12px;
     transition: min-height 200ms ease, background-color 200ms ease;
     background-color: alpha(@window_fg_color, 0.2);
 }}
 
 .hscrollbar-overlay trough > slider:hover {{
-    min-height: 8px;
+    min-height: 7px;
     background-color: alpha(@window_fg_color, 0.50);
 }}
 
 .hscrollbar-overlay trough > slider:active {{
-    min-height: 8px;
+    min-height: 7px;
     background-color: rgba(53,132,228,1.0);
 }}
 
@@ -4244,32 +4244,23 @@ class Renderer:
 
                 # ---- GUTTER: themed, opaque, no bleed-through ----
                 if getattr(self, "show_line_numbers", True):
-                    # Use cached background color
+                    # Use cached background color for line number area
                     r, g, b, a = self.editor_background_color
 
-                    # Active line shading - use foreground color with 10% alpha
-                    if ln == buf.cursor_line:
-                        r_fg, g_fg, b_fg = self.text_foreground_color
-                        r2, g2, b2 = r_fg, g_fg, b_fg
-                        alpha = 0.05
-                    else:
-                        r2, g2, b2 = r, g, b
-                        alpha = a
-
                     cr.save()
-                    cr.set_source_rgba(r2, g2, b2, alpha)
+                    cr.set_source_rgba(r, g, b, a)
                     cr.rectangle(0, y, ln_width, self.line_h)
                     cr.fill()
                     cr.restore()
 
                 # Draw current line highlight (extends from line number to viewport)
-                # Use foreground color with 10% alpha (matches line number background)
+                # Use foreground color with 5% alpha
                 if ln == buf.cursor_line:
                     r_fg, g_fg, b_fg = self.text_foreground_color
                     
                     cr.save()
                     cr.set_source_rgba(r_fg, g_fg, b_fg, 0.05)
-                    cr.rectangle(ln_width, y, alloc.width - ln_width, self.line_h)
+                    cr.rectangle(0, y, alloc.width, self.line_h)
                     cr.fill()
                     cr.restore()
 
@@ -4284,13 +4275,20 @@ class Renderer:
                     cr.set_source_rgb(*ln_fg)
                     if vis_idx == 0:
                         ln_text = str(ln + 1)
+                        # Make current line number bold
+                        if ln == buf.cursor_line:
+                            layout.set_markup(f"<b>{ln_text}</b>", -1)
+                        else:
+                            layout.set_text(ln_text, -1)
                     else:
                         ln_text = "⤷"
-                    layout.set_text(ln_text, -1)
+                        layout.set_text(ln_text, -1)
                     layout.set_width(-1)
                     w, h = layout.get_pixel_size()
                     cr.move_to(ln_width - w - 4, y)
                     PangoCairo.show_layout(cr, layout)
+                    # Clear markup to prevent it from affecting subsequent text
+                    layout.set_attributes(None)
 
                 # Prevent text from ever drawing inside gutter (clip to text area)
                 cr.save()
@@ -8114,11 +8112,9 @@ class EditorWindow(Adw.ApplicationWindow):
             editor = EditorPage(untitled_title)
         # ----- END PATCH -----
         
-        # Create grid layout for editor
-        grid = Gtk.Grid()
-        grid.set_column_spacing(0)
-        grid.set_row_spacing(0)
-        grid.add_css_class("overlay-scrollbar")
+        # Create overlay layout for editor (scrollbars float on top)
+        overlay = Gtk.Overlay()
+        overlay.add_css_class("overlay-scrollbar")
 
         # Setup scrollbars
         vscroll = Gtk.Scrollbar(
@@ -8150,23 +8146,22 @@ class EditorWindow(Adw.ApplicationWindow):
         # Connect buffer changed
         editor.buf.connect("changed", lambda *_: self.on_buffer_changed(editor))
 
-        # Layout grid
-        grid.attach(editor.view, 0, 0, 1, 1)
-        vscroll.set_hexpand(False)
-        vscroll.set_vexpand(True)
-        grid.attach(vscroll, 1, 0, 1, 1)
-        hscroll.set_hexpand(True)
-        hscroll.set_vexpand(False)
-        grid.attach(hscroll, 0, 1, 1, 1)
-
-        corner = Gtk.Box()
-        corner.set_size_request(12, 12)
-        grid.attach(corner, 1, 1, 1, 1)
+        # Set up overlay: editor as base, scrollbars on top
+        overlay.set_child(editor.view)
+        
+        # Position scrollbars at edges using halign/valign
+        vscroll.set_halign(Gtk.Align.END)
+        vscroll.set_valign(Gtk.Align.FILL)
+        overlay.add_overlay(vscroll)
+        
+        hscroll.set_halign(Gtk.Align.FILL)
+        hscroll.set_valign(Gtk.Align.END)
+        overlay.add_overlay(hscroll)
 
         self.tab_dropdown.add_css_class("flat")
-        grid._editor = editor
+        overlay._editor = editor
 
-        page = self.tab_view.append(grid)
+        page = self.tab_view.append(overlay)
         page.set_title(editor.get_title())
         self.tab_view.set_selected_page(page)
 
