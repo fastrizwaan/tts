@@ -7191,7 +7191,7 @@ class ChromeTab(Gtk.Box):
         'activate-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
    
-    def __init__(self, title="Untitled", closeable=True):
+    def __init__(self, title="Untitled 1", closeable=True):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         self.set_hexpand(False)
         self.set_halign(Gtk.Align.START)
@@ -7608,7 +7608,7 @@ class ChromeTabBar(Adw.WrapBox):
 
 class EditorPage:
     """A single editor page containing buffer and view"""
-    def __init__(self, untitled_title="Untitled"):
+    def __init__(self, untitled_title="Untitled 1"):
         self.buf = VirtualBuffer()
         self.view = VirtualTextView(self.buf)
         self.current_encoding = "utf-8"
@@ -7619,6 +7619,10 @@ class EditorPage:
         if self.current_file_path:
             return os.path.basename(self.current_file_path)
         return self.untitled_title
+        
+    def set_title(self, title):
+        """Update the untitled title"""
+        self.untitled_title = title
 
 class RecentFilesManager:
     """Manages recently opened/saved files list"""
@@ -7734,7 +7738,7 @@ class SaveChangesDialog(Adw.AlertDialog):
                     filename = os.path.basename(editor.current_file_path)
                     filepath = editor.current_file_path
                 else:
-                    filename = "Untitled (new)"
+                    filename = editor.get_title()
                     filepath = "~/Documents"
                 
                 name_label = Gtk.Label(label=filename)
@@ -8072,7 +8076,7 @@ class EditorWindow(Adw.ApplicationWindow):
                 # This is an Untitled tab
                 title = editor.get_title()
                 if title == "Untitled":
-                    existing_numbers.append(0)  # Plain "Untitled" counts as 0
+                    existing_numbers.append(1)  # Treat legacy "Untitled" as 1 to avoid collision
                 elif title.startswith("Untitled "):
                     try:
                         num = int(title.split(" ")[1])
@@ -8080,15 +8084,11 @@ class EditorWindow(Adw.ApplicationWindow):
                     except (IndexError, ValueError):
                         pass
         
-        # If no Untitled tabs exist, start with "Untitled" (no number)
+        # If no Untitled tabs exist, start with "Untitled 1"
         if not existing_numbers:
-            return 0
-        
-        # If only plain "Untitled" exists, next should be "Untitled 1"
-        if existing_numbers == [0]:
             return 1
-        
-        # Otherwise, find the next available number starting from 1
+            
+        # Find the next available number
         next_num = 1
         while next_num in existing_numbers:
             next_num += 1
@@ -8103,13 +8103,17 @@ class EditorWindow(Adw.ApplicationWindow):
             editor = EditorPage(filename)
             editor.current_file_path = path
         else:
-            # Normal Untitled logic unchanged
-            untitled_num = self.get_next_untitled_number()
-            if untitled_num == 0:
-                untitled_title = "Untitled"
+            # Normal Untitled logic
+            if self.tab_view.get_n_pages() == 0:
+                # First tab and empty -> "Untitled 1"
+                untitled_title = "Untitled 1"
+                editor = EditorPage(untitled_title)
+                editor.is_initial_empty_tab = True
             else:
+                # New tab -> "Untitled N"
+                untitled_num = self.get_next_untitled_number()
                 untitled_title = f"Untitled {untitled_num}"
-            editor = EditorPage(untitled_title)
+                editor = EditorPage(untitled_title)
         # ----- END PATCH -----
         
         # Create overlay layout for editor (scrollbars float on top)
@@ -8309,10 +8313,24 @@ class EditorWindow(Adw.ApplicationWindow):
     
     def perform_close_tab(self, page):
         """Actually remove the tab from the view"""
-        # Don't close the last tab - instead create a new empty one
+        # If this is the last tab, close it and create a fresh new Untitled 1 tab
         if self.tab_view.get_n_pages() <= 1:
-            # Create a new empty tab first
+            # Remove from ChromeTabBar
+            for tab in self.tab_bar.tabs:
+                if hasattr(tab, '_page') and tab._page == page:
+                    self.tab_bar.remove_tab(tab)
+                    break
+            
+            # Remove from TabView
+            self.tab_view.close_page(page)
+            
+            # Create a fresh new Untitled 1 tab (like on app start)
             self.add_tab()
+            
+            # Update UI
+            self.update_ui_state()
+            self.update_tab_dropdown()
+            return
         
         # Remove from ChromeTabBar first (before closing the page)
         for tab in self.tab_bar.tabs:
@@ -8399,21 +8417,31 @@ class EditorWindow(Adw.ApplicationWindow):
 
             self.header_title_label.set_text(filename)
             self.header_subtitle_label.set_text(short_parent)
-
-            self.header_subtitle_label.set_halign(Gtk.Align.CENTER)
-            self.header_title_label.set_halign(Gtk.Align.CENTER)
+            self.header_subtitle_label.set_visible(True)
+            
+            # Window title: "filename - Virtual Text Editor"
+            self.set_title(f"{filename} - Virtual Text Editor")
+            
         else:
-            self.header_title_label.set_halign(Gtk.Align.CENTER)
-            self.header_title_label.set_valign(Gtk.Align.CENTER)
+            # Untitled file
             self.title_box.set_halign(Gtk.Align.CENTER)
-            self.title_box.set_valign(Gtk.Align.CENTER)             
+            self.title_box.set_valign(Gtk.Align.CENTER)
+            
             title = editor.get_title()
-            full_title = f"{title} - Virtual Text Editor"
-            self.header_title_label.set_text(full_title)
-            self.header_subtitle_label.set_text("")
-            self.header_subtitle_label.set_halign(Gtk.Align.CENTER)
-            self.header_title_label.set_halign(Gtk.Align.CENTER)
-
+            
+            # Special case: if only one tab exists, it's "Untitled 1", and it's not modified,
+            # show "Virtual Text Editor" in the header
+            if (self.tab_view.get_n_pages() == 1 and 
+                title == "Untitled 1" and 
+                not is_modified):
+                self.header_title_label.set_text("Virtual Text Editor")
+                self.set_title("Virtual Text Editor")
+            else:
+                # Show the actual title (Untitled 1, Untitled 2, etc.) when modified or multiple tabs
+                self.header_title_label.set_text(title)
+                self.set_title(f"{title} - Virtual Text Editor")
+            
+            self.header_subtitle_label.set_visible(False)
             
         # NEW: auto-hide subtitle when empty
         if not self.header_subtitle_label.get_text():
@@ -8704,6 +8732,12 @@ class EditorWindow(Adw.ApplicationWindow):
         print(f"Encoding changed to: {encoding} (will be used for next save)")
 
     def on_buffer_changed(self, editor):
+        # Check if this is the initial empty tab being modified
+        if getattr(editor, "is_initial_empty_tab", False):
+            editor.is_initial_empty_tab = False
+            # The initial tab is already named "Untitled 1", just update the header
+            self.update_header_title()
+
         editor.view.queue_draw()
 
         width = editor.view.get_width()
