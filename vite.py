@@ -11,6 +11,9 @@ gi.require_version("Gdk", "4.0")
 
 from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo, GLib, Gio
 
+# Global variable to track dragged tab for drag and drop
+DRAGGED_TAB = None
+
 CSS_OVERLAY_SCROLLBAR = """
 /* ========================
    Scrollbars
@@ -7518,8 +7521,56 @@ class ChromeTabBar(Adw.WrapBox):
                 self._hide_pair(i)
     
     def _calculate_drop_position(self, x, y):
-        """Calculate the drop position based on mouse coordinates"""
+        """Calculate the drop position based on mouse X and Y coordinates"""
+        # Group tabs by row
+        rows = {}
         for i, tab in enumerate(self.tabs):
+            success, bounds = tab.compute_bounds(self)
+            if not success:
+                continue
+                
+            # Use the middle Y of the tab to identify the row
+            mid_y = bounds.origin.y + bounds.size.height / 2
+            
+            # Find matching row (simple clustering)
+            found_row = False
+            for row_y in rows:
+                if abs(row_y - mid_y) < bounds.size.height / 2:
+                    rows[row_y].append((i, tab))
+                    found_row = True
+                    break
+            if not found_row:
+                rows[mid_y] = [(i, tab)]
+        
+        # Sort rows by Y coordinate
+        sorted_row_ys = sorted(rows.keys())
+        
+        # Find which row the mouse is in
+        target_row_y = None
+        for row_y in sorted_row_ys:
+            # Check if Y is within this row's vertical bounds (approx)
+            # We assume standard height for all tabs
+            if abs(y - row_y) < 20: # 20 is roughly half height
+                target_row_y = row_y
+                break
+        
+        # If no row matched, check if we are below the last row
+        if target_row_y is None:
+            if not sorted_row_ys:
+                return len(self.tabs)
+            if y > sorted_row_ys[-1] + 20:
+                return len(self.tabs)
+            # If above first row, return 0
+            if y < sorted_row_ys[0] - 20:
+                return 0
+            # If between rows, find the closest one
+            closest_y = min(sorted_row_ys, key=lambda ry: abs(y - ry))
+            target_row_y = closest_y
+
+        # Now find position within the target row
+        row_tabs = rows[target_row_y]
+        
+        for i, tab in row_tabs:
             success, bounds = tab.compute_bounds(self)
             if not success:
                 continue
@@ -7529,7 +7580,9 @@ class ChromeTabBar(Adw.WrapBox):
             if x < tab_center:
                 return i
         
-        return len(self.tabs)
+        # If past the last tab in this row, return index after the last tab in this row
+        last_idx_in_row = row_tabs[-1][0]
+        return last_idx_in_row + 1
     
     def _show_drop_indicator(self, position):
         """Show the drop indicator line at the specified position"""
