@@ -4293,8 +4293,9 @@ class Renderer:
                             
                     if is_cursor_here:
                         idx = visual_byte_index(text_segment, cursor_rel_col)
-                        pos = layout.index_to_pos(idx)
-                        cx = base_x + (pos.x / Pango.SCALE)
+                        # Use get_cursor_pos for proper RTL handling
+                        strong_pos, weak_pos = layout.get_cursor_pos(idx)
+                        cx = base_x + (strong_pos.x / Pango.SCALE)
                         
                         # Capture cursor screen position for IME
                         cursor_screen_pos = (cx, y, self.line_h)
@@ -4302,7 +4303,7 @@ class Renderer:
                         # Draw cursor
                         if cursor_visible:
                             cr.set_source_rgba(*self.text_foreground_color, 0.8 * (math.sin(cursor_phase * 2 * math.pi) * 0.5 + 0.5))
-                            cr.rectangle(cx, y, 2, self.line_h)
+                            cr.rectangle(cx, y, 1.2, self.line_h)
                             cr.fill()
                         
 
@@ -5064,7 +5065,7 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def start_cursor_blink(self):
         # Always start blinking from fully visible
-        self.cursor_phase = 0.0
+        self.cursor_phase = 0.25
 
         def blink():
             self.cursor_phase += self.cursor_fade_speed
@@ -5086,7 +5087,7 @@ class VirtualTextView(Gtk.DrawingArea):
             self.cursor_blink_timeout = None
 
         self.cursor_visible = True
-        self.cursor_phase = 0.0   # NOT 1.0
+        self.cursor_phase = 0.25   # peak of sine wave = full opacity
         self.queue_draw()
 
 
@@ -5102,7 +5103,7 @@ class VirtualTextView(Gtk.DrawingArea):
 
             # While typing → cursor MUST be solid
             self.cursor_visible = True
-            self.cursor_phase = 0.0     # brightest point of fade
+            self.cursor_phase = 0.25    # peak of sine wave = full opacity
 
             # Stop any blinking while typing
             self.stop_cursor_blink()
