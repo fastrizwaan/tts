@@ -4302,9 +4302,17 @@ class Renderer:
                         
                         # Draw cursor
                         if cursor_visible:
-                            cr.set_source_rgba(*self.text_foreground_color, 0.8 * (math.sin(cursor_phase * 2 * math.pi) * 0.5 + 0.5))
-                            cr.rectangle(cx, y, 1.2, self.line_h)
+                            # Smooth symmetric pulse: cosine avoids phase jump
+                            # phase: 0..2 → opacity: 1 → 0 → 1
+                            opacity = 0.5 + 0.5 * math.cos(cursor_phase * math.pi)
+
+                            r, g, b = self.text_foreground_color
+                            cr.set_source_rgba(r, g, b, opacity)
+
+                            # Slightly thicker for HD clarity
+                            cr.rectangle(cx, y, 1, self.line_h)
                             cr.fill()
+
                         
 
                 y += self.line_h
@@ -5064,31 +5072,44 @@ class VirtualTextView(Gtk.DrawingArea):
 
 
     def start_cursor_blink(self):
-        # Always start blinking from fully visible
-        self.cursor_phase = 0.25
+        """Start smooth cursor blinking with lightweight animation."""
+        # Cursor appears fully visible at the start
+        self.cursor_visible = True
+        self.cursor_phase = 0.0
 
-        def blink():
+        FPS = 60
+        INTERVAL = int(1000 / FPS)
+
+        def tick():
+            # Phase runs 0 → 2.0 continuously
             self.cursor_phase += self.cursor_fade_speed
             if self.cursor_phase >= 2.0:
                 self.cursor_phase -= 2.0
 
+            # Redraw cursor area (cheap)
             self.queue_draw()
             return True
 
         if self.cursor_blink_timeout:
             GLib.source_remove(self.cursor_blink_timeout)
 
-        self.cursor_blink_timeout = GLib.timeout_add(20, blink)
+        self.cursor_blink_timeout = GLib.timeout_add(INTERVAL, tick)
+
+
 
 
     def stop_cursor_blink(self):
+        """Immediately stop blinking and show cursor solid."""
         if self.cursor_blink_timeout:
             GLib.source_remove(self.cursor_blink_timeout)
             self.cursor_blink_timeout = None
 
+        # Solid cursor
         self.cursor_visible = True
-        self.cursor_phase = 0.25   # peak of sine wave = full opacity
+        self.cursor_phase = 0.0
+
         self.queue_draw()
+
 
 
 
@@ -5117,10 +5138,20 @@ class VirtualTextView(Gtk.DrawingArea):
 
 
     def restart_blink_after_idle(self):
+        """Restart cursor blinking only once after user stops typing."""
+        # Cancel any previously scheduled idle restart
+        if hasattr(self, "_idle_blink_timeout") and self._idle_blink_timeout:
+            GLib.source_remove(self._idle_blink_timeout)
+            self._idle_blink_timeout = None
+
         def idle_blink():
+            self._idle_blink_timeout = None
             self.start_cursor_blink()
             return False  # one-shot
-        GLib.timeout_add(700, idle_blink)  # restart after 700ms idle
+
+        # Schedule a new one
+        self._idle_blink_timeout = GLib.timeout_add(700, idle_blink)
+
 
 
 
