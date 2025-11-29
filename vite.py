@@ -106,11 +106,41 @@ scrollbar trough {{
 
     min-height: 24px;
     background: transparent;
-    color: @window_fg_color;
+    color: alpha(@window_fg_color, 0.7);
     min-height: 24px;
     border-radius: 8px;
 
     transition: background 140ms ease, color 140ms ease;
+}}
+.title-label {{
+    font-weight: 600; /* same weight Adw.WindowTitle uses */
+    font-size: 1rem;  /* optional: matches header title sizing */
+}}
+
+.subtitle-label {{
+    font-size: 0.85rem;
+    opacity: 0.7;
+}}
+.header-modified-dot{{
+    min-width: 8px;
+    min-height: 8px;
+
+    background-color: alpha(@window_fg_color, 0.7);
+    border-radius: 4px;
+
+    margin-top: 5px;   /* vertically center inside tab */
+    margin-bottom: 5px;
+}}
+
+.modified-dot {{
+    min-width: 8px;
+    min-height: 8px;
+
+    background-color: alpha(@window_fg_color, 0.7);
+    border-radius: 4px;
+
+    margin-top: 10px;   /* vertically center inside tab */
+    margin-bottom: 10px;
 }}
 
 .chrome-tab label {{
@@ -7158,10 +7188,22 @@ class ChromeTab(Gtk.Box):
         self.set_halign(Gtk.Align.START)
         self.add_css_class("chrome-tab")
        
-        # Create overlay for label and close button
         overlay = Gtk.Overlay()
 
-        # Title label (uses full width)
+        # =====================================================
+        # ADDED: real Adwaita-style modified dot
+        # =====================================================
+        dot_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        dot_box.set_hexpand(True)
+
+        self.modified_dot = Gtk.DrawingArea()
+        self.modified_dot.set_size_request(8, 8)
+        self.modified_dot.add_css_class("modified-dot")
+        self.modified_dot.set_visible(False)  # hidden by default
+        dot_box.append(self.modified_dot)
+        # =====================================================
+
+        # Title label
         self.label = Gtk.Label()
         self.label.set_text(title)
         self.label.set_margin_end(28)
@@ -7169,18 +7211,21 @@ class ChromeTab(Gtk.Box):
         self.label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.label.set_single_line_mode(True)
         self.label.set_hexpand(True)
-        self.label.set_halign(Gtk.Align.CENTER)
-        
-        # Wrapper button for the tab content (handles clicks and prevents window drag)
+        self.label.set_halign(Gtk.Align.START)
+
+        # put label next to dot
+        dot_box.append(self.label)
+
+        # Button wrapper
         self.tab_button = Gtk.Button()
         self.tab_button.add_css_class("flat")
-        self.tab_button.set_child(self.label)
+        self.tab_button.set_child(dot_box)  # PATCH: stack with dot
         self.tab_button.set_hexpand(True)
         self.tab_button.set_vexpand(True)
         
         overlay.set_child(self.tab_button)
         
-        # Close button (overlaid on top right)
+        # Close button overlay
         if closeable:
             self.close_button = Gtk.Button()
             self.close_button.set_icon_name("window-close-symbolic")
@@ -7189,7 +7234,6 @@ class ChromeTab(Gtk.Box):
             self.close_button.set_size_request(24, 24)
             self.close_button.set_halign(Gtk.Align.END)
             self.close_button.set_valign(Gtk.Align.CENTER)
-            #self.close_button.set_margin_start(0)
             self.close_button.connect('clicked', self._on_close_clicked)
             overlay.add_overlay(self.close_button)
        
@@ -7197,9 +7241,9 @@ class ChromeTab(Gtk.Box):
        
         self._is_active = False
         self._original_title = title
-        self.tab_bar = None  # Will be set by ChromeTabBar
+        self.tab_bar = None  # Set by ChromeTabBar
         
-        # Setup drag source on the button
+        # Dragging setup
         drag_source = Gtk.DragSource()
         drag_source.set_actions(Gdk.DragAction.MOVE)
         drag_source.connect('prepare', self._on_drag_prepare)
@@ -7207,11 +7251,19 @@ class ChromeTab(Gtk.Box):
         drag_source.connect('drag-end', self._on_drag_end)
         self.tab_button.add_controller(drag_source)
         
-        # Explicitly claim clicks to prevent window dragging
+        # Explicitly claim clicks
         click_gesture = Gtk.GestureClick()
         click_gesture.connect('pressed', self._on_tab_pressed)
         click_gesture.connect('released', self._on_tab_released)
         self.tab_button.add_controller(click_gesture)
+
+    # ==========================================================
+    # PATCH: new method to toggle dot visibility (replaces label hacks)
+    # ==========================================================
+    def set_modified(self, modified: bool):
+        self.modified_dot.set_visible(modified)
+        self.queue_draw()
+
        
     def _on_tab_pressed(self, gesture, n_press, x, y):
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)
@@ -7232,11 +7284,14 @@ class ChromeTab(Gtk.Box):
         return self._original_title
     
     def update_label(self):
-        """Update label text based on modified state"""
+        """Show the real Adwaita-style modified dot."""
         if self.has_css_class("modified"):
-            self.label.set_text(f" ⃰{self._original_title}")
+            self.modified_dot.set_visible(True)
         else:
-            self.label.set_text(self._original_title)
+            self.modified_dot.set_visible(False)
+
+        self.label.set_text(self._original_title)
+
        
     def set_active(self, active):
         self._is_active = active
@@ -7710,15 +7765,59 @@ class EditorWindow(Adw.ApplicationWindow):
         toolbar_view.add_css_class("toolbarview")
         # Header Bar
         self.header = Adw.HeaderBar()
+        self.header.set_margin_top(0)
+        self.header.set_margin_bottom(0)
         self.window_title = Adw.WindowTitle(title="Virtual Text Editor", subtitle="")
-        self.header.set_title_widget(self.window_title)
+        # --- Custom title box (dot + title label) ---
+        # --- Custom Title Widget (dot + title + subtitle) ---
+
+        # Main title box (vertical)
+        self.title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        # Row: dot + title
+        self.title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        
+        self.header_modified_dot = Gtk.DrawingArea()
+        self.header_modified_dot.set_size_request(8, 8)
+        self.header_modified_dot.add_css_class("header-modified-dot")
+        self.header_modified_dot.set_visible(False)
+
+        self.title_box.set_halign(Gtk.Align.CENTER)
+        self.title_row.set_halign(Gtk.Align.CENTER)
+        
+        self.header_title_label = Gtk.Label()
+        self.header_title_label.set_single_line_mode(True)
+        self.header_title_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.header_title_label.add_css_class("title-label")
+        self.header_title_label.set_halign(Gtk.Align.CENTER)
+        self.header_title_label.set_valign(Gtk.Align.CENTER)
+
+        self.title_row.append(self.header_modified_dot)
+        self.title_row.append(self.header_title_label)
+
+        # Subtitle label (full file path)
+        self.header_subtitle_label = Gtk.Label()
+        self.header_subtitle_label.set_single_line_mode(True)
+        self.header_subtitle_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.header_subtitle_label.add_css_class("subtitle-label")
+        self.header_subtitle_label.set_halign(Gtk.Align.CENTER)
+
+        # Build the vertical title-box
+        self.title_box.append(self.title_row)
+        self.title_box.append(self.header_subtitle_label)
+        self.header_subtitle_label.set_visible(False)
+        
+        # Set the full custom widget as the headerbar title
+        self.header.set_title_widget(self.title_box)
+
+        #self.header.set_title_widget(self.window_title)
         toolbar_view.add_top_bar(self.header)
 
         # Container for linked buttons
         open_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         open_box.add_css_class("linked")            # <- This merges the buttons visually
         open_box.set_margin_start(2)
-        open_box.set_margin_top(1) 
+        open_box.set_margin_top(2) 
         # Left "Open" button
         self.open_button = Gtk.Button(label="Open")
         self.open_button.connect("clicked", self.open_file)
@@ -7988,45 +8087,58 @@ class EditorWindow(Adw.ApplicationWindow):
         return next_num
     
     def add_tab(self, path=None):
-        # Get the next available Untitled number if not loading a file
-        if not path:
+        # ----- PATCH: correct initial title when loading a file -----
+        if path:
+            # Use the real filename immediately → prevents "Untitled" flash
+            filename = os.path.basename(path)
+            editor = EditorPage(filename)
+            editor.current_file_path = path
+        else:
+            # Normal Untitled logic unchanged
             untitled_num = self.get_next_untitled_number()
             if untitled_num == 0:
                 untitled_title = "Untitled"
             else:
                 untitled_title = f"Untitled {untitled_num}"
-        else:
-            untitled_title = "Untitled"  # Won't be used if path is provided
-        
-        editor = EditorPage(untitled_title)
+            editor = EditorPage(untitled_title)
+        # ----- END PATCH -----
         
         # Create grid layout for editor
         grid = Gtk.Grid()
         grid.set_column_spacing(0)
         grid.set_row_spacing(0)
         grid.add_css_class("overlay-scrollbar")
+
         # Setup scrollbars
-        vscroll = Gtk.Scrollbar(orientation=Gtk.Orientation.VERTICAL, adjustment=editor.view.vadj)
-        hscroll = Gtk.Scrollbar(orientation=Gtk.Orientation.HORIZONTAL, adjustment=editor.view.hadj)
-        
+        vscroll = Gtk.Scrollbar(
+            orientation=Gtk.Orientation.VERTICAL,
+            adjustment=editor.view.vadj
+        )
+        hscroll = Gtk.Scrollbar(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            adjustment=editor.view.hadj
+        )
+
         vscroll.add_css_class("overlay-scrollbar")
         hscroll.add_css_class("hscrollbar-overlay")
         vscroll.set_visible(False)
         hscroll.set_visible(False)
-        
+
         # Add drag detection to vertical scrollbar
         drag_gesture = Gtk.GestureDrag()
-        drag_gesture.connect("drag-begin", lambda g, x, y: self.on_vscroll_drag_begin(g, x, y, editor))
-        drag_gesture.connect("drag-end", lambda g, x, y: self.on_vscroll_drag_end(g, x, y, editor))
+        drag_gesture.connect("drag-begin",
+                             lambda g, x, y: self.on_vscroll_drag_begin(g, x, y, editor))
+        drag_gesture.connect("drag-end",
+                             lambda g, x, y: self.on_vscroll_drag_end(g, x, y, editor))
         vscroll.add_controller(drag_gesture)
-        
+
         # Give view references to scrollbars
         editor.view.vscroll = vscroll
         editor.view.hscroll = hscroll
-        
+
         # Connect buffer changed
         editor.buf.connect("changed", lambda *_: self.on_buffer_changed(editor))
-        
+
         # Layout grid
         grid.attach(editor.view, 0, 0, 1, 1)
         vscroll.set_hexpand(False)
@@ -8035,32 +8147,33 @@ class EditorWindow(Adw.ApplicationWindow):
         hscroll.set_hexpand(True)
         hscroll.set_vexpand(False)
         grid.attach(hscroll, 0, 1, 1, 1)
+
         corner = Gtk.Box()
         corner.set_size_request(12, 12)
         grid.attach(corner, 1, 1, 1, 1)
-        self.tab_dropdown.add_css_class("flat")
-        # Store editor reference in grid
-        grid._editor = editor
-        
-        page = self.tab_view.append(grid)
 
+        self.tab_dropdown.add_css_class("flat")
+        grid._editor = editor
+
+        page = self.tab_view.append(grid)
         page.set_title(editor.get_title())
         self.tab_view.set_selected_page(page)
-        
+
         # Add ChromeTab to ChromeTabBar
         self.add_tab_button(page)
-        
+
         # Focus the new editor view
         editor.view.grab_focus()
-        
-        # Load file if path provided
+
+        # Load file if path provided (async)
         if path:
             self.load_file_into_editor(editor, path)
-        
+
         # Update UI state
         self.update_ui_state()
-        
+
         return editor
+
 
     def add_tab_button(self, page):
         editor = page.get_child()._editor
@@ -8231,33 +8344,78 @@ class EditorWindow(Adw.ApplicationWindow):
 
     def update_header_title(self):
         """Update header bar title and subtitle based on current tab"""
+
         editor = self.get_current_page()
-        if editor:
-            # Check if current tab is modified
-            is_modified = False
-            current_page = self.tab_view.get_selected_page()
-            for tab in self.tab_bar.tabs:
-                if hasattr(tab, '_page') and tab._page == current_page:
-                    is_modified = tab.has_css_class("modified")
-                    break
-            
-            if editor.current_file_path:
-                # Show filename in title, full path in subtitle
-                filename = os.path.basename(editor.current_file_path)
-                if is_modified:
-                    filename = " ⃰" + filename
-                self.window_title.set_title(filename)
-                self.window_title.set_subtitle(editor.current_file_path)
-            else:
-                # Show "Untitled - Virtual Text Editor" for new files
-                title = editor.get_title()  # Gets "Untitled" or "Untitled N"
-                if is_modified:
-                    title = "  ⃰" + title
-                self.window_title.set_title(title + " - Virtual Text Editor")
-                self.window_title.set_subtitle("")
-        else:
-            self.window_title.set_title("Virtual Text Editor")
+
+        # GTK4: iterate over children directly instead of get_children()
+        for child in list(self.title_box):
+            self.title_box.remove(child)
+
+        if not editor:
+            # No file open → only title_row + margin
+            #self.title_row.set_margin_top(10)
+            self.title_box.append(self.title_row)
+            self.header_title_label.set_halign(Gtk.Align.CENTER)
+            self.header_title_label.set_valign(Gtk.Align.CENTER)
+            self.header_modified_dot.set_visible(False)
+            self.header_title_label.set_text("Virtual Text Editor")
             self.window_title.set_subtitle("")
+            return
+
+        # File is loaded → title_row + subtitle_label
+        self.title_box.append(self.title_row)
+
+        # Only show subtitle if the editor represents a real loaded file
+        if editor.current_file_path:
+            self.title_box.append(self.header_subtitle_label)
+
+
+        # Detect modified state from the current tab
+        is_modified = False
+        current_page = self.tab_view.get_selected_page()
+        for tab in self.tab_bar.tabs:
+            if getattr(tab, "_page", None) == current_page:
+                is_modified = tab.modified_dot.get_visible()
+                break
+
+        self.header_modified_dot.set_visible(is_modified)
+
+        # Title + subtitle
+        if editor.current_file_path:
+            self.title_box.set_halign(Gtk.Align.CENTER)
+            self.title_box.set_valign(Gtk.Align.CENTER)            
+            filename = os.path.basename(editor.current_file_path)
+
+            # NEW: compress $HOME → '~'
+            home = os.path.expanduser("~")
+            parent_dir = os.path.dirname(editor.current_file_path)
+            short_parent = parent_dir.replace(home, "~")
+
+            self.header_title_label.set_text(filename)
+            self.header_subtitle_label.set_text(short_parent)
+
+            self.header_subtitle_label.set_halign(Gtk.Align.CENTER)
+            self.header_title_label.set_halign(Gtk.Align.CENTER)
+        else:
+            self.header_title_label.set_halign(Gtk.Align.CENTER)
+            self.header_title_label.set_valign(Gtk.Align.CENTER)
+            self.title_box.set_halign(Gtk.Align.CENTER)
+            self.title_box.set_valign(Gtk.Align.CENTER)             
+            title = editor.get_title()
+            full_title = f"{title} - Virtual Text Editor"
+            self.header_title_label.set_text(full_title)
+            self.header_subtitle_label.set_text("")
+            self.header_subtitle_label.set_halign(Gtk.Align.CENTER)
+            self.header_title_label.set_halign(Gtk.Align.CENTER)
+
+            
+        # NEW: auto-hide subtitle when empty
+        if not self.header_subtitle_label.get_text():
+            self.header_subtitle_label.set_visible(False)
+        else:
+            self.header_subtitle_label.set_visible(True)
+
+
 
     def update_tab_title(self, page):
         """Update tab title based on file path"""
@@ -8625,6 +8783,7 @@ class EditorWindow(Adw.ApplicationWindow):
                     editor.buf.total() == 1 and 
                     len(editor.buf.get_line(0)) == 0):
                     # Replace this tab with the opened file
+                    self.update_header_title()
                     self.load_file_into_editor(editor, path)
                     return
             
