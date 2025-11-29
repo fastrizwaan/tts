@@ -278,18 +278,13 @@ CSS_OVERLAY_SCROLLBAR = """
 
 /* Additional recommended fixes for consistent styling */
 .linked button {
-    background: alpha(@window_fg_color, 0.05);; padding-left: 10px; padding-right:3px; 
+    background: alpha(@window_fg_color, 0.05); padding-left: 10px; padding-right:6px; 
 }
 
 .linked button:hover {
     background: alpha(@window_fg_color, 0.15);
 
 }
-
-
-
-
-
 
 """
 
