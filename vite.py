@@ -15,62 +15,88 @@ CSS_OVERLAY_SCROLLBAR = """
 /* ========================
    Scrollbars
    ======================== */
-.overlay-scrollbar {
-    background-color: @view_bg_color;
-    min-width: 8px;
-}
 
-.overlay-scrollbar trough > slider {
+/* General scrollbar styling - catches all scrollbars */
+scrollbar {{
+    background-color: {bg_color};
+}}
+
+scrollbar trough {{
+    background-color: {bg_color};
+    border-radius: 0px;
+}}
+
+.toolbarview {{
+    background: @headerbar_bg_color; 
+}}
+/* Vertical scrollbar specific */
+.overlay-scrollbar {{
+    background-color: {bg_color};
+    min-width: 8px;
+}}
+
+.overlay-scrollbar trough {{
+    border-radius: 0px;
+    background-color: {bg_color};
+}}
+
+.overlay-scrollbar trough > slider {{
     min-width: 8px;
     border-radius: 12px;
-    background-color: rgba(0,127,255,0.52);
+    background-color: alpha(@window_fg_color, 0.2);
     transition: min-width 200ms ease, background-color 200ms ease;
-}
+}}
 
-.overlay-scrollbar trough > slider:hover {
+.overlay-scrollbar trough > slider:hover {{
     min-width: 8px;
-    background-color: rgba(0,127,255,0.52);
-}
+    background-color: alpha(@window_fg_color, 0.50);
+}}
 
-.overlay-scrollbar trough > slider:active {
+.overlay-scrollbar trough > slider:active {{
     min-width: 8px;
-    background-color: rgba(255,255,255,0.50);
-}
+    background-color: rgba(53,132,228,1.0);
+}}
 
-.hscrollbar-overlay {
-    background-color: transparent;
+/* Horizontal scrollbar specific */
+.hscrollbar-overlay {{
+    background-color: {bg_color};
     min-width: 8px;
-}
+}}
 
-.hscrollbar-overlay trough > slider {
+.hscrollbar-overlay trough {{
+    border-radius: 0px;
+    background-color: {bg_color};
+}}
+
+.hscrollbar-overlay trough > slider {{
     min-height: 8px;
     border-radius: 12px;
-    background-color: rgba(0,127,255,0.52);
     transition: min-height 200ms ease, background-color 200ms ease;
-}
+    background-color: alpha(@window_fg_color, 0.2);
+}}
 
-.hscrollbar-overlay trough > slider:hover {
+.hscrollbar-overlay trough > slider:hover {{
     min-height: 8px;
-    background-color: rgba(0,127,255,0.52);
-}
+    background-color: alpha(@window_fg_color, 0.50);
+}}
 
-.hscrollbar-overlay trough > slider:active {
+.hscrollbar-overlay trough > slider:active {{
     min-height: 8px;
-    background-color: rgba(255,255,255,0.50);
-}
+    background-color: rgba(53,132,228,1.0);
+}}
 
 /* ========================
    Editor background
    ======================== */
-.editor-surface {
-    background-color: @view_bg_color;
-}
+.editor-surface {{
+    background-color: {bg_color};
+}}
 
 /* ========================
    Chrome Tabs
    ======================== */
 
-.chrome-tab {
+.chrome-tab {{
     margin-left: 1px;
     margin-bottom:1px;
     padding-left: 12px;
@@ -85,13 +111,13 @@ CSS_OVERLAY_SCROLLBAR = """
     border-radius: 8px;
 
     transition: background 140ms ease, color 140ms ease;
-}
+}}
 
-.chrome-tab label {
+.chrome-tab label {{
     font-weight: normal;
-}
+}}
 
-.chrome-tab:hover {
+.chrome-tab:hover {{
     color: @window_fg_color;
     min-height: 24px;
     background: alpha(@window_fg_color, 0.10);
@@ -100,10 +126,10 @@ CSS_OVERLAY_SCROLLBAR = """
     padding-top:4px;
     padding-bottom:4px;
 
-}
+}}
 
 /* ACTIVE TAB (pilled) */
-.chrome-tab.active {
+.chrome-tab.active {{
     background: alpha(@window_fg_color, 0.12);
     color: @window_fg_color;
     min-height: 24px;
@@ -111,19 +137,19 @@ CSS_OVERLAY_SCROLLBAR = """
     padding-right: 8px;
     padding-top:4px;
     padding-bottom:4px;
-}
+}}
 
-.chrome-tab.active label {
+.chrome-tab.active label {{
     font-weight: normal;
-}
+}}
 
 /* Dragging state */
-.chrome-tab.dragging {
+.chrome-tab.dragging {{
     opacity: 0.5;
-}
+}}
 
 /* Drop indicator line */
-.tab-drop-indicator {
+.tab-drop-indicator {{
     background: linear-gradient(to bottom, 
         transparent 0%, 
         rgba(0, 127, 255, 0.8) 20%, 
@@ -132,16 +158,16 @@ CSS_OVERLAY_SCROLLBAR = """
         transparent 100%);
     min-width: 3px;
     border-radius: 2px;
-}
+}}
 
 
 /* Modified marker */
-.chrome-tab.modified {
+.chrome-tab.modified {{
     font-style: normal;
-}
+}}
 
 /* Reset all buttons inside tab (fixes size regression) */
-.chrome-tab button {
+.chrome-tab button {{
     background: none;
     border: none;
     box-shadow: none;
@@ -149,142 +175,144 @@ CSS_OVERLAY_SCROLLBAR = """
     margin: 0;
     min-width: 0;
     min-height: 0;
-}
+}}
 
 /* close button specific */
-.chrome-tab .chrome-tab-close-button {
+.chrome-tab .chrome-tab-close-button {{
     min-width: 10px;
     min-height: 10px;
     padding: 4px;
     opacity: 0.10;
     color: @window_fg_color;
-}
+}}
 
-.chrome-tab:hover .chrome-tab-close-button {
+.chrome-tab:hover .chrome-tab-close-button {{
     opacity: 1;
-}
+}}
 
-.chrome-tab.active .chrome-tab-close-button {
+.chrome-tab.active .chrome-tab-close-button {{
     opacity: 1;
     color: @window_fg_color;
-}
+}}
 
 /* ========================
    Separators
    ======================== */
-.chrome-tab-separator {
+.chrome-tab-separator {{
     min-width: 1px;
     background-color: alpha(@window_fg_color, 0.15);
     margin-top: 6px;
     margin-bottom: 6px;
-}
+}}
 
-.chrome-tab-separator.hidden {
+.chrome-tab-separator.hidden {{
     min-width: 0px;
     background-color: transparent;
-}
-.chrome-tab-separator:first-child {
+}}
+.chrome-tab-separator:first-child {{
     background-color: transparent;
     min-width: 0;
-}
+}}
 
-.chrome-tab-separator:last-child {
+.chrome-tab-separator:last-child {{
     background-color: transparent;
     min-width: 0;
-}
+}}
 /* ========================
    Tab close button
    ======================== */
-.chrome-tab-close-button {
+.chrome-tab-close-button {{
     opacity: 0;
     transition: opacity 300ms ease, background-color 300ms ease;
-}
+    margin-right:0px;
+    padding:0px;
+}}
 
-.chrome-tab:hover .chrome-tab-close-button {
+.chrome-tab:hover .chrome-tab-close-button {{
     opacity: 1;
     border-radius: 20px;
-}
+}}
 
-.chrome-tab-close-button:hover  {
+.chrome-tab-close-button:hover  {{
     background-color: alpha(@window_fg_color, 0.1);
-}
+}}
 
-.chrome-tab.active .chrome-tab-close-button:hover {
+.chrome-tab.active .chrome-tab-close-button:hover {{
     opacity: 1;
     background-color: alpha(@window_fg_color, 0.1);
-}
+}}
 
 
 /* Corrected dropdown selectors - removed space after colon */
-.linked dropdown:first-child > button  {
+.linked dropdown:first-child > button  {{
     border-top-left-radius: 0px; 
     border-bottom-left-radius: 0px; 
     border-top-right-radius: 0px; 
     border-bottom-right-radius: 0px;
-}
+}}
 
 /* Explicit rule to ensure middle dropdowns have NO radius */
-.linked dropdown:not(:first-child):not(:last-child) > button {
+.linked dropdown:not(:first-child):not(:last-child) > button {{
     border-radius: 0;
-}
+}}
 
 
 
 
 /* Corrected menubutton selectors - removed space after colon */
-.linked menubutton:first-child > button  {
+.linked menubutton:first-child > button  {{
     border-top-left-radius: 10px; 
     border-bottom-left-radius: 10px; 
     border-top-right-radius: 0px; 
     border-bottom-right-radius: 0px;
-}
+}}
 
-.linked menubutton:last-child > button {
+.linked menubutton:last-child > button {{
     border-top-left-radius: 0px; 
     border-bottom-left-radius: 0px; 
     border-top-right-radius: 10px; 
-    border-bottom-right-radius: 10px; 
-} 
+    border-bottom-right-radius: 10px;
+}} 
 
 /* Additional recommended fixes for consistent styling */
-.linked menubutton button {
+.linked menubutton button {{
     background: alpha(@window_fg_color, 0.05); padding:0px; padding-right: 3px; margin-left: 0px;
-}
+}}
 
-.linked menubutton button:hover {
+.linked menubutton button:hover {{
     background: alpha(@window_fg_color, 0.15);
      padding:0px; padding-right: 3px;
-}
+}}
 
 .linked menubutton button:active, 
-.linked menubutton button:checked {
+.linked menubutton button:checked {{
     background-color: rgba(127, 127, 127, 0.3);
     padding:0px; padding-right: 3px;
-}
+}}
 
-.linked menubutton button:checked:hover {
+.linked menubutton button:checked:hover {{
        background: alpha(@window_fg_color, 0.2);
-}
+}}
 
 
 /* Corrected button selectors - removed space after colon */
-.linked button  {
+.linked button  {{
     border-top-left-radius: 10px; 
     border-bottom-left-radius: 10px; 
     border-top-right-radius: 0px; 
     border-bottom-right-radius: 0px;
     
-}
+}}
 
 /* Additional recommended fixes for consistent styling */
-.linked button {
+.linked button {{
     background: alpha(@window_fg_color, 0.05); padding-left: 10px; padding-right:6px; 
-}
+}}
 
-.linked button:hover {
+.linked button:hover {{
     background: alpha(@window_fg_color, 0.15);
 
-}
+}}
 
 """
 
@@ -3192,6 +3220,13 @@ class Renderer:
         # Colors - will be updated based on theme
         self.update_colors_for_theme()
 
+    def hex_to_rgba_floats(self, hex_str, alpha=1.0):
+        hex_str = hex_str.lstrip('#')
+        r = int(hex_str[0:2], 16) / 255.0
+        g = int(hex_str[2:4], 16) / 255.0
+        b = int(hex_str[4:6], 16) / 255.0
+        return r, g, b, alpha
+        
     def update_colors_for_theme(self, is_dark=None):
         """Update colors based on current theme (GTK4)."""
 
@@ -3200,32 +3235,15 @@ class Renderer:
             style_manager = Adw.StyleManager.get_default()
             is_dark = style_manager.get_dark()
 
-        # Obtain the GTK widget that owns this renderer
-        view = getattr(self, "view_widget", None)
-        if view is None and hasattr(self, "buf") and hasattr(self.buf, "_view"):
-            view = self.buf._view
-
-        # Default fallback if theme lookup fails
-        default_dark_bg  = (0.10, 0.10, 0.10, 1.0)
-        default_light_bg = (0.98, 0.98, 0.98, 1.0)
-
-
-        # --- Get theme background color for text/view surfaces ---
-        bg = None
-        if view:
-            style = view.get_style_context()
-            ok, col = style.lookup_color("view_bg_color")
-            if ok:
-                bg = (col.red, col.green, col.blue, col.alpha)
-
-
-        # Fallbacks
-        if bg is None:
-            bg = default_dark_bg if is_dark else default_light_bg
-
-
-        # Apply retrieved theme color
-        self.editor_background_color = bg
+        # Use theme-appropriate background colors
+        # In GTK4, we avoid deprecated get_style_context() and lookup_color()
+        # Instead, use sensible defaults based on the theme mode
+        if is_dark:
+            r, g, b, a = self.hex_to_rgba_floats("#191919")
+            self.editor_background_color = (r, g, b, a)
+        else:
+            r, g, b, a = self.hex_to_rgba_floats("#fafafa")
+            self.editor_background_color = (r, g, b, a)
 
         # The other colors stay user-defined as before
         if is_dark:
@@ -4118,15 +4136,8 @@ class Renderer:
                 b += len(ch.encode("utf-8"))
             return b
 
-        # --- THEMED BACKGROUND (uses @view_bg_color from CSS) ---
-        view = buf._view if hasattr(buf, "_view") else None
-        r, g, b, a = self.editor_background_color  # fallback from update_colors_for_theme()
-
-        if view:
-            style = view.get_style_context()
-            ok, col = style.lookup_color("view_bg_color")
-            if ok:
-                r, g, b, a = col.red, col.green, col.blue, col.alpha
+        # --- THEMED BACKGROUND (uses cached color from update_colors_for_theme) ---
+        r, g, b, a = self.editor_background_color
 
         cr.set_source_rgba(r, g, b, a)
         cr.rectangle(0, 0, alloc.width, alloc.height)
@@ -4203,15 +4214,8 @@ class Renderer:
 
                 # ---- GUTTER: themed, opaque, no bleed-through ----
                 if getattr(self, "show_line_numbers", True):
-
-                    view = buf._view if hasattr(buf, "_view") else None
-                    r, g, b, a = self.editor_background_color  # fallback
-
-                    if view:
-                        style = view.get_style_context()
-                        ok, col = style.lookup_color("view_bg_color")
-                        if ok:
-                            r, g, b, a = col.red, col.green, col.blue, col.alpha
+                    # Use cached background color
+                    r, g, b, a = self.editor_background_color
 
                     # Active line shading
                     if ln == buf.cursor_line:
@@ -4921,6 +4925,7 @@ class VirtualTextView(Gtk.DrawingArea):
         
     def update_scrollbar(self):
         """Update scrollbar values and visibility."""
+        
         width = self.get_width()
         height = self.get_height()
         if width <= 0 or height <= 0:
@@ -7159,7 +7164,7 @@ class ChromeTab(Gtk.Box):
         # Title label (uses full width)
         self.label = Gtk.Label()
         self.label.set_text(title)
-        self.label.set_margin_end(24)
+        self.label.set_margin_end(28)
         self.label.set_max_width_chars(20)
         self.label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.label.set_single_line_mode(True)
@@ -7184,7 +7189,7 @@ class ChromeTab(Gtk.Box):
             self.close_button.set_size_request(24, 24)
             self.close_button.set_halign(Gtk.Align.END)
             self.close_button.set_valign(Gtk.Align.CENTER)
-            self.close_button.set_margin_end(0)
+            #self.close_button.set_margin_start(0)
             self.close_button.connect('clicked', self._on_close_clicked)
             overlay.add_overlay(self.close_button)
        
@@ -7702,7 +7707,7 @@ class EditorWindow(Adw.ApplicationWindow):
 
         # Create ToolbarView
         toolbar_view = Adw.ToolbarView()
-        
+        toolbar_view.add_css_class("toolbarview")
         # Header Bar
         self.header = Adw.HeaderBar()
         self.window_title = Adw.WindowTitle(title="Virtual Text Editor", subtitle="")
@@ -7879,6 +7884,16 @@ class EditorWindow(Adw.ApplicationWindow):
             editor = page.get_child()._editor
             editor.view.renderer.update_colors_for_theme(is_dark)
             editor.view.queue_draw()
+        
+        # Update scrollbar CSS to match editor background
+        # Get the app instance and update its CSS
+        app = self.get_application()
+        if app and hasattr(app, 'update_scrollbar_css'):
+            # Use the same color as editor background
+            if is_dark:
+                app.update_scrollbar_css(0.10, 0.10, 0.10, 1.0)
+            else:
+                app.update_scrollbar_css(0.98, 0.98, 0.98, 1.0)
     
     def update_recent_files_menu(self):
         """Update the recent files dropdown menu"""
@@ -7989,7 +8004,7 @@ class EditorWindow(Adw.ApplicationWindow):
         grid = Gtk.Grid()
         grid.set_column_spacing(0)
         grid.set_row_spacing(0)
-        
+        grid.add_css_class("overlay-scrollbar")
         # Setup scrollbars
         vscroll = Gtk.Scrollbar(orientation=Gtk.Orientation.VERTICAL, adjustment=editor.view.vadj)
         hscroll = Gtk.Scrollbar(orientation=Gtk.Orientation.HORIZONTAL, adjustment=editor.view.hadj)
@@ -8699,14 +8714,43 @@ class VirtualTextEditor(Adw.Application):
         super().__init__(application_id="io.github.fastrizwaan.vite",
                          flags=Gio.ApplicationFlags.HANDLES_OPEN)
         self.files_to_open = []
+    
+    def update_scrollbar_css(self, r, g, b, a):
+        """Update scrollbar CSS with the given background color."""
+        # Convert RGBA float values (0-1) to CSS rgba format
+        r_int = int(r * 255)
+        g_int = int(g * 255)
+        b_int = int(b * 255)
+        
+        # Format the CSS with actual color values
+        css = CSS_OVERLAY_SCROLLBAR.format(bg_color=f"rgba({r_int},{g_int},{b_int},{a})")
+        self.css_provider.load_from_data(css.encode())
+
+    def hex_to_rgba_floats(self, hex_str, alpha=1.0):
+        hex_str = hex_str.lstrip('#')
+        r = int(hex_str[0:2], 16) / 255.0
+        g = int(hex_str[2:4], 16) / 255.0
+        b = int(hex_str[4:6], 16) / 255.0
+        return r, g, b, alpha
 
     def do_activate(self):
-        provider = Gtk.CssProvider()
-        provider.load_from_data(CSS_OVERLAY_SCROLLBAR)
+        # Create and store CSS provider for dynamic updates
+        self.css_provider = Gtk.CssProvider()
+        
+        # Detect current theme and initialize with appropriate color
+        style_manager = Adw.StyleManager.get_default()
+        is_dark = style_manager.get_dark()
+        if is_dark:
+            r, g, b, a = self.hex_to_rgba_floats("#191919")
+            self.update_scrollbar_css(r, g, b, a)
+        else:
+            r, g, b, a = self.hex_to_rgba_floats("#fafafa")
+            self.update_scrollbar_css(r, g, b, a)
 
+        
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(),
-            provider,
+            self.css_provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
