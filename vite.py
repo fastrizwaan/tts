@@ -4247,20 +4247,31 @@ class Renderer:
                     # Use cached background color
                     r, g, b, a = self.editor_background_color
 
-                    # Active line shading
+                    # Active line shading - use foreground color with 10% alpha
                     if ln == buf.cursor_line:
-                        r2, g2, b2 = r * 0.85, g * 0.85, b * 0.85
+                        r_fg, g_fg, b_fg = self.text_foreground_color
+                        r2, g2, b2 = r_fg, g_fg, b_fg
+                        alpha = 0.05
                     else:
                         r2, g2, b2 = r, g, b
+                        alpha = a
 
                     cr.save()
-                    cr.set_source_rgba(r2, g2, b2, a)
+                    cr.set_source_rgba(r2, g2, b2, alpha)
                     cr.rectangle(0, y, ln_width, self.line_h)
                     cr.fill()
                     cr.restore()
 
-
-
+                # Draw current line highlight (extends from line number to viewport)
+                # Use foreground color with 10% alpha (matches line number background)
+                if ln == buf.cursor_line:
+                    r_fg, g_fg, b_fg = self.text_foreground_color
+                    
+                    cr.save()
+                    cr.set_source_rgba(r_fg, g_fg, b_fg, 0.05)
+                    cr.rectangle(ln_width, y, alloc.width - ln_width, self.line_h)
+                    cr.fill()
+                    cr.restore()
 
                     # (optional separator)
                     # cr.set_source_rgba(0, 0, 0, 0.20)
