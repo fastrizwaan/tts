@@ -713,6 +713,30 @@ class VirtualBuffer(GObject.Object):
             self.emit("changed")
 
 
+    def get_text(self):
+        """Get full text content of the buffer"""
+        lines = []
+        total = self.total()
+        for i in range(total):
+            lines.append(self.get_line(i))
+        return "\n".join(lines)
+        
+    def set_text(self, text):
+        """Set full text content"""
+        # Clear existing
+        self.edits.clear()
+        self.deleted_lines.clear()
+        self.inserted_lines.clear()
+        self.line_offsets = []
+        self.file = None # Detach file if any
+        
+        # Insert new lines
+        lines = text.split('\n')
+        for i, line in enumerate(lines):
+            self.inserted_lines[i] = line
+            
+        self.emit("changed")
+
     def _logical_to_physical(self, logical_line):
         """Convert logical line number to physical file line number"""
         if not self.file:
@@ -7265,6 +7289,7 @@ class ChromeTab(Gtk.Box):
         
         # Explicitly claim clicks
         click_gesture = Gtk.GestureClick()
+        click_gesture.set_button(0) # Listen to all buttons (left, middle, right)
         click_gesture.connect('pressed', self._on_tab_pressed)
         click_gesture.connect('released', self._on_tab_released)
         self.tab_button.add_controller(click_gesture)
@@ -7279,8 +7304,68 @@ class ChromeTab(Gtk.Box):
        
     def _on_tab_pressed(self, gesture, n_press, x, y):
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        
+        # Check for right click (button 3)
+        current_button = gesture.get_current_button()
+        if n_press == 1 and current_button == 3:
+            self._show_context_menu(x, y)
+            return
+
         if self.tab_bar:
             self.tab_bar.hide_separators_for_tab(self)
+
+    def _show_context_menu(self, x, y):
+        """Show context menu for the tab"""
+        if not self.tab_bar:
+            return
+            
+        # Get index of this tab
+        try:
+            tab_index = self.tab_bar.tabs.index(self)
+        except ValueError:
+            return
+
+        menu = Gio.Menu()
+        
+        # Helper to add item with string target
+        def add_item(label, action, target_str):
+            item = Gio.MenuItem.new(label, action)
+            item.set_action_and_target_value(action, GLib.Variant.new_string(target_str))
+            return item
+
+        idx_str = str(tab_index)
+
+        # Section 1: Move
+        section1 = Gio.Menu()
+        section1.append_item(add_item("Move Left", "win.tab_move_left", idx_str))
+        section1.append_item(add_item("Move Right", "win.tab_move_right", idx_str))
+        section1.append_item(add_item("Split View Horizontally", "win.tab_split_horizontal", idx_str))
+        section1.append_item(add_item("Split View Vertically", "win.tab_split_vertical", idx_str))
+        section1.append_item(add_item("Move to New Window", "win.tab_move_new_window", idx_str))
+        menu.append_section(None, section1)
+        
+        # Section 2: Close
+        section2 = Gio.Menu()
+        section2.append_item(add_item("Close Tabs to Left", "win.tab_close_left", idx_str))
+        section2.append_item(add_item("Close Tabs to Right", "win.tab_close_right", idx_str))
+        section2.append_item(add_item("Close Other Tabs", "win.tab_close_other", idx_str))
+        section2.append_item(add_item("Close", "win.tab_close", idx_str))
+        menu.append_section(None, section2)
+        
+        popover = Gtk.PopoverMenu.new_from_model(menu)
+        popover.set_parent(self)
+        popover.set_has_arrow(False)
+        
+        # Position at click
+        rect = Gdk.Rectangle()
+        rect.x = int(x)
+        rect.y = int(y)
+        rect.width = 1
+        rect.height = 1
+        popover.set_pointing_to(rect)
+        
+        popover.popup()
+
         
     def _on_tab_released(self, gesture, n_press, x, y):
         self.emit('activate-requested')
@@ -7321,13 +7406,43 @@ class ChromeTab(Gtk.Box):
     
     # Drag and drop handlers
     def _on_drag_prepare(self, source, x, y):
-        """Prepare drag operation - return content provider"""
-        return Gdk.ContentProvider.new_for_value("TAB")
+        """Prepare drag operation - return content provider with tab data"""
+        import json
+        
+        # Get window reference through tab_bar
+        window = None
+        if self.tab_bar and hasattr(self, '_page'):
+            # Find the EditorWindow that owns this tab bar
+            parent = self.tab_bar.get_parent()
+            while parent:
+                if isinstance(parent, Adw.ApplicationWindow):
+                    window = parent
+                    break
+                parent = parent.get_parent()
+        
+        # Prepare tab data for cross-window transfer
+        tab_data = {
+            'window_id': id(window) if window else 0,
+            'tab_index': self.tab_bar.tabs.index(self) if self.tab_bar and self in self.tab_bar.tabs else -1,
+        }
+        
+        # If we have a page reference, get the editor data
+        if hasattr(self, '_page'):
+            editor = self._page.get_child()._editor
+            tab_data['content'] = editor.get_text()
+            tab_data['file_path'] = editor.current_file_path
+            tab_data['title'] = editor.get_title()
+            tab_data['is_modified'] = self.has_css_class("modified")
+            tab_data['untitled_number'] = getattr(editor, 'untitled_number', None)
+        
+        json_data = json.dumps(tab_data)
+        return Gdk.ContentProvider.new_for_value(json_data)
     
     def _on_drag_begin(self, source, drag):
         """Called when drag begins - set visual feedback"""
         global DRAGGED_TAB
         DRAGGED_TAB = self
+        self.drag_success = False  # Track if drag was successful
         
         # Add a CSS class for visual feedback
         self.add_css_class("dragging")
@@ -7337,10 +7452,30 @@ class ChromeTab(Gtk.Box):
         source.set_icon(paintable, 0, 0)
     
     def _on_drag_end(self, source, drag, delete_data):
-        """Called when drag ends - cleanup"""
+        """Called when drag ends - cleanup and handle cross-window transfer"""
         global DRAGGED_TAB
         DRAGGED_TAB = None
         self.remove_css_class("dragging")
+        
+        # If drag was successful and cross-window, close the source tab
+        if hasattr(self, 'drag_success') and self.drag_success:
+            # Find the window that owns this tab
+            window = None
+            if self.tab_bar:
+                parent = self.tab_bar.get_parent()
+                while parent:
+                    if isinstance(parent, Adw.ApplicationWindow):
+                        window = parent
+                        break
+                    parent = parent.get_parent()
+            
+            if window and hasattr(window, 'close_tab_after_drag'):
+                # Get tab index
+                if self.tab_bar and self in self.tab_bar.tabs:
+                    tab_index = self.tab_bar.tabs.index(self)
+                    # Use GLib.idle_add to close the tab after drag completes
+                    GLib.idle_add(window.close_tab_after_drag, tab_index)
+
 
 
 class ChromeTabBar(Adw.WrapBox):
@@ -7624,9 +7759,51 @@ class ChromeTabBar(Adw.WrapBox):
         self._hide_drop_indicator()
     
     def _on_tab_bar_drop(self, target, value, x, y):
-        """Handle drop on the tab bar"""
+        """Handle drop on the tab bar - supports both same-window and cross-window drops"""
+        import json
         global DRAGGED_TAB
         
+        # Try to parse as JSON (cross-window drag)
+        tab_data = None
+        if isinstance(value, str):
+            try:
+                tab_data = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+        # Get target window
+        target_window = None
+        parent = self.get_parent()
+        while parent:
+            if isinstance(parent, Adw.ApplicationWindow):
+                target_window = parent
+                break
+            parent = parent.get_parent()
+        
+        if not target_window:
+            return False
+        
+        # Check if this is a cross-window drag
+        if tab_data and 'window_id' in tab_data:
+            source_window_id = tab_data['window_id']
+            target_window_id = id(target_window)
+            
+            if source_window_id != target_window_id:
+                # Cross-window drop
+                drop_position = self._calculate_drop_position(x, y)
+                
+                # Transfer the tab to this window
+                if hasattr(target_window, 'transfer_tab_from_data'):
+                    target_window.transfer_tab_from_data(tab_data, drop_position)
+                    
+                    # Mark the drag as successful so source can close the tab
+                    if DRAGGED_TAB:
+                        DRAGGED_TAB.drag_success = True
+                    
+                    self._hide_drop_indicator()
+                    return True
+        
+        # Same-window drag (existing logic)
         dragged_tab = DRAGGED_TAB if DRAGGED_TAB else value
         
         if not isinstance(dragged_tab, ChromeTab):
@@ -7676,6 +7853,12 @@ class EditorPage:
     def set_title(self, title):
         """Update the untitled title"""
         self.untitled_title = title
+
+    def get_text(self):
+        return self.buf.get_text()
+        
+    def set_text(self, text):
+        self.buf.set_text(text)
 
 class RecentFilesManager:
     """Manages recently opened/saved files list"""
@@ -7943,6 +8126,7 @@ class EditorWindow(Adw.ApplicationWindow):
         
         # Setup actions
         self.setup_actions()
+        self.setup_tab_actions()
         
         # Add initial tab
         self.add_tab()
@@ -8118,35 +8302,13 @@ class EditorWindow(Adw.ApplicationWindow):
         self.add_tab()
         
     def get_next_untitled_number(self):
-        """Get the next available Untitled number based on existing tabs"""
-        # Collect all existing Untitled numbers
-        existing_numbers = []
-        
-        for i in range(self.tab_view.get_n_pages()):
-            page = self.tab_view.get_nth_page(i)
-            editor = page.get_child()._editor
-            if not editor.current_file_path:
-                # This is an Untitled tab
-                title = editor.get_title()
-                if title == "Untitled":
-                    existing_numbers.append(1)  # Treat legacy "Untitled" as 1 to avoid collision
-                elif title.startswith("Untitled "):
-                    try:
-                        num = int(title.split(" ")[1])
-                        existing_numbers.append(num)
-                    except (IndexError, ValueError):
-                        pass
-        
-        # If no Untitled tabs exist, start with "Untitled 1"
-        if not existing_numbers:
-            return 1
-            
-        # Find the next available number
-        next_num = 1
-        while next_num in existing_numbers:
-            next_num += 1
-        
-        return next_num
+        """Get the next available Untitled number using global counter"""
+        app = self.get_application()
+        if app and isinstance(app, VirtualTextEditor):
+            return app.get_next_global_untitled_number()
+        # Fallback if app is not available (shouldn't happen)
+        return 1
+
     
     def add_tab(self, path=None):
         # ----- PATCH: correct initial title when loading a file -----
@@ -8155,21 +8317,65 @@ class EditorWindow(Adw.ApplicationWindow):
             filename = os.path.basename(path)
             editor = EditorPage(filename)
             editor.current_file_path = path
+            editor.untitled_number = None  # Not an untitled file
         else:
             # Normal Untitled logic
             if self.tab_view.get_n_pages() == 0:
-                # First tab and empty -> "Untitled 1"
-                untitled_title = "Untitled 1"
-                editor = EditorPage(untitled_title)
-                editor.is_initial_empty_tab = True
-            else:
-                # New tab -> "Untitled N"
+                # First tab - use global counter
                 untitled_num = self.get_next_untitled_number()
                 untitled_title = f"Untitled {untitled_num}"
                 editor = EditorPage(untitled_title)
+                editor.is_initial_empty_tab = True
+                editor.untitled_number = untitled_num  # Store the number
+            else:
+                # New tab → "Untitled N"
+                untitled_num = self.get_next_untitled_number()
+                untitled_title = f"Untitled {untitled_num}"
+                editor = EditorPage(untitled_title)
+                editor.untitled_number = untitled_num  # Store the number
+
         # ----- END PATCH -----
         
         # Create overlay layout for editor (scrollbars float on top)
+        overlay, editor = self._create_editor_overlay(editor)
+
+        # Create TabRoot (Gtk.Box) to hold the overlay (and future splits)
+        tab_root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        tab_root.append(overlay)
+        overlay.set_hexpand(True)
+        overlay.set_vexpand(True)
+        
+        # Store reference to editor on tab_root for easy access
+        tab_root._editor = editor
+        # Store reference to overlay on editor for split logic
+        editor._overlay = overlay
+
+        page = self.tab_view.append(tab_root)
+        page.set_title(editor.get_title())
+        self.tab_view.set_selected_page(page)
+
+        # Add ChromeTab to ChromeTabBar
+        self.add_tab_button(page)
+
+        # Focus the new editor view
+        editor.view.grab_focus()
+
+        # Load file if path provided (async)
+        if path:
+            self.load_file_into_editor(editor, path)
+
+        # Update UI state
+        self.update_ui_state()
+
+        return editor
+
+    def _create_editor_overlay(self, editor, add_close_button=False):
+        """Helper to create editor overlay with scrollbars
+        
+        Args:
+            editor: EditorPage instance
+            add_close_button: If True, adds a close button for split views
+        """
         overlay = Gtk.Overlay()
         overlay.add_css_class("overlay-scrollbar")
 
@@ -8215,28 +8421,23 @@ class EditorWindow(Adw.ApplicationWindow):
         hscroll.set_valign(Gtk.Align.END)
         overlay.add_overlay(hscroll)
 
-        self.tab_dropdown.add_css_class("flat")
+        # Add close button for split views
+        if add_close_button:
+            close_btn = Gtk.Button()
+            close_btn.set_icon_name("window-close-symbolic")
+            close_btn.add_css_class("flat")
+            close_btn.add_css_class("circular")
+            close_btn.set_tooltip_text("Close Split")
+            close_btn.set_halign(Gtk.Align.END)
+            close_btn.set_valign(Gtk.Align.START)
+            close_btn.set_margin_top(6)
+            close_btn.set_margin_end(6)
+            close_btn.connect("clicked", lambda btn: self._close_split(overlay))
+            overlay.add_overlay(close_btn)
+            overlay._close_button = close_btn
+
         overlay._editor = editor
-
-        page = self.tab_view.append(overlay)
-        page.set_title(editor.get_title())
-        self.tab_view.set_selected_page(page)
-
-        # Add ChromeTab to ChromeTabBar
-        self.add_tab_button(page)
-
-        # Focus the new editor view
-        editor.view.grab_focus()
-
-        # Load file if path provided (async)
-        if path:
-            self.load_file_into_editor(editor, path)
-
-        # Update UI state
-        self.update_ui_state()
-
-        return editor
-
+        return overlay, editor
 
     def add_tab_button(self, page):
         editor = page.get_child()._editor
@@ -8283,6 +8484,580 @@ class EditorWindow(Adw.ApplicationWindow):
             self.tab_view.reorder_page(tab._page, new_index)
             # Update dropdown to reflect new order
             self.update_tab_dropdown()
+
+    def setup_tab_actions(self):
+        """Setup actions for tab context menu"""
+        
+        # Helper to add action with string parameter
+        def add_action(name, callback):
+            action = Gio.SimpleAction.new(name, GLib.VariantType.new("s"))
+            action.connect("activate", callback)
+            self.add_action(action)
+            
+        add_action("tab_move_left", self.on_tab_move_left)
+        add_action("tab_move_right", self.on_tab_move_right)
+        add_action("tab_move_new_window", self.on_tab_move_new_window)
+        add_action("tab_split_horizontal", self.on_tab_split_horizontal)
+        add_action("tab_split_vertical", self.on_tab_split_vertical)
+        
+        add_action("tab_close_left", self.on_tab_close_left)
+        add_action("tab_close_right", self.on_tab_close_right)
+        add_action("tab_close_other", self.on_tab_close_other)
+        add_action("tab_close", self.on_tab_close_action)
+
+        # Add accelerators - targeting "current" (active) tab
+        app = self.get_application()
+        if app:
+            # Note: detailed action name includes target parameter
+            app.set_accels_for_action("win.tab_move_left('current')", ["<Ctrl><Shift>Page_Up"])
+            app.set_accels_for_action("win.tab_move_right('current')", ["<Ctrl><Shift>Page_Down"])
+            app.set_accels_for_action("win.tab_move_new_window('current')", ["<Ctrl><Shift>n"])
+
+    def _get_target_page(self, parameter):
+        """Get page from action parameter (string: 'current' or index)"""
+        val = parameter.get_string()
+        
+        if val == 'current':
+            return self.tab_view.get_selected_page()
+            
+        try:
+            idx = int(val)
+            if 0 <= idx < self.tab_view.get_n_pages():
+                return self.tab_view.get_nth_page(idx)
+        except ValueError:
+            pass
+            
+        return None
+
+    def on_tab_move_left(self, action, parameter):
+        page = self._get_target_page(parameter)
+        if not page: return
+        
+        idx = self.tab_view.get_page_position(page)
+        if idx > 0:
+            # Reorder in ChromeTabBar - this emits signal to sync TabView
+            for tab in self.tab_bar.tabs:
+                if getattr(tab, '_page', None) == page:
+                    self.tab_bar.reorder_tab(tab, idx - 1)
+                    break
+
+    def on_tab_move_right(self, action, parameter):
+        page = self._get_target_page(parameter)
+        if not page: return
+        
+        idx = self.tab_view.get_page_position(page)
+        if idx < self.tab_view.get_n_pages() - 1:
+            # Reorder in ChromeTabBar - this emits signal to sync TabView
+            for tab in self.tab_bar.tabs:
+                if getattr(tab, '_page', None) == page:
+                    self.tab_bar.reorder_tab(tab, idx + 1)
+                    break
+
+    def on_tab_move_new_window(self, action, parameter):
+        page = self._get_target_page(parameter)
+        if not page: return
+        
+        # Get the TabRoot which may contain splits
+        tab_root = page.get_child()
+        
+        # Serialize the entire tab structure including splits
+        def serialize_structure(widget):
+            """Recursively serialize the tab structure"""
+            if hasattr(widget, '_editor'):
+                # This is an overlay with an editor
+                editor = widget._editor
+                return {
+                    'type': 'editor',
+                    'content': editor.get_text(),
+                    'file_path': editor.current_file_path,
+                    'title': editor.get_title(),
+                    'untitled_number': getattr(editor, 'untitled_number', None),
+                    'is_modified': any(
+                        tab.has_css_class("modified") 
+                        for tab in self.tab_bar.tabs 
+                        if hasattr(tab, '_page') and tab._page == page
+                    )
+                }
+            elif isinstance(widget, Gtk.Paned):
+                # This is a split
+                return {
+                    'type': 'paned',
+                    'orientation': 'horizontal' if widget.get_orientation() == Gtk.Orientation.HORIZONTAL else 'vertical',
+                    'position': widget.get_position(),
+                    'start_child': serialize_structure(widget.get_start_child()),
+                    'end_child': serialize_structure(widget.get_end_child())
+                }
+            elif isinstance(widget, Gtk.Box):
+                # TabRoot - serialize its first child
+                child = widget.get_first_child()
+                return serialize_structure(child) if child else None
+            elif isinstance(widget, Gtk.Overlay):
+                # Overlay - serialize its child
+                child = widget.get_child()
+                return serialize_structure(child) if child else None
+            return None
+        
+        structure = serialize_structure(tab_root)
+        if not structure:
+            print("Error: Could not serialize tab structure")
+            return
+        
+        # Create new window
+        app = self.get_application()
+        
+        # Before creating new window, scan all existing windows to ensure counter is in sync
+        if app and isinstance(app, VirtualTextEditor):
+            for window in app.get_windows():
+                if isinstance(window, EditorWindow):
+                    app.scan_and_register_untitled_numbers(window)
+        
+        new_window = EditorWindow(app)
+        new_window.present()
+        
+        # Get and remove the initial tab that was created automatically
+        new_page = new_window.tab_view.get_selected_page()
+        new_tab_root = new_page.get_child()
+        
+        # Release the untitled number from the initial tab
+        if app and isinstance(app, VirtualTextEditor):
+            new_editor = new_tab_root._editor
+            if hasattr(new_editor, 'untitled_number') and new_editor.untitled_number is not None:
+                app.release_untitled_number(new_editor.untitled_number)
+        
+        # Clear the tab_root to rebuild it
+        child = new_tab_root.get_first_child()
+        while child:
+            new_tab_root.remove(child)
+            child = new_tab_root.get_first_child()
+        
+        # Reconstruct the structure in the new window
+        def reconstruct_structure(data, is_root=False):
+            """Recursively reconstruct the tab structure"""
+            if data['type'] == 'editor':
+                # Create editor
+                editor = EditorPage(data['title'])
+                editor.set_text(data['content'])
+                editor.current_file_path = data['file_path']
+                editor.set_title(data['title'])
+                editor.untitled_number = data['untitled_number']
+                
+                # Create overlay (with close button if not root)
+                overlay, editor = new_window._create_editor_overlay(editor, add_close_button=not is_root)
+                overlay.set_hexpand(True)
+                overlay.set_vexpand(True)
+                
+                if is_root:
+                    # Store reference on tab_root for the primary editor
+                    new_tab_root._editor = editor
+                    editor._overlay = overlay
+                
+                return overlay, data['is_modified']
+                
+            elif data['type'] == 'paned':
+                # Create paned
+                orientation = Gtk.Orientation.HORIZONTAL if data['orientation'] == 'horizontal' else Gtk.Orientation.VERTICAL
+                paned = Gtk.Paned(orientation=orientation)
+                paned.set_hexpand(True)
+                paned.set_vexpand(True)
+                
+                # Reconstruct children
+                start_widget, start_modified = reconstruct_structure(data['start_child'])
+                end_widget, end_modified = reconstruct_structure(data['end_child'])
+                
+                paned.set_start_child(start_widget)
+                paned.set_end_child(end_widget)
+                
+                # Set position after widget is realized
+                position = data.get('position', 400)
+                def set_pos():
+                    paned.set_position(position)
+                    return False
+                GLib.idle_add(set_pos)
+                
+                return paned, (start_modified or end_modified)
+            
+            return None, False
+        
+        # Reconstruct the structure
+        reconstructed_widget, is_modified = reconstruct_structure(structure, is_root=True)
+        
+        if reconstructed_widget:
+            new_tab_root.append(reconstructed_widget)
+            
+            # Update page title
+            new_page.set_title(structure.get('title', 'Untitled'))
+            
+            # Update ChromeTab
+            for tab in new_window.tab_bar.tabs:
+                if hasattr(tab, '_page') and tab._page == new_page:
+                    tab.set_title(structure.get('title', 'Untitled'))
+                    if is_modified:
+                        tab.add_css_class("modified")
+                    break
+            
+            # Update header
+            new_window.update_header_title()
+        
+        # Mark original editor as unmodified to avoid save prompt and close
+        # We need to clear untitled numbers for all editors in the original tab to prevent release
+        def clear_untitled_numbers(widget):
+            if hasattr(widget, '_editor'):
+                widget._editor.untitled_number = None
+            elif isinstance(widget, Gtk.Paned):
+                start = widget.get_start_child()
+                end = widget.get_end_child()
+                if start:
+                    clear_untitled_numbers(start)
+                if end:
+                    clear_untitled_numbers(end)
+            elif isinstance(widget, (Gtk.Box, Gtk.Overlay)):
+                child = widget.get_first_child() if isinstance(widget, Gtk.Box) else widget.get_child()
+                if child:
+                    clear_untitled_numbers(child)
+        
+        clear_untitled_numbers(tab_root)
+        
+        # Mark as unmodified
+        for tab in self.tab_bar.tabs:
+            if hasattr(tab, '_page') and tab._page == page:
+                tab.remove_css_class("modified")
+                break
+        
+        # Close the original tab
+        self.close_tab(page)
+
+    def transfer_tab_from_data(self, tab_data, drop_position=None):
+        """Create a new tab from transferred data (cross-window drag)"""
+        # Create new tab with the transferred content
+        new_editor = EditorPage(tab_data.get('title', 'Untitled 1'))
+        new_editor.set_text(tab_data.get('content', ''))
+        new_editor.current_file_path = tab_data.get('file_path')
+        new_editor.set_title(tab_data.get('title', 'Untitled 1'))
+        new_editor.untitled_number = tab_data.get('untitled_number')  # Preserve untitled number
+        
+        # Create overlay layout for editor
+        overlay, new_editor = self._create_editor_overlay(new_editor)
+        
+        # Create TabRoot
+        tab_root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        tab_root.append(overlay)
+        overlay.set_hexpand(True)
+        overlay.set_vexpand(True)
+        
+        # Store references
+        tab_root._editor = new_editor
+        new_editor._overlay = overlay
+        
+        # Add to tab view
+        page = self.tab_view.append(tab_root)
+        page.set_title(new_editor.get_title())
+        
+        # Add ChromeTab to ChromeTabBar at the specified position
+        chrome_tab = ChromeTab(title=new_editor.get_title())
+        chrome_tab._page = page
+        
+        # Connect signals
+        chrome_tab.connect('activate-requested', self.on_tab_activated)
+        chrome_tab.connect('close-requested', self.on_tab_close_requested)
+        
+        # Insert at drop position if specified
+        if drop_position is not None and 0 <= drop_position <= len(self.tab_bar.tabs):
+            # Insert tab at specific position
+            idx = drop_position
+            
+            # Insert tab AFTER separator[idx]
+            before_sep = self.tab_bar.separators[idx]
+            self.tab_bar.insert_child_after(chrome_tab, before_sep)
+            
+            # Insert separator AFTER the tab
+            new_sep = Gtk.Box()
+            new_sep.set_size_request(1, 1)
+            new_sep.add_css_class("chrome-tab-separator")
+            self.tab_bar.insert_child_after(new_sep, chrome_tab)
+            
+            # Update internal lists
+            self.tab_bar.tabs.insert(idx, chrome_tab)
+            self.tab_bar.separators.insert(idx + 1, new_sep)
+            
+            # Set tab_bar reference
+            chrome_tab.tab_bar = self.tab_bar
+            chrome_tab.separator = new_sep
+            
+            # Setup hover handlers
+            self.tab_bar._connect_hover(chrome_tab)
+            self.tab_bar._update_separators()
+            
+            # Reorder the page in TabView to match
+            self.tab_view.reorder_page(page, idx)
+        else:
+            # Add at end
+            self.tab_bar.add_tab(chrome_tab)
+        
+        # Set modified state if needed
+        if tab_data.get('is_modified', False):
+            chrome_tab.add_css_class("modified")
+        
+        # Select the new tab
+        self.tab_view.set_selected_page(page)
+        
+        # Update UI
+        self.update_ui_state()
+        self.update_tab_dropdown()
+        
+        # Focus the editor
+        new_editor.view.grab_focus()
+        
+        return new_editor
+
+    def close_tab_after_drag(self, tab_index):
+        """Close a tab after successful cross-window drag"""
+        if 0 <= tab_index < self.tab_view.get_n_pages():
+            page = self.tab_view.get_nth_page(tab_index)
+            
+            # Mark as unmodified to avoid save prompt (content was transferred)
+            for tab in self.tab_bar.tabs:
+                if hasattr(tab, '_page') and tab._page == page:
+                    tab.remove_css_class("modified")
+                    break
+            
+            # Close the tab
+            self.perform_close_tab(page)
+
+
+    def on_tab_split_horizontal(self, action, parameter):
+        self._split_view(parameter, Gtk.Orientation.HORIZONTAL)
+
+    def on_tab_split_vertical(self, action, parameter):
+        self._split_view(parameter, Gtk.Orientation.VERTICAL)
+
+    def _split_view(self, parameter, orientation):
+        page = self._get_target_page(parameter)
+        if not page: return
+        
+        # Get the TabRoot (Gtk.Box)
+        tab_root = page.get_child()
+        if not isinstance(tab_root, Gtk.Box):
+            print("Error: Tab content is not a Box (TabRoot)")
+            return
+            
+        # We want to split the currently focused editor in this tab
+        # But for simplicity, let's just split the first child of TabRoot if it's not already split complexly
+        # Or better, find the child that contains the focused widget?
+        # For now, let's assume simple case: split the main content.
+        
+        # Get current content
+        current_content = tab_root.get_first_child()
+        
+        # Create Paned
+        paned = Gtk.Paned(orientation=orientation)
+        paned.set_hexpand(True)
+        paned.set_vexpand(True)
+        
+        # Remove current content from root and add to paned
+        tab_root.remove(current_content)
+        paned.set_start_child(current_content)
+        
+        # Create NEW editor sharing the buffer
+        # We need the original editor to get the buffer
+        original_editor = getattr(current_content, '_editor', None)
+        if not original_editor:
+            # Try to find it if current_content is already a Paned?
+            # This gets recursive. For MVP, let's just grab the one from tab_root._editor (the primary one)
+            original_editor = getattr(tab_root, '_editor', None)
+            
+        if not original_editor:
+            print("Error: Could not find original editor")
+            return
+            
+        # Create new EditorPage but share buffer
+        new_editor = EditorPage(original_editor.get_title())
+        new_editor.buf = original_editor.buf # SHARE BUFFER
+        new_editor.view = VirtualTextView(new_editor.buf) # New view
+        new_editor.current_file_path = original_editor.current_file_path
+        
+        # Create overlay for new editor with close button
+        new_overlay, new_editor = self._create_editor_overlay(new_editor, add_close_button=True)
+        new_overlay.set_hexpand(True)
+        new_overlay.set_vexpand(True)
+        
+        paned.set_end_child(new_overlay)
+        
+        # Add Paned to root
+        tab_root.append(paned)
+        
+        # Set position to 50% after the widget is realized
+        def set_split_position():
+            if orientation == Gtk.Orientation.HORIZONTAL:
+                # Horizontal split - use width
+                width = tab_root.get_width()
+                if width > 0:
+                    paned.set_position(width // 2)
+                    return False
+            else:
+                # Vertical split - use height
+                height = tab_root.get_height()
+                if height > 0:
+                    paned.set_position(height // 2)
+                    return False
+            # If size not available yet, try again
+            return True
+        
+        # Try to set position immediately, or schedule for next idle
+        if not set_split_position():
+            pass  # Successfully set
+        else:
+            GLib.idle_add(set_split_position)
+        
+        # Focus new editor
+        new_editor.view.grab_focus()
+
+    def _close_split(self, overlay_to_close):
+        """Close a split view pane"""
+        # Find the parent Paned widget
+        parent = overlay_to_close.get_parent()
+        if not isinstance(parent, Gtk.Paned):
+            print("Error: Overlay parent is not a Paned")
+            return
+            
+        # Get the other child (the one to keep)
+        start_child = parent.get_start_child()
+        end_child = parent.get_end_child()
+        
+        if overlay_to_close == start_child:
+            keep_child = end_child
+        elif overlay_to_close == end_child:
+            keep_child = start_child
+        else:
+            print("Error: Overlay not found in Paned children")
+            return
+            
+        # Find the TabRoot by traversing up the widget hierarchy
+        # The parent could be nested Paned widgets, so we need to find the Box (TabRoot)
+        current = parent
+        tab_root = None
+        paned_widgets = [parent]  # Collect all Paned widgets in the hierarchy
+        while current:
+            current_parent = current.get_parent()
+            if isinstance(current_parent, Gtk.Box):
+                # Found the TabRoot
+                tab_root = current_parent
+                break
+            elif isinstance(current_parent, Gtk.Paned):
+                # Found another Paned in the hierarchy
+                paned_widgets.append(current_parent)
+            current = current_parent
+            
+        if not tab_root:
+            print("Error: Could not find TabRoot in widget hierarchy")
+            return
+            
+        # Now we need to handle the replacement:
+        # If parent's parent is TabRoot, simple case
+        # If parent's parent is another Paned, we need to replace parent in that Paned
+        
+        parent_of_paned = parent.get_parent()
+        
+        # Find and focus the editor we're keeping
+        editor_to_focus = None
+        if hasattr(keep_child, '_editor'):
+            editor_to_focus = keep_child._editor
+        elif isinstance(keep_child, Gtk.Paned):
+            # If keep_child is a Paned, focus the first editor we can find
+            def find_editor(widget):
+                if hasattr(widget, '_editor'):
+                    return widget._editor
+                if isinstance(widget, Gtk.Paned):
+                    start = widget.get_start_child()
+                    if start:
+                        result = find_editor(start)
+                        if result:
+                            return result
+                    end = widget.get_end_child()
+                    if end:
+                        return find_editor(end)
+                return None
+            
+            editor_to_focus = find_editor(keep_child)
+        
+        # CRITICAL: Clear focus on ALL Paned widgets in the hierarchy
+        # This prevents GTK from trying to restore focus to widgets being removed
+        for paned in paned_widgets:
+            paned.set_focus_child(None)
+        
+        # Remove both children from the Paned we're closing
+        parent.set_start_child(None)
+        parent.set_end_child(None)
+        
+        if parent_of_paned == tab_root:
+            # Simple case: Paned is direct child of TabRoot
+            tab_root.remove(parent)
+            tab_root.append(keep_child)
+        elif isinstance(parent_of_paned, Gtk.Paned):
+            # Nested case: Paned is child of another Paned
+            # Replace the closing Paned with the kept child in the parent Paned
+            if parent_of_paned.get_start_child() == parent:
+                parent_of_paned.set_start_child(keep_child)
+            elif parent_of_paned.get_end_child() == parent:
+                parent_of_paned.set_end_child(keep_child)
+        else:
+            print(f"Error: Unexpected parent type: {type(parent_of_paned)}")
+            return
+        
+        # Now grab focus to the kept editor after reparenting is complete
+        if editor_to_focus:
+            editor_to_focus.view.grab_focus()
+
+
+    def on_tab_close_left(self, action, parameter):
+        page = self._get_target_page(parameter)
+        if not page: return
+        
+        target_idx = self.tab_view.get_page_position(page)
+        
+        # Close all pages with index < target_idx
+        # We must be careful about indices shifting as we close
+        # Easiest is to close from 0 up to target_idx-1 repeatedly
+        
+        # Actually, just collect pages to close first
+        pages_to_close = []
+        for i in range(target_idx):
+            pages_to_close.append(self.tab_view.get_nth_page(i))
+            
+        for p in pages_to_close:
+            self.close_tab(p)
+
+    def on_tab_close_right(self, action, parameter):
+        page = self._get_target_page(parameter)
+        if not page: return
+        
+        target_idx = self.tab_view.get_page_position(page)
+        n_pages = self.tab_view.get_n_pages()
+        
+        pages_to_close = []
+        for i in range(target_idx + 1, n_pages):
+            pages_to_close.append(self.tab_view.get_nth_page(i))
+            
+        for p in pages_to_close:
+            self.close_tab(p)
+
+    def on_tab_close_other(self, action, parameter):
+        page = self._get_target_page(parameter)
+        if not page: return
+        
+        pages_to_close = []
+        n_pages = self.tab_view.get_n_pages()
+        for i in range(n_pages):
+            p = self.tab_view.get_nth_page(i)
+            if p != page:
+                pages_to_close.append(p)
+                
+        for p in pages_to_close:
+            self.close_tab(p)
+
+    def on_tab_close_action(self, action, parameter):
+        page = self._get_target_page(parameter)
+        if page:
+            self.close_tab(page)
 
     def show_save_changes_dialog(self, modified_editors, callback):
         """Show dialog for saving changes with list of modified files"""
@@ -8366,6 +9141,13 @@ class EditorWindow(Adw.ApplicationWindow):
     
     def perform_close_tab(self, page):
         """Actually remove the tab from the view"""
+        # Get the editor and release its untitled number if it has one
+        editor = page.get_child()._editor
+        if hasattr(editor, 'untitled_number') and editor.untitled_number is not None:
+            app = self.get_application()
+            if app and isinstance(app, VirtualTextEditor):
+                app.release_untitled_number(editor.untitled_number)
+        
         # If this is the last tab, close it and create a fresh new Untitled 1 tab
         if self.tab_view.get_n_pages() <= 1:
             # Remove from ChromeTabBar
@@ -8587,7 +9369,7 @@ class EditorWindow(Adw.ApplicationWindow):
         self.add_action(encoding_action)
         
         # Tab activate action (for dropdown menu)
-        tab_activate_action = Gio.SimpleAction.new("tab_activate", GLib.VariantType.new("s"))
+        tab_activate_action = Gio.SimpleAction.new("tab_activate", GLib.VariantType.new("i"))
         tab_activate_action.connect("activate", self.on_tab_activate_from_menu)
         self.add_action(tab_activate_action)
         
@@ -8645,7 +9427,7 @@ class EditorWindow(Adw.ApplicationWindow):
     
     def on_tab_activate_from_menu(self, action, parameter):
         """Handle tab activation from dropdown menu"""
-        index = int(parameter.get_string())
+        index = parameter.get_int32()
         if 0 <= index < len(self.tab_bar.tabs):
             tab = self.tab_bar.tabs[index]
             if hasattr(tab, '_page'):
@@ -8740,6 +9522,13 @@ class EditorWindow(Adw.ApplicationWindow):
             stream.close(None)
             
             print(f"Stream closed successfully")
+
+            # Release the untitled number if this was an untitled file being saved with a name
+            if hasattr(editor, 'untitled_number') and editor.untitled_number is not None:
+                app = self.get_application()
+                if app and isinstance(app, VirtualTextEditor):
+                    app.release_untitled_number(editor.untitled_number)
+                editor.untitled_number = None  # Clear it since it's now a named file
 
             # Update state
             editor.current_file_path = path
@@ -8962,10 +9751,67 @@ class EditorWindow(Adw.ApplicationWindow):
 # ============================================================
 
 class VirtualTextEditor(Adw.Application):
+    # Global set to track which untitled numbers are currently in use across all windows
+    _used_untitled_numbers = set()
+    
+    @classmethod
+    def get_next_global_untitled_number(cls):
+        """Get the next available untitled number (reuses freed numbers)"""
+        # Find the smallest available number starting from 1
+        num = 1
+        while num in cls._used_untitled_numbers:
+            num += 1
+        cls._used_untitled_numbers.add(num)
+        return num
+    
+    @classmethod
+    def release_untitled_number(cls, num):
+        """Release an untitled number so it can be reused"""
+        if num is not None and num in cls._used_untitled_numbers:
+            cls._used_untitled_numbers.discard(num)
+    
+    @classmethod
+    def scan_and_register_untitled_numbers(cls, window):
+        """Scan a window and register all untitled numbers currently in use"""
+        # This is called when we need to sync up with existing windows
+        # For example, when opening a second window
+        for i in range(window.tab_view.get_n_pages()):
+            page = window.tab_view.get_nth_page(i)
+            tab_root = page.get_child()
+            
+            # Recursively find all editors in this tab (including splits)
+            def find_all_editors(widget):
+                editors = []
+                if hasattr(widget, '_editor'):
+                    editors.append(widget._editor)
+                elif isinstance(widget, Gtk.Paned):
+                    start = widget.get_start_child()
+                    end = widget.get_end_child()
+                    if start:
+                        editors.extend(find_all_editors(start))
+                    if end:
+                        editors.extend(find_all_editors(end))
+                elif isinstance(widget, Gtk.Box):
+                    child = widget.get_first_child()
+                    while child:
+                        editors.extend(find_all_editors(child))
+                        child = child.get_next_sibling()
+                elif isinstance(widget, Gtk.Overlay):
+                    child = widget.get_child()
+                    if child:
+                        editors.extend(find_all_editors(child))
+                return editors
+            
+            editors = find_all_editors(tab_root)
+            for editor in editors:
+                if hasattr(editor, 'untitled_number') and editor.untitled_number is not None:
+                    cls._used_untitled_numbers.add(editor.untitled_number)
+    
     def __init__(self):
         super().__init__(application_id="io.github.fastrizwaan.vite",
                          flags=Gio.ApplicationFlags.HANDLES_OPEN)
         self.files_to_open = []
+
     
     def update_scrollbar_css(self, r, g, b, a):
         """Update scrollbar CSS with the given background color."""
