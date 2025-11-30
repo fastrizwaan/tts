@@ -7426,9 +7426,45 @@ class ChromeTab(Gtk.Box):
             'tab_index': self.tab_bar.tabs.index(self) if self.tab_bar and self in self.tab_bar.tabs else -1,
         }
         
-        # If we have a page reference, get the editor data
+        # If we have a page reference, serialize the entire structure
         if hasattr(self, '_page'):
-            editor = self._page.get_child()._editor
+            page = self._page
+            tab_root = page.get_child()
+            
+            # Serialize the structure (including splits)
+            def serialize_for_drag(widget):
+                """Serialize widget structure for drag and drop"""
+                if isinstance(widget, Gtk.Box):
+                    # TabRoot - serialize its first child
+                    child = widget.get_first_child()
+                    return serialize_for_drag(child) if child else None
+                elif hasattr(widget, '_editor'):
+                    # Overlay with editor
+                    editor = widget._editor
+                    return {
+                        'type': 'editor',
+                        'content': editor.get_text(),
+                        'file_path': editor.current_file_path,
+                        'title': editor.get_title(),
+                        'untitled_number': getattr(editor, 'untitled_number', None),
+                    }
+                elif isinstance(widget, Gtk.Paned):
+                    # Paned with splits
+                    return {
+                        'type': 'paned',
+                        'orientation': 'horizontal' if widget.get_orientation() == Gtk.Orientation.HORIZONTAL else 'vertical',
+                        'position': widget.get_position(),
+                        'start_child': serialize_for_drag(widget.get_start_child()),
+                        'end_child': serialize_for_drag(widget.get_end_child())
+                    }
+                return None
+            
+            structure = serialize_for_drag(tab_root)
+            
+            # Store both the structure and legacy fields for compatibility
+            tab_data['structure'] = structure
+            # Legacy fields for simple tabs (backwards compatibility)
+            editor = tab_root._editor
             tab_data['content'] = editor.get_text()
             tab_data['file_path'] = editor.current_file_path
             tab_data['title'] = editor.get_title()
@@ -8557,13 +8593,58 @@ class EditorWindow(Adw.ApplicationWindow):
         page = self._get_target_page(parameter)
         if not page: return
         
+        # Get the tab title and modified state from the page
+        page_title = page.get_title()
+        page_is_modified = any(
+            tab.has_css_class("modified") 
+            for tab in self.tab_bar.tabs 
+            if hasattr(tab, '_page') and tab._page == page
+        )
+        
         # Get the TabRoot which may contain splits
         tab_root = page.get_child()
+        
+        # Debug: print widget hierarchy
+        def print_hierarchy(widget, indent=0):
+            prefix = "  " * indent
+            widget_type = type(widget).__name__
+            has_editor = "HAS _editor" if hasattr(widget, '_editor') else ""
+            print(f"{prefix}{widget_type} {has_editor}")
+            
+            if isinstance(widget, Gtk.Paned):
+                start = widget.get_start_child()
+                end = widget.get_end_child()
+                if start:
+                    print(f"{prefix}  START:")
+                    print_hierarchy(start, indent + 2)
+                if end:
+                    print(f"{prefix}  END:")
+                    print_hierarchy(end, indent + 2)
+            elif isinstance(widget, Gtk.Box):
+                child = widget.get_first_child()
+                while child:
+                    print_hierarchy(child, indent + 1)
+                    child = child.get_next_sibling()
+            elif isinstance(widget, Gtk.Overlay):
+                child = widget.get_child()
+                if child:
+                    print(f"{prefix}  CHILD:")
+                    print_hierarchy(child, indent + 2)
+        
+        print("=== WIDGET HIERARCHY ===")
+        print_hierarchy(tab_root)
+        print("=== END HIERARCHY ===")
         
         # Serialize the entire tab structure including splits
         def serialize_structure(widget):
             """Recursively serialize the tab structure"""
-            if hasattr(widget, '_editor'):
+            # Check for Box (TabRoot) first - it has _editor but we need to look at its children
+            if isinstance(widget, Gtk.Box):
+                # TabRoot - serialize its first child
+                child = widget.get_first_child()
+                return serialize_structure(child) if child else None
+            # Check for _editor attribute (Overlay has this)
+            elif hasattr(widget, '_editor'):
                 # This is an overlay with an editor
                 editor = widget._editor
                 return {
@@ -8572,11 +8653,6 @@ class EditorWindow(Adw.ApplicationWindow):
                     'file_path': editor.current_file_path,
                     'title': editor.get_title(),
                     'untitled_number': getattr(editor, 'untitled_number', None),
-                    'is_modified': any(
-                        tab.has_css_class("modified") 
-                        for tab in self.tab_bar.tabs 
-                        if hasattr(tab, '_page') and tab._page == page
-                    )
                 }
             elif isinstance(widget, Gtk.Paned):
                 # This is a split
@@ -8587,20 +8663,27 @@ class EditorWindow(Adw.ApplicationWindow):
                     'start_child': serialize_structure(widget.get_start_child()),
                     'end_child': serialize_structure(widget.get_end_child())
                 }
-            elif isinstance(widget, Gtk.Box):
-                # TabRoot - serialize its first child
-                child = widget.get_first_child()
-                return serialize_structure(child) if child else None
-            elif isinstance(widget, Gtk.Overlay):
-                # Overlay - serialize its child
-                child = widget.get_child()
-                return serialize_structure(child) if child else None
+            else:
+                # Unknown widget type - try to get first child
+                print(f"Warning: Unknown widget type {type(widget)}, trying to get child")
+                if hasattr(widget, 'get_first_child'):
+                    child = widget.get_first_child()
+                    return serialize_structure(child) if child else None
+                elif hasattr(widget, 'get_child'):
+                    child = widget.get_child()
+                    return serialize_structure(child) if child else None
             return None
         
         structure = serialize_structure(tab_root)
         if not structure:
             print("Error: Could not serialize tab structure")
             return
+        
+        # Debug: print the structure
+        import json
+        print("=== SERIALIZED STRUCTURE ===")
+        print(json.dumps(structure, indent=2, default=str))
+        print("=== END STRUCTURE ===")
         
         # Create new window
         app = self.get_application()
@@ -8614,23 +8697,28 @@ class EditorWindow(Adw.ApplicationWindow):
         new_window = EditorWindow(app)
         new_window.present()
         
-        # Get and remove the initial tab that was created automatically
-        new_page = new_window.tab_view.get_selected_page()
-        new_tab_root = new_page.get_child()
+        # Remove the initial empty tab that was created automatically
+        initial_page = new_window.tab_view.get_selected_page()
+        initial_tab_root = initial_page.get_child()
         
-        # Release the untitled number from the initial tab
+        # Release the untitled number from the initial tab before removing it
         if app and isinstance(app, VirtualTextEditor):
-            new_editor = new_tab_root._editor
-            if hasattr(new_editor, 'untitled_number') and new_editor.untitled_number is not None:
-                app.release_untitled_number(new_editor.untitled_number)
+            initial_editor = initial_tab_root._editor
+            if hasattr(initial_editor, 'untitled_number') and initial_editor.untitled_number is not None:
+                app.release_untitled_number(initial_editor.untitled_number)
         
-        # Clear the tab_root to rebuild it
-        child = new_tab_root.get_first_child()
-        while child:
-            new_tab_root.remove(child)
-            child = new_tab_root.get_first_child()
+        # Remove the initial tab completely
+        new_window.tab_view.close_page(initial_page)
+        for tab in new_window.tab_bar.tabs:
+            if hasattr(tab, '_page') and tab._page == initial_page:
+                new_window.tab_bar.remove_tab(tab)
+                break
         
-        # Reconstruct the structure in the new window
+        # Now create a completely new tab with the transferred structure
+        # Create TabRoot (Gtk.Box)
+        new_tab_root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        
+        # Reconstruct the structure in the new tab root
         def reconstruct_structure(data, is_root=False):
             """Recursively reconstruct the tab structure"""
             if data['type'] == 'editor':
@@ -8651,7 +8739,7 @@ class EditorWindow(Adw.ApplicationWindow):
                     new_tab_root._editor = editor
                     editor._overlay = overlay
                 
-                return overlay, data['is_modified']
+                return overlay, editor
                 
             elif data['type'] == 'paned':
                 # Create paned
@@ -8661,11 +8749,16 @@ class EditorWindow(Adw.ApplicationWindow):
                 paned.set_vexpand(True)
                 
                 # Reconstruct children
-                start_widget, start_modified = reconstruct_structure(data['start_child'])
-                end_widget, end_modified = reconstruct_structure(data['end_child'])
+                start_widget, start_editor = reconstruct_structure(data['start_child'])
+                end_widget, end_editor = reconstruct_structure(data['end_child'])
                 
                 paned.set_start_child(start_widget)
                 paned.set_end_child(end_widget)
+                
+                # If this is root, set the first editor as the primary editor for tab_root
+                if is_root and start_editor:
+                    new_tab_root._editor = start_editor
+                    start_editor._overlay = start_widget
                 
                 # Set position after widget is realized
                 position = data.get('position', 400)
@@ -8674,50 +8767,41 @@ class EditorWindow(Adw.ApplicationWindow):
                     return False
                 GLib.idle_add(set_pos)
                 
-                return paned, (start_modified or end_modified)
+                return paned, start_editor  # Return the first editor as the "primary" one
             
-            return None, False
+            return None, None
         
         # Reconstruct the structure
-        reconstructed_widget, is_modified = reconstruct_structure(structure, is_root=True)
+        reconstructed_widget, primary_editor = reconstruct_structure(structure, is_root=True)
         
         if reconstructed_widget:
             new_tab_root.append(reconstructed_widget)
+            reconstructed_widget.set_hexpand(True)
+            reconstructed_widget.set_vexpand(True)
             
-            # Update page title
-            new_page.set_title(structure.get('title', 'Untitled'))
+            # Add as a new page to the tab view
+            new_page = new_window.tab_view.append(new_tab_root)
+            new_page.set_title(page_title)
+            new_window.tab_view.set_selected_page(new_page)
             
-            # Update ChromeTab
+            # Add ChromeTab to ChromeTabBar
+            new_window.add_tab_button(new_page)
+            
+            # Update modified state on the chrome tab
             for tab in new_window.tab_bar.tabs:
                 if hasattr(tab, '_page') and tab._page == new_page:
-                    tab.set_title(structure.get('title', 'Untitled'))
-                    if is_modified:
+                    if page_is_modified:
                         tab.add_css_class("modified")
                     break
             
-            # Update header
+            # Update UI
+            new_window.update_ui_state()
             new_window.update_header_title()
         
-        # Mark original editor as unmodified to avoid save prompt and close
-        # We need to clear untitled numbers for all editors in the original tab to prevent release
-        def clear_untitled_numbers(widget):
-            if hasattr(widget, '_editor'):
-                widget._editor.untitled_number = None
-            elif isinstance(widget, Gtk.Paned):
-                start = widget.get_start_child()
-                end = widget.get_end_child()
-                if start:
-                    clear_untitled_numbers(start)
-                if end:
-                    clear_untitled_numbers(end)
-            elif isinstance(widget, (Gtk.Box, Gtk.Overlay)):
-                child = widget.get_first_child() if isinstance(widget, Gtk.Box) else widget.get_child()
-                if child:
-                    clear_untitled_numbers(child)
+        # Mark original editor as unmodified to avoid save prompt
+        # Mark the tab to not release untitled numbers since they were transferred
+        page._untitled_numbers_transferred = True
         
-        clear_untitled_numbers(tab_root)
-        
-        # Mark as unmodified
         for tab in self.tab_bar.tabs:
             if hasattr(tab, '_page') and tab._page == page:
                 tab.remove_css_class("modified")
@@ -8728,32 +8812,101 @@ class EditorWindow(Adw.ApplicationWindow):
 
     def transfer_tab_from_data(self, tab_data, drop_position=None):
         """Create a new tab from transferred data (cross-window drag)"""
-        # Create new tab with the transferred content
-        new_editor = EditorPage(tab_data.get('title', 'Untitled 1'))
-        new_editor.set_text(tab_data.get('content', ''))
-        new_editor.current_file_path = tab_data.get('file_path')
-        new_editor.set_title(tab_data.get('title', 'Untitled 1'))
-        new_editor.untitled_number = tab_data.get('untitled_number')  # Preserve untitled number
-        
-        # Create overlay layout for editor
-        overlay, new_editor = self._create_editor_overlay(new_editor)
-        
         # Create TabRoot
         tab_root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        tab_root.append(overlay)
-        overlay.set_hexpand(True)
-        overlay.set_vexpand(True)
         
-        # Store references
-        tab_root._editor = new_editor
-        new_editor._overlay = overlay
+        # Check if we have structure data (with splits) or just simple editor data
+        if 'structure' in tab_data and tab_data['structure']:
+            # Reconstruct the full structure including splits
+            structure = tab_data['structure']
+            
+            def reconstruct_from_drag(data, is_root=False):
+                """Reconstruct structure from drag data"""
+                if data['type'] == 'editor':
+                    # Create editor
+                    editor = EditorPage(data['title'])
+                    editor.set_text(data['content'])
+                    editor.current_file_path = data['file_path']
+                    editor.set_title(data['title'])
+                    editor.untitled_number = data['untitled_number']
+                    
+                    # Create overlay (with close button if not root)
+                    overlay, editor = self._create_editor_overlay(editor, add_close_button=not is_root)
+                    overlay.set_hexpand(True)
+                    overlay.set_vexpand(True)
+                    
+                    if is_root:
+                        # Store reference on tab_root for the primary editor
+                        tab_root._editor = editor
+                        editor._overlay = overlay
+                    
+                    return overlay, editor
+                    
+                elif data['type'] == 'paned':
+                    # Create paned
+                    orientation = Gtk.Orientation.HORIZONTAL if data['orientation'] == 'horizontal' else Gtk.Orientation.VERTICAL
+                    paned = Gtk.Paned(orientation=orientation)
+                    paned.set_hexpand(True)
+                    paned.set_vexpand(True)
+                    
+                    # Reconstruct children
+                    start_widget, start_editor = reconstruct_from_drag(data['start_child'])
+                    end_widget, end_editor = reconstruct_from_drag(data['end_child'])
+                    
+                    paned.set_start_child(start_widget)
+                    paned.set_end_child(end_widget)
+                    
+                    # If this is root, set the first editor as the primary editor
+                    if is_root and start_editor:
+                        tab_root._editor = start_editor
+                        start_editor._overlay = start_widget
+                    
+                    # Set position
+                    position = data.get('position', 400)
+                    def set_pos():
+                        paned.set_position(position)
+                        return False
+                    GLib.idle_add(set_pos)
+                    
+                    return paned, start_editor
+                
+                return None, None
+            
+            reconstructed_widget, primary_editor = reconstruct_from_drag(structure, is_root=True)
+            
+            if reconstructed_widget:
+                tab_root.append(reconstructed_widget)
+                reconstructed_widget.set_hexpand(True)
+                reconstructed_widget.set_vexpand(True)
+        else:
+            # Legacy: simple editor without splits
+            new_editor = EditorPage(tab_data.get('title', 'Untitled 1'))
+            new_editor.set_text(tab_data.get('content', ''))
+            new_editor.current_file_path = tab_data.get('file_path')
+            new_editor.set_title(tab_data.get('title', 'Untitled 1'))
+            new_editor.untitled_number = tab_data.get('untitled_number')
+            
+            # Create overlay layout for editor
+            overlay, new_editor = self._create_editor_overlay(new_editor)
+            overlay.set_hexpand(True)
+            overlay.set_vexpand(True)
+            
+            tab_root.append(overlay)
+            
+            # Store references
+            tab_root._editor = new_editor
+            new_editor._overlay = overlay
+        
+        # Get the primary editor (always set on tab_root)
+        primary_editor = tab_root._editor
+        title = tab_data.get('title', primary_editor.get_title() if primary_editor else 'Untitled')
         
         # Add to tab view
         page = self.tab_view.append(tab_root)
-        page.set_title(new_editor.get_title())
+        page.set_title(title)
         
         # Add ChromeTab to ChromeTabBar at the specified position
-        chrome_tab = ChromeTab(title=new_editor.get_title())
+        chrome_tab = ChromeTab(title=title)
         chrome_tab._page = page
         
         # Connect signals
@@ -8805,14 +8958,18 @@ class EditorWindow(Adw.ApplicationWindow):
         self.update_tab_dropdown()
         
         # Focus the editor
-        new_editor.view.grab_focus()
+        if primary_editor:
+            primary_editor.view.grab_focus()
         
-        return new_editor
+        return primary_editor
 
     def close_tab_after_drag(self, tab_index):
         """Close a tab after successful cross-window drag"""
         if 0 <= tab_index < self.tab_view.get_n_pages():
             page = self.tab_view.get_nth_page(tab_index)
+            
+            # Mark the page to not release untitled numbers since they were transferred
+            page._untitled_numbers_transferred = True
             
             # Mark as unmodified to avoid save prompt (content was transferred)
             for tab in self.tab_bar.tabs:
@@ -8874,6 +9031,7 @@ class EditorWindow(Adw.ApplicationWindow):
         new_editor.buf = original_editor.buf # SHARE BUFFER
         new_editor.view = VirtualTextView(new_editor.buf) # New view
         new_editor.current_file_path = original_editor.current_file_path
+        new_editor.untitled_number = getattr(original_editor, 'untitled_number', None)  # Share untitled number
         
         # Create overlay for new editor with close button
         new_overlay, new_editor = self._create_editor_overlay(new_editor, add_close_button=True)
@@ -9141,12 +9299,21 @@ class EditorWindow(Adw.ApplicationWindow):
     
     def perform_close_tab(self, page):
         """Actually remove the tab from the view"""
+        # Check if untitled numbers were transferred (e.g., moved to another window)
+        numbers_transferred = getattr(page, '_untitled_numbers_transferred', False)
+        
         # Get the editor and release its untitled number if it has one
         editor = page.get_child()._editor
         if hasattr(editor, 'untitled_number') and editor.untitled_number is not None:
-            app = self.get_application()
-            if app and isinstance(app, VirtualTextEditor):
-                app.release_untitled_number(editor.untitled_number)
+            if not numbers_transferred:
+                print(f"[CLOSE TAB] Releasing untitled number {editor.untitled_number} for editor '{editor.get_title()}'")
+                app = self.get_application()
+                if app and isinstance(app, VirtualTextEditor):
+                    app.release_untitled_number(editor.untitled_number)
+            else:
+                print(f"[CLOSE TAB] NOT releasing untitled number {editor.untitled_number} for editor '{editor.get_title()}' (transferred to another window)")
+        else:
+            print(f"[CLOSE TAB] Editor '{editor.get_title()}' has no untitled number to release")
         
         # If this is the last tab, close it and create a fresh new Untitled 1 tab
         if self.tab_view.get_n_pages() <= 1:
@@ -9762,6 +9929,7 @@ class VirtualTextEditor(Adw.Application):
         while num in cls._used_untitled_numbers:
             num += 1
         cls._used_untitled_numbers.add(num)
+        print(f"[UNTITLED] Allocated number {num}, in use: {sorted(cls._used_untitled_numbers)}")
         return num
     
     @classmethod
@@ -9769,6 +9937,9 @@ class VirtualTextEditor(Adw.Application):
         """Release an untitled number so it can be reused"""
         if num is not None and num in cls._used_untitled_numbers:
             cls._used_untitled_numbers.discard(num)
+            print(f"[UNTITLED] Released number {num}, in use: {sorted(cls._used_untitled_numbers)}")
+        elif num is not None:
+            print(f"[UNTITLED] WARNING: Tried to release {num} but it wasn't in use set: {sorted(cls._used_untitled_numbers)}")
     
     @classmethod
     def scan_and_register_untitled_numbers(cls, window):
