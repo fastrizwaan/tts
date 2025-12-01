@@ -2863,6 +2863,12 @@ class InputController:
         b = self.buf
         ln = b.cursor_line
         
+        # If there's a selection and not extending, move to start of selection
+        if not extend_selection and b.selection.has_selection():
+            start_ln, start_col, _, _ = b.selection.get_bounds()
+            b.set_cursor(start_ln, start_col, extend_selection)
+            return
+        
         # Visual line movement when wrapping enabled
         if self.view.renderer.wrap_enabled:
             # Create cairo context for calculations
@@ -2980,6 +2986,12 @@ class InputController:
     def move_down(self, extend_selection=False):
         b = self.buf
         ln = b.cursor_line
+        
+        # If there's a selection and not extending, move to end of selection
+        if not extend_selection and b.selection.has_selection():
+            _, _, end_ln, end_col = b.selection.get_bounds()
+            b.set_cursor(end_ln, end_col, extend_selection)
+            return
         
         # Visual line movement when wrapping enabled
         if self.view.renderer.wrap_enabled:
@@ -4404,12 +4416,19 @@ class Renderer:
                     elif ln == sel_start_ln and ln == sel_end_ln:
                         seg_sel_start = max(sel_start_col, col_start)
                         seg_sel_end = min(sel_end_col, col_end)
-                        if seg_sel_start < seg_sel_end:
+                        
+                        # Special case: selection includes newline on same line
+                        # E.g., selecting from col 11 to 12 on a line with length 11
+                        if sel_end_col > col_end and seg_sel_start == col_end:
+                            # Selection is just the newline area (start at end, extends beyond)
+                            s_col = seg_sel_start - col_start
+                            e_col = sel_end_col - col_start  # Use original sel_end_col, not capped
+                        elif seg_sel_start < seg_sel_end:
                             s_col = seg_sel_start - col_start
                             e_col = seg_sel_end - col_start
                     elif ln == sel_start_ln:
-                        # Allow selection for empty lines on their last visual line
-                        if sel_start_col < col_end or (sel_start_col == col_start and vis_idx == len(wrap_points) - 1):
+                        # Allow selection for empty lines on their last visual line, AND for starting at EOL
+                        if sel_start_col < col_end or (sel_start_col == col_start and vis_idx == len(wrap_points) - 1) or (sel_start_col == col_end and vis_idx == len(wrap_points) - 1):
                             s_col = max(0, sel_start_col - col_start)
                             e_col = len(text_segment)
                             if vis_idx == len(wrap_points) - 1:
@@ -6168,12 +6187,22 @@ class VirtualTextView(Gtk.DrawingArea):
                     self.buf.selection.set_end(ln, 1)
                     self.buf.cursor_line = ln
                     self.buf.cursor_col = 0
+                    # Set anchor points for drag extension
+                    self.anchor_word_start_line = ln
+                    self.anchor_word_start_col = 0
+                    self.anchor_word_end_line = ln
+                    self.anchor_word_end_col = 1
                 elif next_line_text is not None and len(next_line_text) > 0:
                     # Next line has text: select current empty line + next line's text
                     self.buf.selection.set_start(ln, 0)
                     self.buf.selection.set_end(ln + 1, len(next_line_text))
                     self.buf.cursor_line = ln + 1
                     self.buf.cursor_col = len(next_line_text)
+                    # Set anchor points for drag extension
+                    self.anchor_word_start_line = ln
+                    self.anchor_word_start_col = 0
+                    self.anchor_word_end_line = ln + 1
+                    self.anchor_word_end_col = len(next_line_text)
                 else:
                     # Last line (empty): don't select anything
                     self.buf.selection.clear()
@@ -6186,17 +6215,37 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.queue_draw()
                 return
 
-            # Case 2: double-click beyond end of text
-            if col > line_len:
+            # Case 2: double-click at or beyond end of text (context-aware like empty lines)
+            if col >= line_len:
                 # Check if this line has a newline (not the last line)
                 has_newline = ln < self.buf.total() - 1
                 
                 if has_newline:
-                    # Line has newline: select the newline area
-                    self.buf.selection.set_start(ln, line_len)
-                    self.buf.selection.set_end(ln, line_len + 1)
-                    self.buf.cursor_line = ln
-                    self.buf.cursor_col = line_len
+                    # Check what comes next (similar to empty line logic)
+                    next_line_text = self.buf.get_line(ln + 1)
+                    
+                    if len(next_line_text) == 0:
+                        # Next line is empty: select just the newline area (EOL to viewport)
+                        self.buf.selection.set_start(ln, line_len)
+                        self.buf.selection.set_end(ln, line_len + 1)
+                        self.buf.cursor_line = ln
+                        self.buf.cursor_col = line_len
+                        # Set anchor points for drag extension
+                        self.anchor_word_start_line = ln
+                        self.anchor_word_start_col = line_len
+                        self.anchor_word_end_line = ln
+                        self.anchor_word_end_col = line_len + 1
+                    else:
+                        # Next line has text: select newline + next line's text
+                        self.buf.selection.set_start(ln, line_len)
+                        self.buf.selection.set_end(ln + 1, len(next_line_text))
+                        self.buf.cursor_line = ln + 1
+                        self.buf.cursor_col = len(next_line_text)
+                        # Set anchor points for drag extension
+                        self.anchor_word_start_line = ln
+                        self.anchor_word_start_col = line_len
+                        self.anchor_word_end_line = ln + 1
+                        self.anchor_word_end_col = len(next_line_text)
                 else:
                     # Last line (no newline): select trailing content
                     # Find what's at the end: word or spaces
@@ -6209,6 +6258,11 @@ class VirtualTextView(Gtk.DrawingArea):
                         self.buf.selection.set_end(ln, line_len)
                         self.buf.cursor_line = ln
                         self.buf.cursor_col = line_len
+                        # Set anchor points for drag extension
+                        self.anchor_word_start_line = ln
+                        self.anchor_word_start_col = start
+                        self.anchor_word_end_line = ln
+                        self.anchor_word_end_col = line_len
                     else:
                         # Select the last word
                         start_col, end_col = self.find_word_boundaries(line_text, line_len - 1)
@@ -6216,6 +6270,11 @@ class VirtualTextView(Gtk.DrawingArea):
                         self.buf.selection.set_end(ln, end_col)
                         self.buf.cursor_line = ln
                         self.buf.cursor_col = end_col
+                        # Set anchor points for drag extension
+                        self.anchor_word_start_line = ln
+                        self.anchor_word_start_col = start_col
+                        self.anchor_word_end_line = ln
+                        self.anchor_word_end_col = end_col
                 
                 # Enable word selection mode for drag
                 self.word_selection_mode = True
@@ -6743,13 +6802,27 @@ class VirtualTextView(Gtk.DrawingArea):
                     return
                 else:
                     # Empty line not at EOF: treat entire line as one "word"
-                    # Use start or end based on direction
-                    if ln > sel_end_line or (ln == sel_end_line and 0 >= sel_end_col):
-                        # Dragging forward from end of selection
-                        self.ctrl.update_drag(ln, 0)
+                    # Use anchor points for direction detection (same as word selection)
+                    anchor_start_line = self.anchor_word_start_line
+                    anchor_start_col = self.anchor_word_start_col
+                    anchor_end_line = self.anchor_word_end_line
+                    anchor_end_col = self.anchor_word_end_col
+                    
+                    # Determine drag direction based on anchor
+                    is_forward = False
+                    if ln > anchor_start_line:
+                        is_forward = True
+                    elif ln == anchor_start_line and 0 >= anchor_start_col:
+                        is_forward = True
+                    
+                    if is_forward:
+                        # Dragging Forward: anchor at start, extend from empty line newline
+                        self.buf.selection.set_start(anchor_start_line, anchor_start_col)
+                        self.ctrl.update_drag(ln, 1)  # Select empty line + newline
                     else:
-                        # Dragging backward from start of selection
-                        self.ctrl.update_drag(ln, 0)
+                        # Dragging Backward: anchor at end, extend to empty line start
+                        self.buf.selection.set_start(anchor_end_line, anchor_end_col)
+                        self.ctrl.update_drag(ln, 0)  # Select from start of empty line
             elif line_text and 0 <= col <= len(line_text):
                 # Line with text: snap to word boundaries
                 start_col, end_col = self.find_word_boundaries(line_text, min(col, len(line_text) - 1))
