@@ -34,13 +34,22 @@ scrollbar trough {{
 }}
 /* Vertical scrollbar specific */
 .overlay-scrollbar {{
+    min-width: 7px;
     background-color: transparent;
     min-width: 3px;
 }}
 
 .overlay-scrollbar trough {{
+    min-width: 7px;
     border-radius: 0px;
     background-color: transparent   ;
+}}
+
+.overlay-scrollbar trough:hover {{
+    min-width: 7px;
+    border-radius: 0px;
+    background-color: alpha(@window_fg_color, 0.2);
+    transition: min-width 200ms ease, background-color 200ms ease;    
 }}
 
 .overlay-scrollbar trough > slider {{
@@ -53,6 +62,12 @@ scrollbar trough {{
 .overlay-scrollbar trough > slider:hover {{
     min-width: 7px;
     background-color: alpha(@window_fg_color, 0.50);
+    min-width: 7px;
+}}
+/* Hover the scrollbar OR trough to expand the slider */
+.overlay-scrollbar trough:hover > slider {{
+    min-width: 7px;
+    background-color: alpha(@window_fg_color, 0.55);
 }}
 
 .overlay-scrollbar trough > slider:active {{
