@@ -15,43 +15,27 @@ from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo, GLib, Gio
 DRAGGED_TAB = None
 
 CSS_OVERLAY_SCROLLBAR = """
-/* ========================
-   Scrollbars
-   ======================== */
-
-/* General scrollbar styling - catches all scrollbars */
-scrollbar {{
-    background-color: transparent;
-}}
-
-scrollbar trough {{
-    background-color: transparent;
-    border-radius: 0px;
-}}
-
-.toolbarview {{
-    background: @headerbar_bg_color; 
-}}
-/* Vertical scrollbar specific */
+/* ===== Vertical overlay scrollbar ===== */
+/* Vertical Scrollbar container */
 .overlay-scrollbar {{
-    min-width: 7px;
     background-color: transparent;
-    min-width: 3px;
 }}
 
+
+/* Trough (track) */
 .overlay-scrollbar trough {{
-    min-width: 7px;
+    min-width: 8px;
     border-radius: 0px;
-    background-color: transparent   ;
+    background-color: transparent;
 }}
 
+/* Trough hover highlight */
 .overlay-scrollbar trough:hover {{
-    min-width: 7px;
-    border-radius: 0px;
     background-color: alpha(@window_fg_color, 0.2);
-    transition: min-width 200ms ease, background-color 200ms ease;    
+    transition: background-color 200ms ease;
 }}
 
+/* Base slider (thumb) */
 .overlay-scrollbar trough > slider {{
     min-width: 3px;
     border-radius: 12px;
@@ -59,48 +43,98 @@ scrollbar trough {{
     transition: min-width 200ms ease, background-color 200ms ease;
 }}
 
-.overlay-scrollbar trough > slider:hover {{
-    min-width: 7px;
-    background-color: alpha(@window_fg_color, 0.50);
-    min-width: 7px;
-}}
-/* Hover the scrollbar OR trough to expand the slider */
+
+/* Slider expands when trough is hovered */
 .overlay-scrollbar trough:hover > slider {{
-    min-width: 7px;
-    background-color: alpha(@window_fg_color, 0.55);
+    min-width: 8px;
+    background-color: alpha(@window_bg_color, 0.05);
+}}
+/* Container hover highlights trough */
+.overlay-scrollbar:hover trough {{
+    background-color: alpha(@window_fg_color, 0.1);
 }}
 
+/* Container hover expands slider */
+.overlay-scrollbar:hover trough > slider {{
+    min-width: 8px;
+    background-color: rgba(53,132,228,1);
+}}
+
+
+/* Slider expands when hovered directly */
+.overlay-scrollbar trough > slider:hover {{
+    min-width: 8px;
+    background-color: rgba(73,152,248, 1);
+}}
+/* Slider active/dragging */
 .overlay-scrollbar trough > slider:active {{
-    min-width: 7px;
-    background-color: rgba(53,132,228,1.0);
+    min-width: 8px;
+    background-color: rgba(53,132,228, 1);
 }}
 
-/* Horizontal scrollbar specific */
+
+
+/* ===== Horizontal overlay scrollbar ===== */
+
+/* Horizontal Scrollbar container */
 .hscrollbar-overlay {{
     background-color: transparent;
-    min-width: 3px;
 }}
 
+/* Trough (track) */
 .hscrollbar-overlay trough {{
+    min-height: 8px;
     border-radius: 0px;
     background-color: transparent;
 }}
 
+/* Trough hover highlight */
+.hscrollbar-overlay trough:hover {{
+    background-color: alpha(@window_fg_color, 0.2);
+    transition: background-color 200ms ease;
+}}
+
+/* Base slider (thumb) */
 .hscrollbar-overlay trough > slider {{
     min-height: 3px;
     border-radius: 12px;
+    background-color: alpha(@window_fg_color, 0.2);
     transition: min-height 200ms ease, background-color 200ms ease;
+}}
+
+
+/* Slider expands when trough is hovered */
+.hscrollbar-overlay trough:hover > slider {{
+    min-height: 8px;
+    background-color: alpha(@window_fg_color, 0.55);
+}}
+
+/* Container hover highlights trough */
+.hscrollbar-overlay:hover trough {{
     background-color: alpha(@window_fg_color, 0.2);
 }}
 
-.hscrollbar-overlay trough > slider:hover {{
-    min-height: 7px;
-    background-color: alpha(@window_fg_color, 0.50);
+/* Container hover expands slider */
+.hscrollbar-overlay:hover trough > slider {{
+    min-height: 8px;
+    background-color: rgba(53,132,228,1);
 }}
 
+/* Slider expands when hovered directly */
+.hscrollbar-overlay trough > slider:hover {{
+    min-height: 8px;
+    background-color: rgba(73,152,248, 1);
+}}
+
+/* Slider active/dragging */
 .hscrollbar-overlay trough > slider:active {{
-    min-height: 7px;
-    background-color: rgba(53,132,228,1.0);
+    min-height: 8px;
+    background-color: rgba(53,132,228, 1);
+}}
+
+
+.toolbarview {{
+    background: @headerbar_bg_color; 
 }}
 
 /* ========================
@@ -157,8 +191,8 @@ scrollbar trough {{
     background-color: alpha(@window_fg_color, 0.7);
     border-radius: 4px;
 
-    margin-top: 10px;   /* vertically center inside tab */
-    margin-bottom: 10px;
+    margin-top: 8px;   /* vertically center inside tab */
+    margin-bottom: 8px;
 }}
 
 .chrome-tab label {{
@@ -7248,7 +7282,7 @@ class ChromeTab(Gtk.Box):
         dot_box.set_hexpand(True)
 
         self.modified_dot = Gtk.DrawingArea()
-        self.modified_dot.set_size_request(8, 8)
+        #self.modified_dot.set_size_request(8, 8)
         self.modified_dot.add_css_class("modified-dot")
         self.modified_dot.set_visible(False)  # hidden by default
         dot_box.append(self.modified_dot)
@@ -8428,8 +8462,7 @@ class EditorWindow(Adw.ApplicationWindow):
             add_close_button: If True, adds a close button for split views
         """
         overlay = Gtk.Overlay()
-        overlay.add_css_class("overlay-scrollbar")
-
+            
         # Setup scrollbars
         vscroll = Gtk.Scrollbar(
             orientation=Gtk.Orientation.VERTICAL,
