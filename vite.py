@@ -4524,26 +4524,33 @@ class Renderer:
                             # Check if in overwrite mode (from view)
                             is_overwrite = hasattr(buf, '_view') and buf._view and hasattr(buf._view, 'overwrite_mode') and buf._view.overwrite_mode
                             
-                            if is_overwrite and cursor_rel_col < len(text_segment):
+                            if is_overwrite:
                                 # Block cursor for overwrite mode
-                                # Get character at cursor position
-                                char_at_cursor = text_segment[cursor_rel_col] if cursor_rel_col < len(text_segment) else ' '
-                                
-                                # Calculate character width
-                                char_layout = PangoCairo.create_layout(cr)
-                                char_layout.set_font_description(self.font)
-                                char_layout.set_text(char_at_cursor, -1)
-                                char_width, _ = char_layout.get_pixel_size()
-                                
-                                # Draw block cursor with inverted colors
-                                cr.set_source_rgba(r, g, b, opacity * 0.5)  # Semi-transparent block
-                                cr.rectangle(cx, y, char_width, self.line_h)
-                                cr.fill()
-                                
-                                # Draw character in inverted color
-                                cr.set_source_rgba(1 - r, 1 - g, 1 - b, opacity)
-                                cr.move_to(cx, y)
-                                PangoCairo.show_layout(cr, char_layout)
+                                if cursor_rel_col < len(text_segment):
+                                    # On character - get character width
+                                    char_at_cursor = text_segment[cursor_rel_col]
+                                    
+                                    # Calculate character width
+                                    char_layout = PangoCairo.create_layout(cr)
+                                    char_layout.set_font_description(self.font)
+                                    char_layout.set_text(char_at_cursor, -1)
+                                    char_width, _ = char_layout.get_pixel_size()
+                                    
+                                    # Draw darker block cursor (0.7 instead of 0.5)
+                                    cr.set_source_rgba(r, g, b, opacity * 0.7)
+                                    cr.rectangle(cx, y, char_width, self.line_h)
+                                    cr.fill()
+                                    
+                                    # Draw character in inverted color
+                                    cr.set_source_rgba(1 - r, 1 - g, 1 - b, opacity)
+                                    cr.move_to(cx, y)
+                                    PangoCairo.show_layout(cr, char_layout)
+                                else:
+                                    # At end of line - use narrow block
+                                    block_width = 8
+                                    cr.set_source_rgba(r, g, b, opacity * 0.7)
+                                    cr.rectangle(cx, y, block_width, self.line_h)
+                                    cr.fill()
                             else:
                                 # Normal line cursor for insert mode
                                 cr.set_source_rgba(r, g, b, opacity)
