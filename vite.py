@@ -1011,7 +1011,7 @@ class VirtualBuffer(GObject.Object):
         return True
 
 
-    def insert_text(self, text):
+    def insert_text(self, text, overwrite=False):
         # If there's a selection, delete it first
         if self.selection.has_selection():
             self.delete_selection()
@@ -1027,7 +1027,14 @@ class VirtualBuffer(GObject.Object):
             # ---------------------------
             # Simple one-line insert
             # ---------------------------
-            new_line = old[:col] + text + old[col:]
+            
+            # Overwrite mode: replace character at cursor (only for single characters)
+            if overwrite and len(text) == 1 and col < len(old):
+                # Replace the character at cursor position
+                new_line = old[:col] + text + old[col+1:]
+            else:
+                # Normal insert mode
+                new_line = old[:col] + text + old[col:]
 
             if ln in self.inserted_lines:
                 self.inserted_lines[ln] = new_line
@@ -4513,11 +4520,35 @@ class Renderer:
                         if cursor_visible:
                             opacity = 0.5 + 0.5 * math.cos(cursor_phase * math.pi)
                             r, g, b = self.text_foreground_color
-                            cr.set_source_rgba(r, g, b, opacity)
-
-                            # Slightly thicker for clarity on HiDPI
-                            cr.rectangle(cx, y, 1.3, self.line_h)
-                            cr.fill()
+                            
+                            # Check if in overwrite mode (from view)
+                            is_overwrite = hasattr(buf, '_view') and buf._view and hasattr(buf._view, 'overwrite_mode') and buf._view.overwrite_mode
+                            
+                            if is_overwrite and cursor_rel_col < len(text_segment):
+                                # Block cursor for overwrite mode
+                                # Get character at cursor position
+                                char_at_cursor = text_segment[cursor_rel_col] if cursor_rel_col < len(text_segment) else ' '
+                                
+                                # Calculate character width
+                                char_layout = PangoCairo.create_layout(cr)
+                                char_layout.set_font_description(self.font)
+                                char_layout.set_text(char_at_cursor, -1)
+                                char_width, _ = char_layout.get_pixel_size()
+                                
+                                # Draw block cursor with inverted colors
+                                cr.set_source_rgba(r, g, b, opacity * 0.5)  # Semi-transparent block
+                                cr.rectangle(cx, y, char_width, self.line_h)
+                                cr.fill()
+                                
+                                # Draw character in inverted color
+                                cr.set_source_rgba(1 - r, 1 - g, 1 - b, opacity)
+                                cr.move_to(cx, y)
+                                PangoCairo.show_layout(cr, char_layout)
+                            else:
+                                # Normal line cursor for insert mode
+                                cr.set_source_rgba(r, g, b, opacity)
+                                cr.rectangle(cx, y, 1.3, self.line_h)
+                                cr.fill()
 
                 y += self.line_h
                 current_vis_count += 1
@@ -4723,6 +4754,9 @@ class VirtualTextView(Gtk.DrawingArea):
         self.scroll_x = 0
         self.renderer.wrap_enabled = True
         self.needs_scrollbar_init = False  # Flag to update scrollbar after file load
+        
+        # Overwrite mode (toggled with Insert key)
+        self.overwrite_mode = False
 
         # Throttling for scrollbar updates
         self.scroll_update_pending = False
@@ -5281,8 +5315,8 @@ class VirtualTextView(Gtk.DrawingArea):
     def on_commit(self, im, text):
         """Handle committed text from IM (finished composition)"""
         if text:
-            # Insert typed text
-            self.buf.insert_text(text)
+            # Insert typed text with overwrite mode if enabled
+            self.buf.insert_text(text, overwrite=self.overwrite_mode)
 
             # Keep cursor on screen
             self.keep_cursor_visible()
@@ -5721,6 +5755,14 @@ class VirtualTextView(Gtk.DrawingArea):
             self.paste_from_clipboard()
             return True
         
+        # Insert key - Toggle overwrite mode
+        if name == "Insert" and not ctrl_pressed and not shift_pressed:
+            self.overwrite_mode = not self.overwrite_mode
+            # Visual feedback could be added here (cursor shape change, status bar indicator, etc.)
+            print(f"Overwrite mode: {'ON' if self.overwrite_mode else 'OFF'}")
+            self.queue_draw()
+            return True
+        
         # Tab key - insert tab character
         if name == "Tab":
             self.buf.insert_text("\t")
@@ -5864,7 +5906,17 @@ class VirtualTextView(Gtk.DrawingArea):
                 text = clipboard.read_text_finish(result)
                 if text:
                     self.buf.insert_text(text)
+                    
+                    # After paste, clear wrap cache and recalculate everything
+                    if self.renderer.wrap_enabled:
+                        self.renderer.wrap_cache.clear()
+                        self.renderer.total_visual_lines_cache = None
+                        self.renderer.estimated_total_cache = None
+                        self.renderer.visual_line_map = []
+                        self.renderer.edits_since_cache_invalidation = 0
+                    
                     self.keep_cursor_visible()
+                    self.update_scrollbar()  # Update scrollbar range after paste
                     self.update_im_cursor_location()
                     self.queue_draw()
             except Exception as e:
@@ -5897,7 +5949,17 @@ class VirtualTextView(Gtk.DrawingArea):
                             text = data.decode('utf-8', errors='ignore')
                             if text:
                                 self.buf.insert_text(text)
+                                
+                                # After paste, clear wrap cache and recalculate everything
+                                if self.renderer.wrap_enabled:
+                                    self.renderer.wrap_cache.clear()
+                                    self.renderer.total_visual_lines_cache = None
+                                    self.renderer.estimated_total_cache = None
+                                    self.renderer.visual_line_map = []
+                                    self.renderer.edits_since_cache_invalidation = 0
+                                
                                 self.keep_cursor_visible()
+                                self.update_scrollbar()  # Update scrollbar range after paste
                                 self.update_im_cursor_location()
                                 self.queue_draw()
                     except Exception as e:
@@ -6010,7 +6072,17 @@ class VirtualTextView(Gtk.DrawingArea):
                 
                 # Insert text at cursor
                 self.buf.insert_text(text)
+                
+                # After paste, clear wrap cache and recalculate everything
+                if self.renderer.wrap_enabled:
+                    self.renderer.wrap_cache.clear()
+                    self.renderer.total_visual_lines_cache = None
+                    self.renderer.estimated_total_cache = None
+                    self.renderer.visual_line_map = []
+                    self.renderer.edits_since_cache_invalidation = 0
+                
                 self.keep_cursor_visible()
+                self.update_scrollbar()  # Update scrollbar range after paste
                 self.update_im_cursor_location()
                 self.queue_draw()
         except Exception as e:
