@@ -4408,7 +4408,8 @@ class Renderer:
                             s_col = seg_sel_start - col_start
                             e_col = seg_sel_end - col_start
                     elif ln == sel_start_ln:
-                        if sel_start_col < col_end:
+                        # Allow selection for empty lines on their last visual line
+                        if sel_start_col < col_end or (sel_start_col == col_start and vis_idx == len(wrap_points) - 1):
                             s_col = max(0, sel_start_col - col_start)
                             e_col = len(text_segment)
                             if vis_idx == len(wrap_points) - 1:
@@ -4419,25 +4420,51 @@ class Renderer:
                             e_col = min(len(text_segment), sel_end_col - col_start)
 
                     if s_col != -1:
-                        idx1 = visual_byte_index(text_segment, s_col)
-                        idx2 = visual_byte_index(text_segment, e_col)
+                        # Special handling for empty lines with newline selected
+                        # This matches vted.py's behavior for empty line selection
+                        if not text_segment and e_col > len(text_segment):
+                            # Empty line with newline selected - draw full-width from line number area to viewport
+                            cr.set_source_rgba(*sel_rgba, 0.3)
+                            cr.rectangle(ln_width, y, alloc.width - ln_width, self.line_h)
+                            cr.fill()
+                        else:
+                            # Normal selection with text or within text
+                            idx1 = visual_byte_index(text_segment, s_col)
+                            idx2 = visual_byte_index(text_segment, min(e_col, len(text_segment)))
 
-                        r1_strong, r1_weak = layout.get_cursor_pos(idx1)
-                        r2_strong, r2_weak = layout.get_cursor_pos(idx2)
+                            r1_strong, r1_weak = layout.get_cursor_pos(idx1)
+                            r2_strong, r2_weak = layout.get_cursor_pos(idx2)
 
-                        x1 = r1_strong.x / Pango.SCALE
-                        x2 = r2_strong.x / Pango.SCALE
+                            x1 = r1_strong.x / Pango.SCALE
+                            x2 = r2_strong.x / Pango.SCALE
 
-                        # Handle newline selection
-                        if e_col > len(text_segment):
-                            x2 += 5
-
-                        sel_x = base_x + min(x1, x2)
-                        sel_w = abs(x2 - x1)
-
-                        cr.set_source_rgba(*sel_rgba, 0.3)
-                        cr.rectangle(sel_x, y, sel_w, self.line_h)
-                        cr.fill()
+                            # Check if selection extends beyond text (includes newline)
+                            if e_col > len(text_segment):
+                                # Draw text selection first (if any text exists)
+                                if text_segment:
+                                    sel_x = base_x + min(x1, x2)
+                                    sel_w = abs(x2 - x1)
+                                    if sel_w > 0:
+                                        cr.set_source_rgba(*sel_rgba, 0.3)
+                                        cr.rectangle(sel_x, y, sel_w, self.line_h)
+                                        cr.fill()
+                                
+                                # Draw newline area extending to viewport edge
+                                # This matches vted.py's newline indicator behavior
+                                newline_start_x = base_x + x2 if text_segment else ln_width
+                                newline_w = alloc.width - newline_start_x
+                                if newline_w > 0:
+                                    cr.set_source_rgba(*sel_rgba, 0.3)
+                                    cr.rectangle(newline_start_x, y, newline_w, self.line_h)
+                                    cr.fill()
+                            else:
+                                # Normal selection within text only
+                                sel_x = base_x + min(x1, x2)
+                                sel_w = abs(x2 - x1)
+                                if sel_w > 0:
+                                    cr.set_source_rgba(*sel_rgba, 0.3)
+                                    cr.rectangle(sel_x, y, sel_w, self.line_h)
+                                    cr.fill()
 
                 # Draw cursor if it's on this visual line
                 if ln == buf.cursor_line:
@@ -6125,41 +6152,86 @@ class VirtualTextView(Gtk.DrawingArea):
             self.queue_draw()
             return
 
-        # DOUBLE CLICK - Select word
+        # DOUBLE CLICK - Context-aware selection (handles empty lines and end-of-line)
         if self.click_count == 2:
-            
-            # Find word boundaries
-            import re
-            # Word characters include alphanumeric and underscore
-            word_pattern = re.compile(r'\w')
-            
-            # Find start of word
-            start_col = col
-            while start_col > 0 and word_pattern.match(line_text[start_col - 1]):
-                start_col -= 1
-            
-            # Find end of word
-            end_col = col
-            while end_col < line_len and word_pattern.match(line_text[end_col]):
-                end_col += 1
-            
-            # If we didn't find a word, select the character at cursor
-            if start_col == end_col:
-                if col < line_len:
-                    end_col = col + 1
+
+            # Case 1: empty line → context-aware selection
+            if line_len == 0:
+                # Check what comes next
+                next_line_text = None
+                if ln < self.buf.total() - 1:
+                    next_line_text = self.buf.get_line(ln + 1)
+                
+                if next_line_text is not None and len(next_line_text) == 0:
+                    # Next line is also empty: select only current empty line
+                    self.buf.selection.set_start(ln, 0)
+                    self.buf.selection.set_end(ln, 1)
+                    self.buf.cursor_line = ln
+                    self.buf.cursor_col = 0
+                elif next_line_text is not None and len(next_line_text) > 0:
+                    # Next line has text: select current empty line + next line's text
+                    self.buf.selection.set_start(ln, 0)
+                    self.buf.selection.set_end(ln + 1, len(next_line_text))
+                    self.buf.cursor_line = ln + 1
+                    self.buf.cursor_col = len(next_line_text)
                 else:
-                    start_col = max(0, col - 1)
-            
-            # Set selection
+                    # Last line (empty): don't select anything
+                    self.buf.selection.clear()
+                    self.buf.cursor_line = ln
+                    self.buf.cursor_col = 0
+                
+                # Enable word selection mode for drag (treat empty lines as "words")
+                self.word_selection_mode = True
+                
+                self.queue_draw()
+                return
+
+            # Case 2: double-click beyond end of text
+            if col > line_len:
+                # Check if this line has a newline (not the last line)
+                has_newline = ln < self.buf.total() - 1
+                
+                if has_newline:
+                    # Line has newline: select the newline area
+                    self.buf.selection.set_start(ln, line_len)
+                    self.buf.selection.set_end(ln, line_len + 1)
+                    self.buf.cursor_line = ln
+                    self.buf.cursor_col = line_len
+                else:
+                    # Last line (no newline): select trailing content
+                    # Find what's at the end: word or spaces
+                    if line_text and line_text[-1] == ' ':
+                        # Find start of trailing spaces
+                        start = line_len - 1
+                        while start > 0 and line_text[start - 1] == ' ':
+                            start -= 1
+                        self.buf.selection.set_start(ln, start)
+                        self.buf.selection.set_end(ln, line_len)
+                        self.buf.cursor_line = ln
+                        self.buf.cursor_col = line_len
+                    else:
+                        # Select the last word
+                        start_col, end_col = self.find_word_boundaries(line_text, line_len - 1)
+                        self.buf.selection.set_start(ln, start_col)
+                        self.buf.selection.set_end(ln, end_col)
+                        self.buf.cursor_line = ln
+                        self.buf.cursor_col = end_col
+                
+                # Enable word selection mode for drag
+                self.word_selection_mode = True
+                
+                self.queue_draw()
+                return
+
+            # Case 3: normal double-click → word selection
+            start_col, end_col = self.find_word_boundaries(line_text, col)
             self.buf.selection.set_start(ln, start_col)
             self.buf.selection.set_end(ln, end_col)
             self.buf.cursor_line = ln
             self.buf.cursor_col = end_col
             
-            # Enable word selection mode for drag extension
+            # Enable word selection mode for drag AND store anchor word
             self.word_selection_mode = True
-            
-            # Store anchor word boundaries for word-by-word drag extension
             self.anchor_word_start_line = ln
             self.anchor_word_start_col = start_col
             self.anchor_word_end_line = ln
