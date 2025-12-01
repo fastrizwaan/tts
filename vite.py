@@ -8230,7 +8230,7 @@ class RecentFilesManager:
         self.save()
 
 
-class SaveChangesDialog(Adw.AlertDialog):
+class SaveChangesDialog(Adw.Window):
     """Dialog to prompt user to save changes before closing"""
     
     def __init__(self, parent, modified_editors):
@@ -8238,59 +8238,115 @@ class SaveChangesDialog(Adw.AlertDialog):
         
         self.modified_editors = modified_editors
         self.checkboxes = []  # Store checkboxes to check which files to save
+        self.filename_entries = []  # Store entry widgets for filenames
+        self.response = None  # Store the user's response
+        self.save_button = None  # Store save button reference for focus
         
-        # Set dialog properties
-        self.set_heading("Save Changes?")
-        self.set_body("Open documents contain unsaved changes.\nChanges which are not saved will be permanently lost.")
+        # Set window properties
+        self.set_modal(True)
+        self.set_transient_for(parent)
+        self.set_default_size(400, -1)
+        self.set_resizable(False)
         
-        # Add response buttons
-        self.add_response("cancel", "Cancel")
-        self.add_response("discard", "Discard")
-        self.add_response("save", "Save")
+        # Main vertical box
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         
-        # Style the responses
-        self.set_response_appearance("discard", Adw.ResponseAppearance.DESTRUCTIVE)
-        self.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+        # Header with title
+        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        header.set_margin_top(24)
+        header.set_margin_bottom(12)
+        header.set_margin_start(24)
+        header.set_margin_end(24)
         
-        self.set_default_response("save")
-        self.set_close_response("cancel")
+        # Title
+        title_label = Gtk.Label(label="Save Changes?")
+        title_label.add_css_class("title-2")
+        title_label.set_halign(Gtk.Align.CENTER)
+        header.append(title_label)
+        
+        # Body text
+        body_label = Gtk.Label(label="Open documents contain unsaved changes.\nChanges which are not saved will be permanently lost.")
+        body_label.set_halign(Gtk.Align.CENTER)
+        body_label.set_justify(Gtk.Justification.CENTER)
+        body_label.set_wrap(True)
+        body_label.add_css_class("dim-label")
+        header.append(body_label)
+        
+        main_box.append(header)
         
         # Create list of modified files
         if len(modified_editors) > 0:
             # Create a box to hold the file list
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-            box.set_margin_top(12)
-            box.set_margin_bottom(12)
+            files_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            files_box.set_margin_top(12)
+            files_box.set_margin_bottom(12)
+            files_box.set_margin_start(24)
+            files_box.set_margin_end(24)
             
             for editor in modified_editors:
                 # Create a check button for each file
                 file_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-                file_box.set_margin_start(12)
-                file_box.set_margin_end(12)
                 
                 check = Gtk.CheckButton()
                 check.set_active(True)
+                check.set_focus_on_click(False)  # Don't grab focus on click
                 check._editor = editor
                 self.checkboxes.append(check)  # Store for later
                 file_box.append(check)
                 
                 # File info box
-                info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+                info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
                 info_box.set_hexpand(True)
                 
-                # Filename
+                # Determine filename and if it's untitled
                 if editor.current_file_path:
                     filename = os.path.basename(editor.current_file_path)
                     filepath = editor.current_file_path
+                    is_untitled = False
                 else:
-                    filename = editor.get_title()
-                    filepath = "~/Documents"
+                    # Check if it's an untitled file
+                    title = editor.get_title()
+                    is_untitled = title.startswith("Untitled")
+                    
+                    if is_untitled:
+                        # Get first line of text as default filename
+                        text = editor.get_text()
+                        first_line = text.split('\n')[0].strip() if text else ""
+                        
+                        # Clean up first line for filename (remove invalid chars)
+                        if first_line:
+                            # Remove invalid filename characters
+                            first_line = "".join(c for c in first_line if c.isalnum() or c in (' ', '-', '_', '.'))
+                            first_line = first_line.strip()
+                            # Limit length
+                            if len(first_line) > 50:
+                                first_line = first_line[:50]
+                        
+                        filename = first_line + ".txt" if first_line else "untitled.txt"
+                    else:
+                        filename = title
+                    
+                    # Show actual save location with ~ instead of full path
+                    default_dir = os.path.expanduser("~/Documents")
+                    if not os.path.exists(default_dir):
+                        default_dir = os.path.expanduser("~")
+                    filepath = default_dir
                 
-                name_label = Gtk.Label(label=filename)
-                name_label.set_halign(Gtk.Align.START)
-                name_label.set_wrap(True)
-                name_label.set_max_width_chars(40)
-                info_box.append(name_label)
+                # Replace home directory with ~ in filepath
+                home_dir = os.path.expanduser("~")
+                if filepath.startswith(home_dir):
+                    filepath = filepath.replace(home_dir, "~", 1)
+                
+                # Create editable entry for filename
+                entry = Gtk.Entry()
+                entry.set_text(filename)
+                entry.set_hexpand(True)
+                entry._editor = editor
+                entry._is_untitled = is_untitled
+                entry._original_path = editor.current_file_path if editor.current_file_path else None
+                self.filename_entries.append(entry)
+                
+                info_box.append(entry)
                 
                 # File path
                 path_label = Gtk.Label(label=filepath)
@@ -8303,10 +8359,68 @@ class SaveChangesDialog(Adw.AlertDialog):
                 info_box.append(path_label)
                 
                 file_box.append(info_box)
-                box.append(file_box)
+                files_box.append(file_box)
             
-            # Set the extra child
-            self.set_extra_child(box)
+            main_box.append(files_box)
+        
+        # Button box - HORIZONTAL
+        button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        button_box.set_homogeneous(True)
+        button_box.set_margin_top(12)
+        button_box.set_margin_bottom(24)
+        button_box.set_margin_start(24)
+        button_box.set_margin_end(24)
+        
+        # Cancel button
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda b: self.on_response("cancel"))
+        button_box.append(cancel_btn)
+        
+        # Discard All button
+        discard_btn = Gtk.Button(label="Discard All")
+        discard_btn.add_css_class("destructive-action")
+        discard_btn.connect("clicked", lambda b: self.on_response("discard"))
+        button_box.append(discard_btn)
+        
+        # Save button
+        save_btn = Gtk.Button(label="Save")
+        save_btn.add_css_class("suggested-action")
+        save_btn.connect("clicked", lambda b: self.on_response("save"))
+        button_box.append(save_btn)
+        
+        # Store save button reference
+        self.save_button = save_btn
+        
+        main_box.append(button_box)
+        
+        # Set content
+        self.set_content(main_box)
+        
+        # Set focus to Save button after dialog is shown
+        def on_map(widget):
+            """Called when dialog is shown - set focus to Save button"""
+            if self.save_button:
+                self.save_button.grab_focus()
+        
+        self.connect("map", on_map)
+    
+    def on_response(self, response):
+        """Handle button click"""
+        self.response = response
+        self.close()
+    
+    def get_filename_for_editor(self, editor):
+        """Get the (possibly modified) filename for an editor"""
+        for entry in self.filename_entries:
+            if hasattr(entry, '_editor') and entry._editor == editor:
+                filename = entry.get_text().strip()
+                if not filename:
+                    filename = "untitled.txt"
+                # Ensure .txt extension if not present
+                if not '.' in filename:
+                    filename += '.txt'
+                return filename, entry._is_untitled, entry._original_path
+        return None, False, None
 
 
 class EditorWindow(Adw.ApplicationWindow):
@@ -8521,10 +8635,30 @@ class EditorWindow(Adw.ApplicationWindow):
                         for check in dialog.checkboxes:
                             if check.get_active() and hasattr(check, '_editor'):
                                 editor = check._editor
+                                
+                                # Get filename from dialog if available
+                                filename_from_dialog = None
+                                is_untitled = False
+                                if hasattr(dialog, 'get_filename_for_editor'):
+                                    filename_from_dialog, is_untitled, _ = dialog.get_filename_for_editor(editor)
+                                
                                 if editor.current_file_path:
+                                    # Save existing file
                                     self.save_file(editor, editor.current_file_path)
-                                # For untitled files without path, we skip them
-                                # (could be enhanced to show save-as dialogs)
+                                elif filename_from_dialog and is_untitled:
+                                    # Auto-save untitled file with provided filename
+                                    default_dir = os.path.expanduser("~/Documents")
+                                    if not os.path.exists(default_dir):
+                                        default_dir = os.path.expanduser("~")
+                                    
+                                    save_path = os.path.join(default_dir, filename_from_dialog)
+                                    
+                                    # Save directly (overwrite if exists)
+                                    try:
+                                        self.save_file(editor, save_path)
+                                    except Exception as e:
+                                        print(f"Error saving {filename_from_dialog}: {e}")
+                    
                     self.destroy()
             
             self.show_save_changes_dialog(modified_editors, on_response)
@@ -9493,15 +9627,20 @@ class EditorWindow(Adw.ApplicationWindow):
         """Show dialog for saving changes with list of modified files"""
         dialog = SaveChangesDialog(self, modified_editors)
         
-        def on_response(source, result):
-            try:
-                response = dialog.choose_finish(result)
-                callback(response, dialog)
-            except Exception as e:
-                # User closed dialog or error occurred
-                print(f"Dialog error: {e}")
+        # Flag to track if callback has been called
+        callback_called = [False]
         
-        dialog.choose(self, None, on_response)
+        def on_close(dialog_window):
+            """Handle dialog close"""
+            # Only call callback once
+            if not callback_called[0]:
+                callback_called[0] = True
+                response = dialog_window.response if dialog_window.response else "cancel"
+                callback(response, dialog_window)
+            return False  # Allow dialog to close
+        
+        dialog.connect("close-request", on_close)
+        dialog.present()
     
     def close_tab(self, page):
         # Get the editor for this page
@@ -9545,13 +9684,62 @@ class EditorWindow(Adw.ApplicationWindow):
                     self.perform_close_tab(page)
                     return
             
-            # If file has path, save it; otherwise show save-as dialog
+            # Get filename from dialog (if available)
+            filename_from_dialog = None
+            is_untitled = False
+            original_path = None
+            if dialog and hasattr(dialog, 'get_filename_for_editor'):
+                filename_from_dialog, is_untitled, original_path = dialog.get_filename_for_editor(editor)
+            
+            # If file has path, save it
             if editor.current_file_path:
                 self.save_file(editor, editor.current_file_path)
                 self.perform_close_tab(page)
+            elif filename_from_dialog and is_untitled:
+                # Auto-save untitled file with the provided filename
+                # Default to ~/Documents or current directory
+                default_dir = os.path.expanduser("~/Documents")
+                if not os.path.exists(default_dir):
+                    default_dir = os.path.expanduser("~")
+                
+                save_path = os.path.join(default_dir, filename_from_dialog)
+                
+                # Check if file already exists
+                if os.path.exists(save_path):
+                    # Show save-as dialog with suggested filename
+                    dialog_save = Gtk.FileDialog()
+                    dialog_save.set_initial_name(filename_from_dialog)
+                    
+                    # Set initial folder
+                    try:
+                        gfile = Gio.File.new_for_path(default_dir)
+                        dialog_save.set_initial_folder(gfile)
+                    except:
+                        pass
+                    
+                    def done(dialog_save_obj, result):
+                        try:
+                            f = dialog_save_obj.save_finish(result)
+                            path = f.get_path()
+                            self.save_file(editor, path)
+                            self.perform_close_tab(page)
+                        except:
+                            # User cancelled, don't close
+                            return
+                    
+                    dialog_save.save(self, None, done)
+                    return
+                else:
+                    # Save directly
+                    self.save_file(editor, save_path)
+                    self.perform_close_tab(page)
             else:
-                # Show save-as dialog for untitled files
+                # Show save-as dialog for untitled files without filename
                 dialog_save = Gtk.FileDialog()
+                
+                # Set suggested filename if available
+                if filename_from_dialog:
+                    dialog_save.set_initial_name(filename_from_dialog)
                 
                 def done(dialog_save_obj, result):
                     try:
