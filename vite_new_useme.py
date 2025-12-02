@@ -19,7 +19,7 @@ CSS_OVERLAY_SCROLLBAR = """
 /* Vertical Scrollbar container */
 .overlay-scrollbar {{
     background-color: transparent;
-
+   /* margin-right: 0px;*/
 }}
 
 
@@ -28,14 +28,14 @@ CSS_OVERLAY_SCROLLBAR = """
     min-width: 8px;
     border-radius: 0px;
     background-color: transparent;
-
+   /* margin-right: 0px;    */
 }}
 
 /* Trough hover highlight */
 .overlay-scrollbar trough:hover {{
     background-color: alpha(@window_fg_color, 0.2);
     transition: background-color 200ms ease;
-
+    /*margin-right: 0px;    */
 }}
 
 /* Base slider (thumb) */
@@ -172,12 +172,16 @@ CSS_OVERLAY_SCROLLBAR = """
 }}
 .title-label {{
     font-weight: 600; /* same weight Adw.WindowTitle uses */
-    font-size: 1rem;  /* optional: matches header title sizing */
+    font-size: 0.95rem;  /* optional: matches header title sizing */
+    line-height: 1.1;
+    margin-bottom: -2px;
 }}
 
 .subtitle-label {{
-    font-size: 0.85rem;
+    font-size: 0.75rem;
     opacity: 0.7;
+    line-height: 1.0;
+    margin-top: -2px;
 }}
 .header-modified-dot{{
     min-width: 8px;
@@ -3305,8 +3309,8 @@ class InputController:
 
 class Renderer:
     def __init__(self):
-        self.font = Pango.FontDescription("Monospace 12")
-        self.right_margin_width = 20  # Right gutter width
+        self.font = Pango.FontDescription("Monospace 11")
+        self.right_margin_width = 28  # Right gutter width
 
         # Correct GTK4/Pango method to compute line height:
         # Use logical extents, not ink extents.
@@ -3483,7 +3487,7 @@ class Renderer:
             Base X coordinate for text rendering
         """
         if is_rtl:
-            available = max(0, view_w - ln_width - self.right_margin_width)
+            available = max(0, view_w - ln_width - self.right_margin_width - 5)
             # Unified formula: right-align and apply scroll offset
             return ln_width + max(0, available - text_w) - scroll_x
         else:
@@ -4519,6 +4523,9 @@ class Renderer:
                     if is_cursor_here:
                         idx = visual_byte_index(text_segment, cursor_rel_col)
                         strong_pos, weak_pos = layout.get_cursor_pos(idx)
+
+                        # Fix RTL cursor position: subtract right margin if RTL
+                        is_rtl = line_is_rtl(text_segment)
                         cx = base_x + (strong_pos.x / Pango.SCALE)
 
                         # Capture cursor screen position for IME
@@ -4543,25 +4550,35 @@ class Renderer:
                                     char_layout.set_text(char_at_cursor, -1)
                                     char_width, _ = char_layout.get_pixel_size()
                                     
+                                    # RTL adjustment
+                                    draw_x = cx - char_width if is_rtl else cx
+
                                     # Draw darker block cursor (0.7 instead of 0.5)
                                     cr.set_source_rgba(r, g, b, opacity * 0.7)
-                                    cr.rectangle(cx, y, char_width, self.line_h)
+                                    cr.rectangle(draw_x, y, char_width, self.line_h)
                                     cr.fill()
                                     
                                     # Draw character in inverted color
                                     cr.set_source_rgba(1 - r, 1 - g, 1 - b, opacity)
-                                    cr.move_to(cx, y)
+                                    cr.move_to(draw_x, y)
                                     PangoCairo.show_layout(cr, char_layout)
                                 else:
                                     # At end of line - use narrow block
                                     block_width = 8
+                                    # RTL adjustment
+                                    draw_x = cx - block_width if is_rtl else cx
+                                    
                                     cr.set_source_rgba(r, g, b, opacity * 0.7)
-                                    cr.rectangle(cx, y, block_width, self.line_h)
+                                    cr.rectangle(draw_x, y, block_width, self.line_h)
                                     cr.fill()
                             else:
                                 # Normal line cursor for insert mode
+                                cursor_w = 1.3
+                                # RTL adjustment
+                                draw_x = cx - cursor_w if is_rtl else cx
+                                
                                 cr.set_source_rgba(r, g, b, opacity)
-                                cr.rectangle(cx, y, 1.3, self.line_h)
+                                cr.rectangle(draw_x, y, cursor_w, self.line_h)
                                 cr.fill()
 
                 y += self.line_h
@@ -8443,6 +8460,8 @@ class EditorWindow(Adw.ApplicationWindow):
 
         # Create ToolbarView
         toolbar_view = Adw.ToolbarView()
+        self.set_margin_top(0)
+        self.set_margin_bottom(0)
         toolbar_view.add_css_class("toolbarview")
         # Header Bar
         self.header = Adw.HeaderBar()
@@ -8454,12 +8473,16 @@ class EditorWindow(Adw.ApplicationWindow):
 
         # Main title box (vertical)
         self.title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-
+        self.title_box.set_margin_top(0)
+        self.title_box.set_margin_bottom(0)
         # Row: dot + title
         self.title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         
         self.header_modified_dot = Gtk.DrawingArea()
         self.header_modified_dot.set_size_request(8, 8)
+        self.header_modified_dot.set_margin_top(10)
+        self.header_modified_dot.set_margin_bottom(10)
+        
         self.header_modified_dot.add_css_class("header-modified-dot")
         self.header_modified_dot.set_visible(False)
 
@@ -8472,7 +8495,9 @@ class EditorWindow(Adw.ApplicationWindow):
         self.header_title_label.add_css_class("title-label")
         self.header_title_label.set_halign(Gtk.Align.CENTER)
         self.header_title_label.set_valign(Gtk.Align.CENTER)
-
+        self.header_title_label.set_margin_top(0)
+        self.header_title_label.set_margin_bottom(0)
+        self.header_title_label.set_max_width_chars(30)  # Truncate long titles
         self.title_row.append(self.header_modified_dot)
         self.title_row.append(self.header_title_label)
 
@@ -8482,7 +8507,9 @@ class EditorWindow(Adw.ApplicationWindow):
         self.header_subtitle_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.header_subtitle_label.add_css_class("subtitle-label")
         self.header_subtitle_label.set_halign(Gtk.Align.CENTER)
-
+        self.header_subtitle_label.set_margin_top(0)
+        self.header_subtitle_label.set_margin_bottom(0)
+        self.header_subtitle_label.set_max_width_chars(50)  # Truncate long paths
         # Build the vertical title-box
         self.title_box.append(self.title_row)
         self.title_box.append(self.header_subtitle_label)
@@ -8500,7 +8527,10 @@ class EditorWindow(Adw.ApplicationWindow):
         open_box.set_margin_start(2)
         open_box.set_margin_top(2) 
         # Left "Open" button
-        self.open_button = Gtk.Button(label="Open")
+        # Left "Open" button
+        self.open_button = Gtk.Button()
+        self.open_button.set_icon_name("document-open-symbolic")
+        self.open_button.set_tooltip_text("Open File")
         self.open_button.connect("clicked", self.open_file)
         self.open_button.add_css_class("flat")      # Keep Libadwaita look
         self.open_button.set_margin_start(0)
