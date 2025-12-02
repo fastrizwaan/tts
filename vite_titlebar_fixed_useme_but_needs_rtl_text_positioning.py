@@ -3474,7 +3474,7 @@ class Renderer:
             Base X coordinate for text rendering
         """
         if is_rtl:
-            available = max(0, view_w - ln_width - self.right_margin_width - 5)
+            available = max(0, view_w - ln_width - self.right_margin_width)
             # Unified formula: right-align and apply scroll offset
             return ln_width + max(0, available - text_w) - scroll_x
         else:
@@ -4510,9 +4510,6 @@ class Renderer:
                     if is_cursor_here:
                         idx = visual_byte_index(text_segment, cursor_rel_col)
                         strong_pos, weak_pos = layout.get_cursor_pos(idx)
-
-                        # Fix RTL cursor position: subtract right margin if RTL
-                        is_rtl = line_is_rtl(text_segment)
                         cx = base_x + (strong_pos.x / Pango.SCALE)
 
                         # Capture cursor screen position for IME
@@ -4537,35 +4534,25 @@ class Renderer:
                                     char_layout.set_text(char_at_cursor, -1)
                                     char_width, _ = char_layout.get_pixel_size()
                                     
-                                    # RTL adjustment
-                                    draw_x = cx - char_width if is_rtl else cx
-
                                     # Draw darker block cursor (0.7 instead of 0.5)
                                     cr.set_source_rgba(r, g, b, opacity * 0.7)
-                                    cr.rectangle(draw_x, y, char_width, self.line_h)
+                                    cr.rectangle(cx, y, char_width, self.line_h)
                                     cr.fill()
                                     
                                     # Draw character in inverted color
                                     cr.set_source_rgba(1 - r, 1 - g, 1 - b, opacity)
-                                    cr.move_to(draw_x, y)
+                                    cr.move_to(cx, y)
                                     PangoCairo.show_layout(cr, char_layout)
                                 else:
                                     # At end of line - use narrow block
                                     block_width = 8
-                                    # RTL adjustment
-                                    draw_x = cx - block_width if is_rtl else cx
-                                    
                                     cr.set_source_rgba(r, g, b, opacity * 0.7)
-                                    cr.rectangle(draw_x, y, block_width, self.line_h)
+                                    cr.rectangle(cx, y, block_width, self.line_h)
                                     cr.fill()
                             else:
                                 # Normal line cursor for insert mode
-                                cursor_w = 1.3
-                                # RTL adjustment
-                                draw_x = cx - cursor_w if is_rtl else cx
-                                
                                 cr.set_source_rgba(r, g, b, opacity)
-                                cr.rectangle(draw_x, y, cursor_w, self.line_h)
+                                cr.rectangle(cx, y, 1.3, self.line_h)
                                 cr.fill()
 
                 y += self.line_h
