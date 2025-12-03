@@ -158,8 +158,8 @@ CSS_OVERLAY_SCROLLBAR = """
     background: transparent;
     color: alpha(@window_fg_color, 0.7);
     min-height: 32px;
-    padding: 0 8px;
-    border-radius: 6px 6px 6px 6px;
+    padding: 0 10px;
+    border-radius: 9px 9px 9px 9px;
     margin-bottom: 1px;
 
 }}
@@ -181,8 +181,8 @@ CSS_OVERLAY_SCROLLBAR = """
     background-color: alpha(@window_fg_color, 0.7);
     border-radius: 4px;
 
-    margin-top: 8px;   /* vertically center inside tab */
-    margin-bottom: 8px;
+    margin-top: 12px;   /* vertically center inside tab */
+    margin-bottom: 12px;
 }}
 
 .chrome-tab label {{
@@ -7506,7 +7506,7 @@ class ChromeTab(Gtk.Box):
         dot_box.set_hexpand(True)
 
         self.modified_dot = Gtk.DrawingArea()
-        #self.modified_dot.set_size_request(8, 8)
+        self.modified_dot.set_size_request(8, 8)
         self.modified_dot.add_css_class("modified-dot")
         self.modified_dot.set_visible(False)  # hidden by default
         dot_box.append(self.modified_dot)
@@ -7515,7 +7515,7 @@ class ChromeTab(Gtk.Box):
         # Title label
         self.label = Gtk.Label()
         self.label.set_text(title)
-        self.label.set_margin_end(28)
+        self.label.set_margin_end(30)
         self.label.set_max_width_chars(20)
         self.label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.label.set_single_line_mode(True)
@@ -7524,7 +7524,7 @@ class ChromeTab(Gtk.Box):
 
         # put label next to dot
         dot_box.append(self.label)
-
+        dot_box.set_halign(Gtk.Align.END)
         # Button wrapper
         self.tab_button = Gtk.Button()
         self.tab_button.add_css_class("flat")
@@ -7540,7 +7540,7 @@ class ChromeTab(Gtk.Box):
             self.close_button.set_icon_name("window-close-symbolic")
             self.close_button.add_css_class("flat")
             self.close_button.add_css_class("chrome-tab-close-button")
-            self.close_button.set_size_request(24, 24)
+            #self.close_button.set_size_request(24, 24)
             self.close_button.set_halign(Gtk.Align.END)
             self.close_button.set_valign(Gtk.Align.CENTER)
             self.close_button.connect('clicked', self._on_close_clicked)
@@ -8444,7 +8444,7 @@ class EditorWindow(Adw.ApplicationWindow):
         self.window_title = Adw.WindowTitle(title="Virtual Text Editor", subtitle="")
         
         # Wrapper to include modified dot + window title
-        title_wrapper = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        title_wrapper = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         title_wrapper.set_halign(Gtk.Align.CENTER)
         title_wrapper.set_valign(Gtk.Align.CENTER)
         
