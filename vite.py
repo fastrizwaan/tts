@@ -7802,6 +7802,8 @@ class ChromeTabBar(Adw.WrapBox):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
 
         self.set_margin_start(6)
+        self.set_margin_top(0)
+        self.set_margin_bottom(0)
         self.set_child_spacing(0)
 
         self.tabs = []
@@ -8150,6 +8152,7 @@ class EditorPage:
     def __init__(self, untitled_title="Untitled 1"):
         self.buf = VirtualBuffer()
         self.view = VirtualTextView(self.buf)
+        self.view.set_margin_top(0)
         self.current_encoding = "utf-8"
         self.current_file_path = None
         self.untitled_title = untitled_title  # Store custom Untitled title
