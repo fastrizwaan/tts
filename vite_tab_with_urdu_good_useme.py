@@ -16,29 +16,21 @@ DRAGGED_TAB = None
 
 CSS_OVERLAY_SCROLLBAR = """
 /* ===== Vertical overlay scrollbar ===== */
-/* Vertical Scrollbar container */
 .overlay-scrollbar {{
     background-color: transparent;
-
 }}
 
-
-/* Trough (track) */
 .overlay-scrollbar trough {{
     min-width: 8px;
     border-radius: 0px;
     background-color: transparent;
-
 }}
 
-/* Trough hover highlight */
 .overlay-scrollbar trough:hover {{
     background-color: alpha(@window_fg_color, 0.2);
     transition: background-color 200ms ease;
-
 }}
 
-/* Base slider (thumb) */
 .overlay-scrollbar trough > slider {{
     min-width: 2px;
     border-radius: 12px;
@@ -46,46 +38,36 @@ CSS_OVERLAY_SCROLLBAR = """
     transition: min-width 200ms ease, background-color 200ms ease;
 }}
 
-
-/* Slider expands when trough is hovered */
 .overlay-scrollbar trough:hover > slider {{
     min-width: 8px;
     background-color: alpha(@window_bg_color, 0.05);
 }}
-/* Container hover highlights trough */
+
 .overlay-scrollbar:hover trough {{
     background-color: alpha(@window_fg_color, 0.1);
 }}
 
-/* Container hover expands slider */
 .overlay-scrollbar:hover trough > slider {{
     min-width: 8px;
     background-color: rgba(53,132,228,1);
 }}
 
-
-/* Slider expands when hovered directly */
 .overlay-scrollbar trough > slider:hover {{
     min-width: 8px;
     background-color: rgba(73,152,248, 1);
 }}
-/* Slider active/dragging */
+
 .overlay-scrollbar trough > slider:active {{
     min-width: 8px;
     background-color: rgba(53,132,228, 1);
 }}
 
-
-
 /* ===== Horizontal overlay scrollbar ===== */
-
-/* Horizontal Scrollbar container */
 .hscrollbar-overlay {{
     background-color: transparent;
     margin-bottom: 0px;
 }}
 
-/* Trough (track) */
 .hscrollbar-overlay trough {{
     min-height: 8px;
     border-radius: 0px;
@@ -93,14 +75,12 @@ CSS_OVERLAY_SCROLLBAR = """
     margin-bottom: 0px;    
 }}
 
-/* Trough hover highlight */
 .hscrollbar-overlay trough:hover {{
     background-color: alpha(@window_fg_color, 0.2);
     transition: background-color 200ms ease;
     margin-bottom: 0px;
 }}
 
-/* Base slider (thumb) */
 .hscrollbar-overlay trough > slider {{
     min-height: 2px;
     border-radius: 12px;
@@ -108,36 +88,29 @@ CSS_OVERLAY_SCROLLBAR = """
     transition: min-height 200ms ease, background-color 200ms ease;
 }}
 
-
-/* Slider expands when trough is hovered */
 .hscrollbar-overlay trough:hover > slider {{
     min-height: 8px;
     background-color: alpha(@window_fg_color, 0.55);
 }}
 
-/* Container hover highlights trough */
 .hscrollbar-overlay:hover trough {{
     background-color: alpha(@window_fg_color, 0.2);
 }}
 
-/* Container hover expands slider */
 .hscrollbar-overlay:hover trough > slider {{
     min-height: 8px;
     background-color: rgba(53,132,228,1);
 }}
 
-/* Slider expands when hovered directly */
 .hscrollbar-overlay trough > slider:hover {{
     min-height: 8px;
     background-color: rgba(73,152,248, 1);
 }}
 
-/* Slider active/dragging */
 .hscrollbar-overlay trough > slider:active {{
     min-height: 8px;
     background-color: rgba(53,132,228, 1);
 }}
-
 
 .toolbarview {{
     background: @headerbar_bg_color; 
@@ -147,7 +120,7 @@ CSS_OVERLAY_SCROLLBAR = """
    Editor background
    ======================== */
 .editor-surface {{
-    background-color: {bg_color};
+    background-color: @window_bg_color;
 }}
 
 /* ========================
@@ -155,33 +128,26 @@ CSS_OVERLAY_SCROLLBAR = """
    ======================== */
 
 .chrome-tab {{
-    background: transparent;
-    color: alpha(@window_fg_color, 0.7);
     min-height: 32px;
     padding: 0 8px;
     border-radius: 6px 6px 6px 6px;
-    margin-bottom: 1px;
-
 }}
-.header-modified-dot{{
+
+.header-modified-dot {{
     min-width: 8px;
     min-height: 8px;
-
     background-color: alpha(@window_fg_color, 0.7);
     border-radius: 4px;
-
-    margin-top: 5px;   /* vertically center inside tab */
+    margin-top: 5px;
     margin-bottom: 5px;
 }}
 
 .modified-dot {{
     min-width: 8px;
     min-height: 8px;
-
     background-color: alpha(@window_fg_color, 0.7);
     border-radius: 4px;
-
-    margin-top: 8px;   /* vertically center inside tab */
+    margin-top: 8px;
     margin-bottom: 8px;
 }}
 
@@ -191,14 +157,15 @@ CSS_OVERLAY_SCROLLBAR = """
 
 .chrome-tab:hover {{
     color: @window_fg_color;
+    min-height: 24px;
     background: alpha(@window_fg_color, 0.10);
-
 }}
 
 /* ACTIVE TAB (pilled) */
 .chrome-tab.active {{
     background: alpha(@window_fg_color, 0.12);
     color: @window_fg_color;
+    min-height: 24px;
 }}
 
 .chrome-tab.active label {{
@@ -222,13 +189,7 @@ CSS_OVERLAY_SCROLLBAR = """
     border-radius: 2px;
 }}
 
-
-/* Modified marker */
-.chrome-tab.modified {{
-    font-style: normal;
-}}
-
-/* Reset all buttons inside tab (fixes size regression) */
+/* Reset all buttons inside tab */
 .chrome-tab button {{
     background: none;
     border: none;
@@ -271,6 +232,7 @@ CSS_OVERLAY_SCROLLBAR = """
     min-width: 0px;
     background-color: transparent;
 }}
+
 .chrome-tab-separator:first-child {{
     background-color: transparent;
     min-width: 0;
@@ -280,14 +242,15 @@ CSS_OVERLAY_SCROLLBAR = """
     background-color: transparent;
     min-width: 0;
 }}
+
 /* ========================
    Tab close button
    ======================== */
 .chrome-tab-close-button {{
     opacity: 0;
     transition: opacity 300ms ease, background-color 300ms ease;
-    margin-right:0px;
-    padding:0px;
+    margin-right: 0px;
+    padding: 0px;
 }}
 
 .chrome-tab:hover .chrome-tab-close-button {{
@@ -295,7 +258,7 @@ CSS_OVERLAY_SCROLLBAR = """
     border-radius: 20px;
 }}
 
-.chrome-tab-close-button:hover  {{
+.chrome-tab-close-button:hover {{
     background-color: alpha(@window_fg_color, 0.1);
 }}
 
@@ -305,51 +268,51 @@ CSS_OVERLAY_SCROLLBAR = """
 }}
 
 
-/* Corrected dropdown selectors - removed space after colon */
-.linked dropdown:first-child > button  {{
-    border-top-left-radius: 0px; 
-    border-bottom-left-radius: 0px; 
-    border-top-right-radius: 0px; 
-    border-bottom-right-radius: 0px;
+/* Corrected dropdown selectors  removed space after colon */
+.linked dropdown:firstchild > button  {{
+    bordertopleftradius: 0px; 
+    borderbottomleftradius: 0px; 
+    bordertoprightradius: 0px; 
+    borderbottomrightradius: 0px;
 }}
 
 /* Explicit rule to ensure middle dropdowns have NO radius */
-.linked dropdown:not(:first-child):not(:last-child) > button {{
-    border-radius: 0;
+.linked dropdown:not(:firstchild):not(:lastchild) > button {{
+    borderradius: 0;
 }}
 
 
 
 
-/* Corrected menubutton selectors - removed space after colon */
-.linked menubutton:first-child > button  {{
-    border-top-left-radius: 10px; 
-    border-bottom-left-radius: 10px; 
-    border-top-right-radius: 0px; 
-    border-bottom-right-radius: 0px;
+/* Corrected menubutton selectors  removed space after colon */
+.linked menubutton:firstchild > button  {{
+    bordertopleftradius: 10px; 
+    borderbottomleftradius: 10px; 
+    bordertoprightradius: 0px; 
+    borderbottomrightradius: 0px;
 }}
 
-.linked menubutton:last-child > button {{
-    border-top-left-radius: 0px; 
-    border-bottom-left-radius: 0px; 
-    border-top-right-radius: 10px; 
-    border-bottom-right-radius: 10px;
+.linked menubutton:lastchild > button {{
+    bordertopleftradius: 0px; 
+    borderbottomleftradius: 0px; 
+    bordertoprightradius: 10px; 
+    borderbottomrightradius: 10px;
 }} 
 
 /* Additional recommended fixes for consistent styling */
 .linked menubutton button {{
-    background: alpha(@window_fg_color, 0.05); padding:0px; padding-right: 3px; margin-left: 0px;
+    background: alpha(@window_fg_color, 0.05); padding:0px; paddingright: 3px; marginleft: 0px;
 }}
 
 .linked menubutton button:hover {{
     background: alpha(@window_fg_color, 0.15);
-     padding:0px; padding-right: 3px;
+     padding:0px; paddingright: 3px;
 }}
 
 .linked menubutton button:active, 
 .linked menubutton button:checked {{
-    background-color: rgba(127, 127, 127, 0.3);
-    padding:0px; padding-right: 3px;
+    backgroundcolor: rgba(127, 127, 127, 0.3);
+    padding:0px; paddingright: 3px;
 }}
 
 .linked menubutton button:checked:hover {{
@@ -357,18 +320,18 @@ CSS_OVERLAY_SCROLLBAR = """
 }}
 
 
-/* Corrected button selectors - removed space after colon */
+/* Corrected button selectors  removed space after colon */
 .linked button  {{
-    border-top-left-radius: 10px; 
-    border-bottom-left-radius: 10px; 
-    border-top-right-radius: 0px; 
-    border-bottom-right-radius: 0px;
+    bordertopleftradius: 10px; 
+    borderbottomleftradius: 10px; 
+    bordertoprightradius: 0px; 
+    borderbottomrightradius: 0px;
     
 }}
 
 /* Additional recommended fixes for consistent styling */
 .linked button {{
-    background: alpha(@window_fg_color, 0.05); padding-left: 10px; padding-right:6px; 
+    background: alpha(@window_fg_color, 0.05); paddingleft: 10px; paddingright:6px; 
 }}
 
 .linked button:hover {{
@@ -376,7 +339,9 @@ CSS_OVERLAY_SCROLLBAR = """
 
 }}
 
+
 """
+
 
 
 
@@ -7496,7 +7461,7 @@ class ChromeTab(Gtk.Box):
         self.set_vexpand(False)
         self.set_valign(Gtk.Align.CENTER)
         self.set_size_request(120, FIXED_H)
-        self.set_hexpand(False)       
+        self.set_hexpand(False)
         overlay = Gtk.Overlay()
 
         # =====================================================
