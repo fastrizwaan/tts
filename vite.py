@@ -7524,15 +7524,12 @@ class ChromeTab(Gtk.Box):
 
         # put label next to dot
         dot_box.append(self.label)
-        dot_box.set_halign(Gtk.Align.END)
-        # Button wrapper
-        self.tab_button = Gtk.Button()
-        self.tab_button.add_css_class("flat")
-        self.tab_button.set_child(dot_box)  # PATCH: stack with dot
-        self.tab_button.set_hexpand(True)
-        self.tab_button.set_vexpand(True)
+        dot_box.set_halign(Gtk.Align.CENTER)
+        dot_box.set_valign(Gtk.Align.CENTER)
+        dot_box.set_hexpand(True)
+        dot_box.set_vexpand(True)
         
-        overlay.set_child(self.tab_button)
+        overlay.set_child(dot_box)
         
         # Close button overlay
         if closeable:
@@ -7558,14 +7555,14 @@ class ChromeTab(Gtk.Box):
         drag_source.connect('prepare', self._on_drag_prepare)
         drag_source.connect('drag-begin', self._on_drag_begin)
         drag_source.connect('drag-end', self._on_drag_end)
-        self.tab_button.add_controller(drag_source)
+        self.add_controller(drag_source)
         
         # Explicitly claim clicks
         click_gesture = Gtk.GestureClick()
         click_gesture.set_button(0) # Listen to all buttons (left, middle, right)
         click_gesture.connect('pressed', self._on_tab_pressed)
         click_gesture.connect('released', self._on_tab_released)
-        self.tab_button.add_controller(click_gesture)
+        self.add_controller(click_gesture)
 
     # ==========================================================
     # PATCH: new method to toggle dot visibility (replaces label hacks)
