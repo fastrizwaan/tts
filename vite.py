@@ -7694,6 +7694,10 @@ class ChromeTab(Gtk.Box):
         tab_data = {
             'window_id': id(window) if window else 0,
             'tab_index': self.tab_bar.tabs.index(self) if self.tab_bar and self in self.tab_bar.tabs else -1,
+            # ADDITION: Include the unique ID of the live tab object.
+            # This allows the target drop handler (e.g., in a new window) to 
+            # retrieve and reuse the object instead of creating a copy from data.
+            'tab_id': id(self),
         }
         
         # If we have a page reference, serialize the entire structure
@@ -7711,10 +7715,16 @@ class ChromeTab(Gtk.Box):
                 elif hasattr(widget, '_editor'):
                     # Overlay with editor
                     editor = widget._editor
+                    file_path = editor.current_file_path
+
+                    # FIX 1: Only serialize content for UNTITLED (unsaved) files 
+                    # to prevent freezing with large saved files.
+                    content = editor.get_text() if not file_path else None
+
                     return {
                         'type': 'editor',
-                        'content': editor.get_text(),
-                        'file_path': editor.current_file_path,
+                        'content': content,
+                        'file_path': file_path,
                         'title': editor.get_title(),
                         'untitled_number': getattr(editor, 'untitled_number', None),
                     }
@@ -7735,8 +7745,12 @@ class ChromeTab(Gtk.Box):
             tab_data['structure'] = structure
             # Legacy fields for simple tabs (backwards compatibility)
             editor = tab_root._editor
-            tab_data['content'] = editor.get_text()
-            tab_data['file_path'] = editor.current_file_path
+
+            # FIX 2: Apply the same content serialization check to the legacy field.
+            file_path = editor.current_file_path
+            tab_data['content'] = editor.get_text() if not file_path else None
+            tab_data['file_path'] = file_path
+
             tab_data['title'] = editor.get_title()
             tab_data['is_modified'] = self.has_css_class("modified")
             tab_data['untitled_number'] = getattr(editor, 'untitled_number', None)
