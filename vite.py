@@ -4750,26 +4750,29 @@ class VirtualTextView(Gtk.DrawingArea):
         buf._view = self
         self.renderer = Renderer()
         self.ctrl = InputController(self, buf)
-        self.scroll_line = 0  # Logical line at top of viewport
-        self.scroll_visual_offset = 0  # Visual line offset within the logical line
+        self.scroll_line = 0
+        self.scroll_visual_offset = 0
         self.scroll_x = 0
         self.renderer.wrap_enabled = True
-        self.needs_scrollbar_init = False  # Flag to update scrollbar after file load
-        
+        self.needs_scrollbar_init = False
+
         # Overwrite mode (toggled with Insert key)
         self.overwrite_mode = False
 
         # Throttling for scrollbar updates
         self.scroll_update_pending = False
         self.pending_scroll_value = None
-        
+
         # OPTIMIZATION: Skip calculations during scrollbar drag
         self.scrollbar_dragging = False
         self.last_drag_value = None
-        
+
         # OPTIMIZATION: Calculation progress tracking
         self.calculating = False
         self.calculation_message = ""
+
+        # NEW: debounce heavy resize handling
+        self.resize_update_pending = False
 
         self.set_focusable(True)
         self.set_vexpand(True)
@@ -4779,6 +4782,7 @@ class VirtualTextView(Gtk.DrawingArea):
         self.install_mouse()
         self.install_keys()
         self.install_im()
+
 
     def create_text_layout(self, cr, text="", auto_dir=True):
         """Create a Pango layout using renderer's font.
@@ -5100,16 +5104,30 @@ class VirtualTextView(Gtk.DrawingArea):
             self.queue_draw()
                 
     def on_resize(self, widget, width, height):
-        """Handle window resize to update scrollbar visibility"""
-        # Clear wrap cache on resize to force recalculation with new width
+        """Debounced resize handler - never do heavy wrap work during resize."""
+        if not self.resize_update_pending:
+            self.resize_update_pending = True
+            GLib.idle_add(self._process_resize_after_idle)
+        return False
+
+
+
+    def _process_resize_after_idle(self):
+        self.resize_update_pending = False
+
         if self.renderer.wrap_enabled:
-            self.renderer.wrap_cache = {}
+            # Clear ONLY the wrap cache. Do NOT rebuild it now.
+            self.renderer.wrap_cache.clear()
             self.renderer.visual_line_map = []
             self.renderer.total_visual_lines_cache = None
-            self.renderer.total_visual_lines_locked = False  # Clear lock flag
-            self.renderer.visual_line_anchor = (0, 0)
-        self.update_scrollbar()
+            self.renderer.total_visual_lines_locked = False
+
+        # Do NOT call update_scrollbar() yet
+        # Just force a redraw so snapshot() pulls needed wraps lazily
+        self.queue_draw()
+
         return False
+
 
 
     def file_loaded(self):
