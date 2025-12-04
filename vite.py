@@ -9168,7 +9168,22 @@ class EditorWindow(Adw.ApplicationWindow):
                 if data['type'] == 'editor':
                     # Create editor
                     editor = EditorPage(data['title'])
-                    editor.set_text(data['content'])
+                    
+                    # Handle content: if None (saved file), reload from file_path
+                    if data['content'] is not None:
+                        editor.set_text(data['content'])
+                    elif data['file_path']:
+                        # Reload from file
+                        try:
+                            with open(data['file_path'], 'r', encoding='utf-8') as f:
+                                content = f.read()
+                            editor.set_text(content)
+                        except Exception as e:
+                            print(f"Error reloading file {data['file_path']}: {e}")
+                            editor.set_text("")  # Fallback to empty
+                    else:
+                        editor.set_text("")  # Fallback for edge cases
+                    
                     editor.current_file_path = data['file_path']
                     editor.set_title(data['title'])
                     editor.untitled_number = data['untitled_number']
