@@ -7631,6 +7631,12 @@ class ChromeTab(Gtk.Box):
     def set_modified(self, modified: bool):
         self._is_modified = modified
         self._update_close_button_state()
+        
+        # Add/remove CSS class for modified state (used by close_tab detection)
+        if modified:
+            self.add_css_class("modified")
+        else:
+            self.remove_css_class("modified")
 
        
     def _on_tab_pressed(self, gesture, n_press, x, y):
@@ -8144,17 +8150,18 @@ class ChromeTabBar(Adw.WrapBox):
         self._hide_drop_indicator()
     
     def _on_tab_bar_drop(self, target, value, x, y):
-        """Handle drop on the tab bar - supports both same-window and cross-window drops"""
+        """Handle drop on the tab bar - supports same-window and cross-window tab drops"""
         import json
         global DRAGGED_TAB
         
-        # Try to parse as JSON (cross-window drag)
+        # Try to parse as JSON (cross-window drag or tab data)
         tab_data = None
         if isinstance(value, str):
             try:
                 tab_data = json.loads(value)
             except (json.JSONDecodeError, TypeError):
-                pass
+                # Not JSON - ignore
+                return False
         
         # Get target window
         target_window = None
@@ -8614,12 +8621,52 @@ class EditorWindow(Adw.ApplicationWindow):
         key_ctrl.connect("key-pressed", self.on_window_key_pressed)
         self.add_controller(key_ctrl)
         
+        # Setup drop targets for drag-and-drop functionality
+        self._setup_drop_targets()
+        
         # Handle window close request
         self.connect("close-request", self.on_close_request)
         
         # Connect to theme changes
         style_manager = Adw.StyleManager.get_default()
         style_manager.connect("notify::dark", self.on_theme_changed)
+
+    def _setup_drop_targets(self):
+        """Setup drop targets for various drag-and-drop operations"""
+        
+        # Tab view drop target for files only
+        file_drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        file_drop.connect('drop', self._on_editor_area_drop)
+        self.tab_view.add_controller(file_drop)
+
+
+    def _on_editor_area_drop(self, target, value, x, y):
+        """Handle file drop on editor area"""
+        if not isinstance(value, Gdk.FileList):
+            return False
+        
+        files = value.get_files()
+        if not files:
+            return False
+        
+        # Open each dropped file
+        for gfile in files:
+            file_path = gfile.get_path()
+            if file_path:
+                # Check if it's a text file (basic check)
+                try:
+                    # Try to read as text
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        f.read(1024)  # Test read
+                    # If successful, open it in a new tab
+                    self.add_tab(file_path)
+                except (UnicodeDecodeError, IOError):
+                    # Not a text file or can't read
+                    print(f"Skipping non-text file: {file_path}")
+                    continue
+        
+        return True
+
 
     def on_window_key_pressed(self, controller, keyval, keycode, state):
         # Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+T / Ctrl+O / Ctrl+Shift+S / Ctrl+W
