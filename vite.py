@@ -156,9 +156,10 @@ CSS_OVERLAY_SCROLLBAR = """
 
 .chrome-tab {{
     background: transparent;
-    color: alpha(@window_fg_color, 0.7);
+    color: alpha(@window_fg_color, 0.85);
     min-height: 32px;
-    padding: 0 10px;
+    padding-left: 10px;
+    padding-right: 6px;
     border-radius: 9px 9px 9px 9px;
     margin-bottom: 1px;
 
@@ -203,6 +204,7 @@ CSS_OVERLAY_SCROLLBAR = """
 
 .chrome-tab.active label {{
     font-weight: normal;
+    opacity: 1;
 }}
 
 /* Dragging state */
@@ -241,10 +243,8 @@ CSS_OVERLAY_SCROLLBAR = """
 
 /* close button specific */
 .chrome-tab .chrome-tab-close-button {{
-    min-width: 10px;
-    min-height: 10px;
-    padding: 4px;
-    opacity: 0.10;
+    padding: 2px;
+    opacity: 0.5;
     color: @window_fg_color;
 }}
 
@@ -296,12 +296,12 @@ CSS_OVERLAY_SCROLLBAR = """
 }}
 
 .chrome-tab-close-button:hover  {{
-    background-color: alpha(@window_fg_color, 0.1);
+    background-color: alpha(@window_fg_color, 0.2);
 }}
 
 .chrome-tab.active .chrome-tab-close-button:hover {{
     opacity: 1;
-    background-color: alpha(@window_fg_color, 0.1);
+    background-color: alpha(@window_fg_color, 0.2);
 }}
 
 
@@ -7513,53 +7513,64 @@ class ChromeTab(Gtk.Box):
         self.add_css_class("chrome-tab")
         self.set_vexpand(False)
         self.set_valign(Gtk.Align.CENTER)
+        self.set_halign(Gtk.Align.CENTER)
         self.set_size_request(120, FIXED_H)
         self.set_hexpand(False)       
         overlay = Gtk.Overlay()
 
-        # =====================================================
-        # ADDED: real Adwaita-style modified dot
-        # =====================================================
-        dot_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        dot_box.set_hexpand(True)
-
-        self.modified_dot = Gtk.DrawingArea()
-        self.modified_dot.set_size_request(8, 8)
-        self.modified_dot.add_css_class("modified-dot")
-        self.modified_dot.set_visible(False)  # hidden by default
-        dot_box.append(self.modified_dot)
-        # =====================================================
-
+        # Title label container
+        # We use a box to hold label + close button together for centering
+        label_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        label_box.set_hexpand(True)
+        label_box.set_halign(Gtk.Align.CENTER) # Center the group
+        label_box.set_valign(Gtk.Align.CENTER)
+        
         # Title label
         self.label = Gtk.Label()
         self.label.set_text(title)
-        self.label.set_margin_end(30)
+        # Remove margin_end as we now have spacing in the box
+        #self.label.set_margin_end(30) 
         self.label.set_max_width_chars(20)
         self.label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.label.set_single_line_mode(True)
-        self.label.set_hexpand(True)
-        self.label.set_halign(Gtk.Align.START)
+        self.label.set_hexpand(True) # Don't expand, let box center it
+        self.label.set_halign(Gtk.Align.CENTER)
 
-        # put label next to dot
-        dot_box.append(self.label)
-        dot_box.set_halign(Gtk.Align.CENTER)
-        dot_box.set_valign(Gtk.Align.CENTER)
-        dot_box.set_hexpand(True)
-        dot_box.set_vexpand(True)
+        label_box.append(self.label)
         
-        overlay.set_child(dot_box)
+        # State tracking
+        self._is_modified = False
+        self._is_hovered = False
         
-        # Close button overlay
+        # Close button (now inside label_box)
         if closeable:
             self.close_button = Gtk.Button()
-            self.close_button.set_icon_name("window-close-symbolic")
+            # Default state: cross-small-symbolic (will be updated by _update_close_button_state)
+            self.close_button.set_icon_name("cross-small-symbolic")
             self.close_button.add_css_class("flat")
             self.close_button.add_css_class("chrome-tab-close-button")
-            #self.close_button.set_size_request(24, 24)
-            self.close_button.set_halign(Gtk.Align.END)
+            self.close_button.set_halign(Gtk.Align.CENTER)
             self.close_button.set_valign(Gtk.Align.CENTER)
             self.close_button.connect('clicked', self._on_close_clicked)
-            overlay.add_overlay(self.close_button)
+            
+            # Hover controller for the button/tab interaction
+            # We want the hover effect when hovering the *tab*, not just the button
+            # So we add the controller to self (the tab)
+            hover_controller = Gtk.EventControllerMotion()
+            hover_controller.connect("enter", self._on_hover_enter)
+            hover_controller.connect("leave", self._on_hover_leave)
+            self.add_controller(hover_controller)
+            
+            label_box.append(self.close_button)
+            
+            # Initial state update
+            self._update_close_button_state()
+        
+        # We don't use overlay for the content anymore, just the box directly
+        # But keeping overlay structure if we need other overlays later is fine, 
+        # or we can just append label_box to self if we want.
+        # The original code used overlay.set_child(label_box).
+        overlay.set_child(label_box)
        
         self.append(overlay)
        
@@ -7582,17 +7593,49 @@ class ChromeTab(Gtk.Box):
         click_gesture.connect('released', self._on_tab_released)
         self.add_controller(click_gesture)
 
-    # ==========================================================
-    # PATCH: new method to toggle dot visibility (replaces label hacks)
-    # ==========================================================
+    def _on_hover_enter(self, controller, x, y):
+        self._is_hovered = True
+        self._update_close_button_state()
+
+    def _on_hover_leave(self, controller):
+        self._is_hovered = False
+        self._update_close_button_state()
+
+    def _update_close_button_state(self):
+        if not hasattr(self, 'close_button'):
+            return
+
+        if self._is_modified:
+            if self._is_hovered:
+                # Modified + Hover: Show Close Icon
+                self.close_button.set_icon_name("cross-small-symbolic")
+                self.close_button.set_opacity(1.0)
+            else:
+                # Modified + No Hover: Show Dot
+                self.close_button.set_icon_name("big-dot-symbolic")
+                self.close_button.set_opacity(1.0)
+        else:
+            if self._is_hovered:
+                # Unmodified + Hover: Show Close Icon
+                self.close_button.set_icon_name("cross-small-symbolic")
+                self.close_button.set_opacity(1.0)
+            else:
+                # Unmodified + No Hover: Show Faint Close Icon
+                self.close_button.set_icon_name("cross-small-symbolic")
+                self.close_button.set_opacity(0.5) # Low opacity
+                self.close_button.set_sensitive(True) # Still clickable
+
+        # Ensure button is sensitive (unless we explicitly disabled it logic above, which we don't anymore)
+        self.close_button.set_sensitive(True)
+
     def set_modified(self, modified: bool):
-        self.modified_dot.set_visible(modified)
-        self.queue_draw()
+        self._is_modified = modified
+        self._update_close_button_state()
 
        
     def _on_tab_pressed(self, gesture, n_press, x, y):
         # Check if click is on the close button - if so, don't claim it
-        if hasattr(self, 'close_button'):
+        if hasattr(self, 'close_button') and self.close_button.get_sensitive():
             # Get the close button's allocation
             allocation = self.close_button.get_allocation()
             # Convert coordinates to widget-relative (GTK4 returns tuple of x, y)
@@ -7683,12 +7726,7 @@ class ChromeTab(Gtk.Box):
         return self._original_title
     
     def update_label(self):
-        """Show the real Adwaita-style modified dot."""
-        if self.has_css_class("modified"):
-            self.modified_dot.set_visible(True)
-        else:
-            self.modified_dot.set_visible(False)
-
+        """Update the label text."""
         self.label.set_text(self._original_title)
 
        
@@ -7699,12 +7737,7 @@ class ChromeTab(Gtk.Box):
         else:
             self.remove_css_class("active")
            
-    def set_modified(self, modified):
-        if modified:
-            self.add_css_class("modified")
-        else:
-            self.remove_css_class("modified")
-        self.update_label()
+
     
     # Drag and drop handlers
     def _on_drag_prepare(self, source, x, y):
@@ -9751,7 +9784,7 @@ class EditorWindow(Adw.ApplicationWindow):
         current_page = self.tab_view.get_selected_page()
         for tab in self.tab_bar.tabs:
             if getattr(tab, "_page", None) == current_page:
-                is_modified = tab.modified_dot.get_visible()
+                is_modified = getattr(tab, "_is_modified", False)
                 break
 
         self.header_modified_dot.set_visible(is_modified)
