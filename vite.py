@@ -7636,15 +7636,13 @@ class ChromeTab(Gtk.Box):
     def _on_tab_pressed(self, gesture, n_press, x, y):
         # Check if click is on the close button - if so, don't claim it
         if hasattr(self, 'close_button') and self.close_button.get_sensitive():
-            # Get the close button's allocation
-            allocation = self.close_button.get_allocation()
             # Convert coordinates to widget-relative (GTK4 returns tuple of x, y)
             coords = self.close_button.translate_coordinates(self, 0, 0)
             if coords is not None:
                 widget_x, widget_y = coords
                 # Check if click is within close button bounds
-                if (widget_x <= x <= widget_x + allocation.width and
-                    widget_y <= y <= widget_y + allocation.height):
+                if (widget_x <= x <= widget_x + self.close_button.get_width() and
+                    widget_y <= y <= widget_y + self.close_button.get_height()):
                     # Don't claim - let the button handle it
                     return
         
