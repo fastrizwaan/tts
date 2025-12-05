@@ -4407,7 +4407,9 @@ class Renderer:
                         
                         # Special case: selection includes newline on same line
                         # E.g., selecting from col 11 to 12 on a line with length 11
-                        if sel_end_col > col_end and seg_sel_start == col_end:
+                        # IMPORTANT: Only apply this if we're on the LAST wrapped segment
+                        # Otherwise, selection extending beyond col_end just means it continues to next segment
+                        if sel_end_col > col_end and seg_sel_start == col_end and vis_idx == len(wrap_points) - 1:
                             # Selection is just the newline area (start at end, extends beyond)
                             s_col = seg_sel_start - col_start
                             e_col = sel_end_col - col_start  # Use original sel_end_col, not capped
@@ -4422,9 +4424,18 @@ class Renderer:
                             if vis_idx == len(wrap_points) - 1:
                                 e_col += 1
                     elif ln == sel_end_ln:
-                        if sel_end_col > col_start:
-                            s_col = 0
-                            e_col = min(len(text_segment), sel_end_col - col_start)
+                        # Check if selection also starts on this line (wrapped line case)
+                        # If so, we need to check segment overlap properly
+                        if ln == sel_start_ln:
+                            # Selection starts and ends on same logical line (handled above)
+                            # This should not happen as it's caught by the first elif
+                            pass
+                        else:
+                            # Selection started on a previous line, ends on this line
+                            # Only draw if this segment overlaps with the selection end
+                            if sel_end_col > col_start:
+                                s_col = 0
+                                e_col = min(len(text_segment), sel_end_col - col_start)
 
                     if s_col != -1:
                         # Special handling for empty lines with newline selected
