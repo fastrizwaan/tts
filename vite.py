@@ -7607,10 +7607,18 @@ class ChromeTab(Gtk.Box):
     def _on_hover_enter(self, controller, x, y):
         self._is_hovered = True
         self._update_close_button_state()
+        
+        # Notify tab bar to hide separators
+        if self.tab_bar and hasattr(self.tab_bar, 'hide_separators_for_tab'):
+            self.tab_bar.hide_separators_for_tab(self)
 
     def _on_hover_leave(self, controller):
         self._is_hovered = False
         self._update_close_button_state()
+        
+        # Notify tab bar to restore separators
+        if self.tab_bar and hasattr(self.tab_bar, 'update_separators'):
+            self.tab_bar.update_separators()
 
     def _update_close_button_state(self):
         if not hasattr(self, 'close_button'):
@@ -7756,87 +7764,9 @@ class ChromeTab(Gtk.Box):
     
     # Drag and drop handlers
     def _on_drag_prepare(self, source, x, y):
-        """Prepare drag operation - return content provider with tab data"""
-        import json
-        
-        # Get window reference through tab_bar
-        window = None
-        if self.tab_bar and hasattr(self, '_page'):
-            # Find the EditorWindow that owns this tab bar
-            parent = self.tab_bar.get_parent()
-            while parent:
-                if isinstance(parent, Adw.ApplicationWindow):
-                    window = parent
-                    break
-                parent = parent.get_parent()
-        
-        # Prepare tab data for cross-window transfer
-        tab_data = {
-            'window_id': id(window) if window else 0,
-            'tab_index': self.tab_bar.tabs.index(self) if self.tab_bar and self in self.tab_bar.tabs else -1,
-            # ADDITION: Include the unique ID of the live tab object.
-            # This allows the target drop handler (e.g., in a new window) to 
-            # retrieve and reuse the object instead of creating a copy from data.
-            'tab_id': id(self),
-        }
-        
-        # If we have a page reference, serialize the entire structure
-        if hasattr(self, '_page'):
-            page = self._page
-            tab_root = page.get_child()
-            
-            # Serialize the structure (including splits)
-            def serialize_for_drag(widget):
-                """Serialize widget structure for drag and drop"""
-                if isinstance(widget, Gtk.Box):
-                    # TabRoot - serialize its first child
-                    child = widget.get_first_child()
-                    return serialize_for_drag(child) if child else None
-                elif hasattr(widget, '_editor'):
-                    # Overlay with editor
-                    editor = widget._editor
-                    file_path = editor.current_file_path
-
-                    # FIX 1: Only serialize content for UNTITLED (unsaved) files 
-                    # to prevent freezing with large saved files.
-                    content = editor.get_text() if not file_path else None
-
-                    return {
-                        'type': 'editor',
-                        'content': content,
-                        'file_path': file_path,
-                        'title': editor.get_title(),
-                        'untitled_number': getattr(editor, 'untitled_number', None),
-                    }
-                elif isinstance(widget, Gtk.Paned):
-                    # Paned with splits
-                    return {
-                        'type': 'paned',
-                        'orientation': 'horizontal' if widget.get_orientation() == Gtk.Orientation.HORIZONTAL else 'vertical',
-                        'position': widget.get_position(),
-                        'start_child': serialize_for_drag(widget.get_start_child()),
-                        'end_child': serialize_for_drag(widget.get_end_child())
-                    }
-                return None
-            
-            structure = serialize_for_drag(tab_root)
-            
-            # Store both the structure and legacy fields for compatibility
-            tab_data['structure'] = structure
-            # Legacy fields for simple tabs (backwards compatibility)
-            editor = tab_root._editor
-
-            # FIX 2: Apply the same content serialization check to the legacy field.
-            file_path = editor.current_file_path
-            tab_data['content'] = editor.get_text() if not file_path else None
-            tab_data['file_path'] = file_path
-
-            tab_data['title'] = editor.get_title()
-            tab_data['is_modified'] = self.has_css_class("modified")
-            tab_data['untitled_number'] = getattr(editor, 'untitled_number', None)
-        
-        json_data = json.dumps(tab_data)
-        return Gdk.ContentProvider.new_for_value(json_data)
+        """Prepare drag operation - return content provider with tab object"""
+        # Pass the ChromeTab object directly
+        return Gdk.ContentProvider.new_for_value(self)
     
     def _on_drag_begin(self, source, drag):
         """Called when drag begins - set visual feedback"""
@@ -7857,6 +7787,10 @@ class ChromeTab(Gtk.Box):
         DRAGGED_TAB = None
         self.remove_css_class("dragging")
         
+        # Check if tab was already transferred (e.g. by drop handler)
+        if hasattr(self, 'was_transferred') and self.was_transferred:
+            return
+
         # If drag was successful and cross-window, close the source tab
         if hasattr(self, 'drag_success') and self.drag_success:
             # Find the window that owns this tab
@@ -7915,7 +7849,8 @@ class ChromeTabBar(Adw.WrapBox):
         self.separators.append(first_sep)
         
         # Setup drop target on the tab bar itself
-        drop_target = Gtk.DropTarget.new(str, Gdk.DragAction.MOVE)
+        # Accept ChromeTab objects directly
+        drop_target = Gtk.DropTarget.new(ChromeTab, Gdk.DragAction.MOVE)
         drop_target.connect('drop', self._on_tab_bar_drop)
         drop_target.connect('motion', self._on_tab_bar_motion)
         drop_target.connect('leave', self._on_tab_bar_leave)
@@ -7942,10 +7877,12 @@ class ChromeTabBar(Adw.WrapBox):
         tab.tab_bar = self
         tab.separator = new_sep
 
-        # setup hover handlers
-        self._connect_hover(tab)
+        # setup hover handlers - REMOVED (handled by ChromeTab now)
+        # self._connect_hover(tab)
 
-        self._update_separators()
+        self.update_separators()
+
+
 
     def remove_tab(self, tab):
         if tab not in self.tabs:
@@ -7964,28 +7901,16 @@ class ChromeTabBar(Adw.WrapBox):
         # Keep separator[0] (always exists)
         self.tabs.remove(tab)
 
-        self._update_separators()
+        self.update_separators()
 
-    def _connect_hover(self, tab):
-        motion = Gtk.EventControllerMotion()
-
-        def on_enter(ctrl, x, y):
-            i = self.tabs.index(tab)
-            self._hide_pair(i)
-
-        def on_leave(ctrl):
-            self._update_separators()
-
-        motion.connect("enter", on_enter)
-        motion.connect("leave", on_leave)
-        tab.add_controller(motion)
+    # _connect_hover REMOVED - logic moved to ChromeTab
 
     def set_tab_active(self, tab):
         for t in self.tabs:
             t.set_active(t is tab)
 
         # update separators *immediately*
-        self._update_separators()
+        self.update_separators()
 
     def _hide_pair(self, i):
         """Hide left + right separators for tab[i]."""
@@ -8036,12 +7961,12 @@ class ChromeTabBar(Adw.WrapBox):
         self.separators = [self.separators[0]] + [t.separator for t in self.tabs]
         
         # Update separators
-        self._update_separators()
+        self.update_separators()
         
         # Emit signal to notify parent
         self.emit('tab-reordered', tab, new_index)
 
-    def _update_separators(self):
+    def update_separators(self):
         # Reset all
         for sep in self.separators:
             sep.remove_css_class("hidden")
@@ -8159,20 +8084,17 @@ class ChromeTabBar(Adw.WrapBox):
     def _on_tab_bar_leave(self, target):
         """Handle drag leaving the tab bar"""
         self._hide_drop_indicator()
+        self.update_separators()
     
     def _on_tab_bar_drop(self, target, value, x, y):
         """Handle drop on the tab bar - supports same-window and cross-window tab drops"""
-        import json
         global DRAGGED_TAB
         
-        # Try to parse as JSON (cross-window drag or tab data)
-        tab_data = None
-        if isinstance(value, str):
-            try:
-                tab_data = json.loads(value)
-            except (json.JSONDecodeError, TypeError):
-                # Not JSON - ignore
-                return False
+        # We now expect a ChromeTab object directly
+        if not isinstance(value, ChromeTab):
+            return False
+            
+        dragged_tab = value
         
         # Get target window
         target_window = None
@@ -8185,33 +8107,90 @@ class ChromeTabBar(Adw.WrapBox):
         
         if not target_window:
             return False
-        
-        # Check if this is a cross-window drag
-        if tab_data and 'window_id' in tab_data:
-            source_window_id = tab_data['window_id']
-            target_window_id = id(target_window)
             
-            if source_window_id != target_window_id:
-                # Cross-window drop
-                drop_position = self._calculate_drop_position(x, y)
+        # Check if this is a cross-window drag (tab is from another tab bar)
+        if dragged_tab.tab_bar != self:
+            # Cross-window drop
+            drop_position = self._calculate_drop_position(x, y)
+            
+            # Get source window BEFORE removing tab from bar
+            source_window = None
+            if dragged_tab.tab_bar:
+                source_window = dragged_tab.tab_bar.get_ancestor(Adw.ApplicationWindow)
+            
+            # Reparent the tab
+            # 1. Remove from source tab bar
+            if dragged_tab.tab_bar:
+                dragged_tab.tab_bar.remove_tab(dragged_tab)
+            
+            # 2. Add to this tab bar at the correct position
+            # We need to insert it, but add_tab appends. 
+            # So we append then reorder.
+            self.add_tab(dragged_tab)
+            
+            # Reorder to drop position
+            # Note: add_tab puts it at the end, so index is len-1
+            current_index = len(self.tabs) - 1
+            if current_index != drop_position:
+                self.reorder_tab(dragged_tab, drop_position)
+            
+            # 3. Transfer the EditorPage
+            if source_window and source_window != target_window and hasattr(dragged_tab, '_page'):
+                # Mark as transferred so _on_drag_end doesn't try to close it
+                dragged_tab.was_transferred = True
                 
-                # Transfer the tab to this window
-                if hasattr(target_window, 'transfer_tab_from_data'):
-                    target_window.transfer_tab_from_data(tab_data, drop_position)
+                # Switch signal connections from source window to target window
+                # This ensures that clicking/closing the tab works in the NEW window
+                if source_window:
+                    try:
+                        dragged_tab.disconnect_by_func(source_window.on_tab_activated)
+                        dragged_tab.disconnect_by_func(source_window.on_tab_close_requested)
+                    except Exception as e:
+                        print(f"Error disconnecting signals: {e}")
+                
+                dragged_tab.connect('activate-requested', target_window.on_tab_activated)
+                dragged_tab.connect('close-requested', target_window.on_tab_close_requested)
+                
+                # We already removed the tab from the source tab bar above (line 8146)
+                # so we don't need to do anything else for the tab widget.
+
+                page = dragged_tab._page
+                # Transfer page to target window's tab view
+                # We use the same drop_position as the tab button
+                source_window.tab_view.transfer_page(page, target_window.tab_view, drop_position)
+                
+                # Ensure the page is selected in the new window
+                # Use idle_add to ensure the page transfer is complete
+                def select_page():
+                    # Get the page at the drop position in the target window
+                    # This ensures we have the correct page object belonging to the view
+                    # Note: transfer_page might clamp the position, so we should check if possible
+                    # But usually drop_position is correct.
+                    # Let's try to find the page that corresponds to our dragged tab if possible,
+                    # but we don't have a reliable link anymore if the page object changed.
+                    # Relying on position is the best bet for now.
                     
-                    # Mark the drag as successful so source can close the tab
-                    if DRAGGED_TAB:
-                        DRAGGED_TAB.drag_success = True
-                    
-                    self._hide_drop_indicator()
-                    return True
+                    # Safety check: ensure position is within bounds
+                    n_pages = target_window.tab_view.get_n_pages()
+                    if drop_position < n_pages:
+                        new_page = target_window.tab_view.get_nth_page(drop_position)
+                        if new_page:
+                            target_window.tab_view.set_selected_page(new_page)
+                    return False
+                GLib.idle_add(select_page)
+            
+            # 4. Activate the tab
+            self.set_tab_active(dragged_tab)
+            dragged_tab.emit('activate-requested')
+            
+            # Mark drag as successful
+            if DRAGGED_TAB:
+                DRAGGED_TAB.drag_success = True
+                
+            self._hide_drop_indicator()
+            return True
         
-        # Same-window drag (existing logic)
-        dragged_tab = DRAGGED_TAB if DRAGGED_TAB else value
-        
-        if not isinstance(dragged_tab, ChromeTab):
-            return False
-        
+        # Same-window drag
         if dragged_tab not in self.tabs:
             return False
         
@@ -9035,10 +9014,24 @@ class EditorWindow(Adw.ApplicationWindow):
     def on_tab_reordered(self, tab_bar, tab, new_index):
         """Sync Adw.TabView order with ChromeTabBar order"""
         if hasattr(tab, '_page'):
-            # Reorder the page in Adw.TabView
-            self.tab_view.reorder_page(tab._page, new_index)
-            # Update dropdown to reflect new order
-            self.update_tab_dropdown()
+            # Only reorder if the page belongs to this view
+            # This prevents errors during cross-window drag when the tab is added
+            # to the new window's bar but the page hasn't been transferred yet.
+            
+            # Safe check: iterate pages to see if this page belongs to the view
+            # We cannot use get_page_position() because it asserts ownership!
+            page_belongs_to_view = False
+            n_pages = self.tab_view.get_n_pages()
+            for i in range(n_pages):
+                if self.tab_view.get_nth_page(i) == tab._page:
+                    page_belongs_to_view = True
+                    break
+            
+            if page_belongs_to_view:
+                # Reorder the page in Adw.TabView
+                self.tab_view.reorder_page(tab._page, new_index)
+                # Update dropdown to reflect new order
+                self.update_tab_dropdown()
 
     def setup_tab_actions(self):
         """Setup actions for tab context menu"""
@@ -9175,7 +9168,13 @@ class EditorWindow(Adw.ApplicationWindow):
         # Add the same tab_root to a new page in the new window
         new_page = new_window.tab_view.append(tab_root)
         new_page.set_title(page_title)
-        new_window.tab_view.set_selected_page(new_page)
+        
+        # Use idle_add to set selected page to ensure window is ready
+        def select_new_page():
+            if new_page:
+                new_window.tab_view.set_selected_page(new_page)
+            return False
+        GLib.idle_add(select_new_page)
         
         # Add ChromeTab to ChromeTabBar
         new_window.add_tab_button(new_page)
@@ -9211,173 +9210,8 @@ class EditorWindow(Adw.ApplicationWindow):
         # Update UI state
         self.update_ui_state()
         self.update_tab_dropdown()
-    def transfer_tab_from_data(self, tab_data, drop_position=None):
-        """Create a new tab from transferred data (cross-window drag)"""
-        # Create TabRoot
-        tab_root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         
-        # Check if we have structure data (with splits) or just simple editor data
-        if 'structure' in tab_data and tab_data['structure']:
-            # Reconstruct the full structure including splits
-            structure = tab_data['structure']
-            
-            def reconstruct_from_drag(data, is_root=False):
-                """Reconstruct structure from drag data"""
-                if data['type'] == 'editor':
-                    # Create editor
-                    editor = EditorPage(data['title'])
-                    
-                    # Handle content: if None (saved file), reload from file_path
-                    if data['content'] is not None:
-                        editor.set_text(data['content'])
-                    elif data['file_path']:
-                        # Reload from file
-                        try:
-                            with open(data['file_path'], 'r', encoding='utf-8') as f:
-                                content = f.read()
-                            editor.set_text(content)
-                        except Exception as e:
-                            print(f"Error reloading file {data['file_path']}: {e}")
-                            editor.set_text("")  # Fallback to empty
-                    else:
-                        editor.set_text("")  # Fallback for edge cases
-                    
-                    editor.current_file_path = data['file_path']
-                    editor.set_title(data['title'])
-                    editor.untitled_number = data['untitled_number']
-                    
-                    # Create overlay (with close button if not root)
-                    overlay, editor = self._create_editor_overlay(editor, add_close_button=not is_root)
-                    overlay.set_hexpand(True)
-                    overlay.set_vexpand(True)
-                    
-                    if is_root:
-                        # Store reference on tab_root for the primary editor
-                        tab_root._editor = editor
-                        editor._overlay = overlay
-                    
-                    return overlay, editor
-                    
-                elif data['type'] == 'paned':
-                    # Create paned
-                    orientation = Gtk.Orientation.HORIZONTAL if data['orientation'] == 'horizontal' else Gtk.Orientation.VERTICAL
-                    paned = Gtk.Paned(orientation=orientation)
-                    paned.set_hexpand(True)
-                    paned.set_vexpand(True)
-                    
-                    # Reconstruct children
-                    start_widget, start_editor = reconstruct_from_drag(data['start_child'])
-                    end_widget, end_editor = reconstruct_from_drag(data['end_child'])
-                    
-                    paned.set_start_child(start_widget)
-                    paned.set_end_child(end_widget)
-                    
-                    # If this is root, set the first editor as the primary editor
-                    if is_root and start_editor:
-                        tab_root._editor = start_editor
-                        start_editor._overlay = start_widget
-                    
-                    # Set position
-                    position = data.get('position', 400)
-                    def set_pos():
-                        paned.set_position(position)
-                        return False
-                    GLib.idle_add(set_pos)
-                    
-                    return paned, start_editor
-                
-                return None, None
-            
-            reconstructed_widget, primary_editor = reconstruct_from_drag(structure, is_root=True)
-            
-            if reconstructed_widget:
-                tab_root.append(reconstructed_widget)
-                reconstructed_widget.set_hexpand(True)
-                reconstructed_widget.set_vexpand(True)
-        else:
-            # Legacy: simple editor without splits
-            new_editor = EditorPage(tab_data.get('title', 'Untitled 1'))
-            new_editor.set_text(tab_data.get('content', ''))
-            new_editor.current_file_path = tab_data.get('file_path')
-            new_editor.set_title(tab_data.get('title', 'Untitled 1'))
-            new_editor.untitled_number = tab_data.get('untitled_number')
-            
-            # Create overlay layout for editor
-            overlay, new_editor = self._create_editor_overlay(new_editor)
-            overlay.set_hexpand(True)
-            overlay.set_vexpand(True)
-            
-            tab_root.append(overlay)
-            
-            # Store references
-            tab_root._editor = new_editor
-            new_editor._overlay = overlay
-        
-        # Get the primary editor (always set on tab_root)
-        primary_editor = tab_root._editor
-        title = tab_data.get('title', primary_editor.get_title() if primary_editor else 'Untitled')
-        
-        # Add to tab view
-        page = self.tab_view.append(tab_root)
-        page.set_title(title)
-        
-        # Add ChromeTab to ChromeTabBar at the specified position
-        chrome_tab = ChromeTab(title=title)
-        chrome_tab._page = page
-        
-        # Connect signals
-        chrome_tab.connect('activate-requested', self.on_tab_activated)
-        chrome_tab.connect('close-requested', self.on_tab_close_requested)
-        
-        # Insert at drop position if specified
-        if drop_position is not None and 0 <= drop_position <= len(self.tab_bar.tabs):
-            # Insert tab at specific position
-            idx = drop_position
-            
-            # Insert tab AFTER separator[idx]
-            before_sep = self.tab_bar.separators[idx]
-            self.tab_bar.insert_child_after(chrome_tab, before_sep)
-            
-            # Insert separator AFTER the tab
-            new_sep = Gtk.Box()
-            new_sep.set_size_request(1, 1)
-            new_sep.add_css_class("chrome-tab-separator")
-            self.tab_bar.insert_child_after(new_sep, chrome_tab)
-            
-            # Update internal lists
-            self.tab_bar.tabs.insert(idx, chrome_tab)
-            self.tab_bar.separators.insert(idx + 1, new_sep)
-            
-            # Set tab_bar reference
-            chrome_tab.tab_bar = self.tab_bar
-            chrome_tab.separator = new_sep
-            
-            # Setup hover handlers
-            self.tab_bar._connect_hover(chrome_tab)
-            self.tab_bar._update_separators()
-            
-            # Reorder the page in TabView to match
-            self.tab_view.reorder_page(page, idx)
-        else:
-            # Add at end
-            self.tab_bar.add_tab(chrome_tab)
-        
-        # Set modified state if needed
-        if tab_data.get('is_modified', False):
-            chrome_tab.add_css_class("modified")
-        
-        # Select the new tab
-        self.tab_view.set_selected_page(page)
-        
-        # Update UI
-        self.update_ui_state()
-        self.update_tab_dropdown()
-        
-        # Focus the editor
-        if primary_editor:
-            primary_editor.view.grab_focus()
-        
-        return primary_editor
+
 
     def close_tab_after_drag(self, tab_index):
         """Close a tab after successful cross-window drag"""
@@ -9830,7 +9664,7 @@ class EditorWindow(Adw.ApplicationWindow):
                 tab.set_active(is_active)
             
         # Force update of separators to hide them around the new active tab
-        self.tab_bar._update_separators()
+        self.tab_bar.update_separators()
 
     def update_ui_state(self):
         """Update UI elements based on state (e.g. tab bar visibility)"""
