@@ -7510,7 +7510,8 @@ DRAGGED_TAB = None
 
 class ChromeTab(Gtk.Box):
     """A custom tab widget that behaves like Chrome tabs"""
-   
+    _drag_in_progress = False
+
     __gsignals__ = {
         'close-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'activate-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
@@ -7765,12 +7766,23 @@ class ChromeTab(Gtk.Box):
     # Drag and drop handlers
     def _on_drag_prepare(self, source, x, y):
         """Prepare drag operation - return content provider with tab object"""
+        # Prevent concurrent drags
+        if ChromeTab._drag_in_progress:
+            return None
+        
         # Pass the ChromeTab object directly
         return Gdk.ContentProvider.new_for_value(self)
     
     def _on_drag_begin(self, source, drag):
         """Called when drag begins - set visual feedback"""
         global DRAGGED_TAB
+        
+        # Prevent concurrent drags
+        if ChromeTab._drag_in_progress:
+            drag.drop_done(False)
+            return
+        
+        ChromeTab._drag_in_progress = True
         DRAGGED_TAB = self
         self.drag_success = False  # Track if drag was successful
         
@@ -7784,87 +7796,105 @@ class ChromeTab(Gtk.Box):
     def _on_drag_end(self, source, drag, delete_data):
         """Called when drag ends - cleanup and handle cross-window transfer"""
         global DRAGGED_TAB
+        
+        # Reset drag success flag for next drag
+        had_success = getattr(self, 'drag_success', False)
+        self.drag_success = False
+        
+        # Check if tab was already transferred (e.g. by drop handler)
+        was_transferred = getattr(self, 'was_transferred', False)
+        self.was_transferred = False
+        
+        # Clean up visual state
         DRAGGED_TAB = None
         self.remove_css_class("dragging")
         
-        # Check if tab was already transferred (e.g. by drop handler)
-        if hasattr(self, 'was_transferred') and self.was_transferred:
+        # Schedule cleanup of drag lock after a delay to ensure all operations complete
+        def cleanup_drag_lock():
+            ChromeTab._drag_in_progress = False
+            return False
+        
+        GLib.timeout_add(100, cleanup_drag_lock)  # 100ms delay
+        
+        if was_transferred:
             return
 
         # If drag was successful and cross-window, close the source tab
-        if hasattr(self, 'drag_success') and self.drag_success:
-            # Find the window that owns this tab
-            window = None
-            if self.tab_bar:
-                parent = self.tab_bar.get_parent()
-                while parent:
-                    if isinstance(parent, Adw.ApplicationWindow):
-                        window = parent
-                        break
-                    parent = parent.get_parent()
-            
-            if window and hasattr(window, 'close_tab_after_drag'):
-                # Get tab index
-                if self.tab_bar and self in self.tab_bar.tabs:
-                    tab_index = self.tab_bar.tabs.index(self)
-                    # Use GLib.idle_add to close the tab after drag completes
-                GLib.idle_add(window.close_tab_after_drag, tab_index)
+        # Only close if it was a CROSS-WINDOW drag (tab_bar changed)
+        if had_success:
+            # Check if this was actually a cross-window transfer
+            # by checking if the tab is still in its original tab_bar
+            if self.tab_bar and self not in self.tab_bar.tabs:
+                # Tab was removed from original bar = cross-window transfer
+                # The drop handler already took care of closing the source tab
+                pass
+            # If tab is still in tab_bar, it was just reordered within same window
+            # Don't do anything - normal reordering handled it
+            return
         
         # If drag was NOT successful (dropped on nothing), check if dropped outside window
-        elif not self.drag_success:
-            # Find the window that owns this tab
-            window = None
-            if self.tab_bar:
-                parent = self.tab_bar.get_parent()
-                while parent:
-                    if isinstance(parent, Adw.ApplicationWindow):
-                        window = parent
-                        break
-                    parent = parent.get_parent()
-            
-            if window:
-                # Get pointer position relative to window
-                # We need the seat and pointer
+        # But only if we still have a valid tab_bar reference
+        if not self.tab_bar or self not in self.tab_bar.tabs:
+            # Tab is detached or invalid, don't try to process further
+            return
+        
+        # Find the window that owns this tab
+        window = None
+        parent = self.tab_bar.get_parent()
+        while parent:
+            if isinstance(parent, Adw.ApplicationWindow):
+                window = parent
+                break
+            parent = parent.get_parent()
+        
+        if not window:
+            return
+        
+        # Use idle_add to defer the window check to avoid GTK state issues
+        def check_outside_window():
+            # Get seat and pointer
+            try:
                 seat = Gdk.Display.get_default().get_default_seat()
+                if not seat:
+                    return False
+                
                 pointer = seat.get_pointer()
+                if not pointer:
+                    return False
                 
                 # Get window surface and coordinates
                 surface = window.get_surface()
-
-
-        # Re-check logic:
-        # We can use `window.get_pointer()`? No, removed in GTK4.
-        # We can use `surface.get_device_position(device)`.
-        
-        if window:
-                # Get window surface and coordinates
-                surface = window.get_surface()
-                if surface and pointer:
-                    # Check if outside
-                    # On Wayland, get_device_position returns False if pointer is not over surface
-                    found, x, y, mask = surface.get_device_position(pointer)
-                    
-                    is_outside = False
-                    if not found:
+                if not surface:
+                    return False
+                
+                # Check if outside
+                # On Wayland, get_device_position returns False if pointer is not over surface
+                found, x, y, mask = surface.get_device_position(pointer)
+                
+                is_outside = False
+                if not found:
+                    is_outside = True
+                else:
+                    # Even if found, check bounds (in case of grab)
+                    width = window.get_width()
+                    height = window.get_height()
+                    if x < 0 or y < 0 or x > width or y > height:
                         is_outside = True
-                    else:
-                        # Even if found, check bounds (in case of grab)
-                        width = window.get_width()
-                        height = window.get_height()
-                        if x < 0 or y < 0 or x > width or y > height:
-                            is_outside = True
-                    
-                    if is_outside:
-                        # It is outside!
-                        # Trigger move to new window
-                        if self.tab_bar and self in self.tab_bar.tabs:
-                            idx = self.tab_bar.tabs.index(self)
-                            # IMPORTANT: idle_add expects False to stop. activate_action returns True!
-                            # So we must wrap it to return False explicitly.
-                            def trigger_move():
-                                window.activate_action('win.tab_move_new_window', GLib.Variant.new_string(str(idx)))
-                                return False
-                            GLib.idle_add(trigger_move)
+                
+                if is_outside:
+                    # It is outside!
+                    # Trigger move to new window
+                    if self.tab_bar and self in self.tab_bar.tabs:
+                        idx = self.tab_bar.tabs.index(self)
+                        window.activate_action('win.tab_move_new_window', GLib.Variant.new_string(str(idx)))
+                
+            except Exception as e:
+                print(f"Error checking window bounds: {e}")
+            
+            return False
+        
+        # Defer the check to let GTK clean up drag state
+        GLib.timeout_add(50, check_outside_window)  # 50ms delay
 
 
 
@@ -8146,6 +8176,10 @@ class ChromeTabBar(Adw.WrapBox):
         """Handle drop on the tab bar - supports same-window and cross-window tab drops"""
         global DRAGGED_TAB
         
+        # Prevent processing if drag is being finalized
+        if not ChromeTab._drag_in_progress:
+            return False
+        
         # We now expect a ChromeTab object directly
         if not isinstance(value, ChromeTab):
             return False
@@ -8199,7 +8233,6 @@ class ChromeTabBar(Adw.WrapBox):
                 dragged_tab.was_transferred = True
                 
                 # Switch signal connections from source window to target window
-                # This ensures that clicking/closing the tab works in the NEW window
                 if source_window:
                     try:
                         dragged_tab.disconnect_by_func(source_window.on_tab_activated)
@@ -8209,27 +8242,13 @@ class ChromeTabBar(Adw.WrapBox):
                 
                 dragged_tab.connect('activate-requested', target_window.on_tab_activated)
                 dragged_tab.connect('close-requested', target_window.on_tab_close_requested)
-                
-                # We already removed the tab from the source tab bar above (line 8146)
-                # so we don't need to do anything else for the tab widget.
 
                 page = dragged_tab._page
                 # Transfer page to target window's tab view
-                # We use the same drop_position as the tab button
                 source_window.tab_view.transfer_page(page, target_window.tab_view, drop_position)
                 
                 # Ensure the page is selected in the new window
-                # Use idle_add to ensure the page transfer is complete
                 def select_page():
-                    # Get the page at the drop position in the target window
-                    # This ensures we have the correct page object belonging to the view
-                    # Note: transfer_page might clamp the position, so we should check if possible
-                    # But usually drop_position is correct.
-                    # Let's try to find the page that corresponds to our dragged tab if possible,
-                    # but we don't have a reliable link anymore if the page object changed.
-                    # Relying on position is the best bet for now.
-                    
-                    # Safety check: ensure position is within bounds
                     n_pages = target_window.tab_view.get_n_pages()
                     if drop_position < n_pages:
                         new_page = target_window.tab_view.get_nth_page(drop_position)
@@ -9291,6 +9310,9 @@ class EditorWindow(Adw.ApplicationWindow):
             
             # Close the tab
             self.perform_close_tab(page)
+            
+            # Update UI state to hide tab bar if only 1 tab remains
+            self.update_ui_state()
 
 
     def on_tab_split_horizontal(self, action, parameter):
