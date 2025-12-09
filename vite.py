@@ -708,6 +708,241 @@ class Selection:
 #   BUFFER
 # ============================================================
 
+# ============================================================
+#   UNDO / REDO SYSTEM
+# ============================================================
+
+class UndoCommand:
+    """Abstract base class for undoable commands"""
+    def undo(self, buffer):
+        pass
+        
+    def redo(self, buffer):
+        pass
+        
+    def merge(self, other):
+        """Try to merge with a subsequent command. Returns True if merged."""
+        return False
+
+
+class InsertCommand(UndoCommand):
+    def __init__(self, line, col, text, cursor_after_line, cursor_after_col):
+        self.line = line
+        self.col = col
+        self.text = text
+        self.cursor_after_line = cursor_after_line
+        self.cursor_after_col = cursor_after_col
+        self.timestamp = time.time()
+        
+    def undo(self, buffer):
+        # To undo an insertion, we delete the inserted range.
+        # We know where it started (line, col) and how long ‘text’ is.
+        # However, calculating the exact end line/col from ‘text’ is safer than relying on stored end state,
+        # but for now we can rely on inverse logic.
+        
+        # Calculate end position based on text content
+        lines = self.text.split('\n')
+        if len(lines) == 1:
+            end_line = self.line
+            end_col = self.col + len(self.text)
+        else:
+            end_line = self.line + len(lines) - 1
+            end_col = len(lines[-1])
+            
+        # Select the range
+        buffer.selection.set_start(self.line, self.col)
+        buffer.selection.set_end(end_line, end_col)
+        
+        # Delete it (bypassing the undo stack recording)
+        buffer.delete_selection(_record_undo=False)
+        
+        # Restore cursor to start
+        buffer.cursor_line = self.line
+        buffer.cursor_col = self.col
+        
+    def redo(self, buffer):
+        buffer.cursor_line = self.line
+        buffer.cursor_col = self.col
+        buffer.selection.clear()
+        buffer.insert_text(self.text, _record_undo=False)
+        
+        # Restore cursor
+        buffer.cursor_line = self.cursor_after_line
+        buffer.cursor_col = self.cursor_after_col
+
+    def merge(self, other):
+        if not isinstance(other, InsertCommand):
+            return False
+            
+        # Check if other immediately follows self
+        # We need to know where 'self' ended.
+        lines = self.text.split('\n')
+        if len(lines) == 1:
+            my_end_line = self.line
+            my_end_col = self.col + len(self.text)
+        else:
+            my_end_line = self.line + len(lines) - 1
+            my_end_col = len(lines[-1])
+            
+        if other.line != my_end_line or other.col != my_end_col:
+            return False
+            
+        # Check for word grouping logic
+        # User requested "word based".
+        
+        if other.timestamp - self.timestamp > 2.0:
+            return False
+            
+        def group_type(txt):
+            if not txt: return 0
+            if txt.isspace(): return 1 # Whitespace
+            # Alphanumeric
+            if txt.isalnum() or txt == '_': return 2
+            # Punctuation / Symbols
+            return 3
+            
+        last_group = group_type(self.text[-1])
+        new_group = group_type(other.text[0])
+        
+        if '\n' in self.text:
+            return False # Don't merge across lines for now, safer
+            
+        if last_group == 1 and new_group != 1:
+            return False # " " -> "a" : Break
+            
+        # If we have too much text, break
+        if len(self.text) > 50:
+             return False
+             
+        self.text += other.text
+        self.cursor_after_line = other.cursor_after_line
+        self.cursor_after_col = other.cursor_after_col
+        self.timestamp = other.timestamp # Update time
+        return True
+
+
+class DeleteCommand(UndoCommand):
+    def __init__(self, line, col, text, restore_selection=True):
+        self.line = line
+        self.col = col
+        self.text = text
+        self.restore_selection = restore_selection
+        self.timestamp = time.time()
+
+    def undo(self, buffer):
+        buffer.cursor_line = self.line
+        buffer.cursor_col = self.col
+        buffer.insert_text(self.text, _record_undo=False)
+
+        if self.restore_selection:
+            # Calculate range end
+            lines = self.text.split('\n')
+            if len(lines) == 1:
+                end_line = self.line
+                end_col = self.col + len(self.text)
+            else:
+                end_line = self.line + len(lines) - 1
+                end_col = len(lines[-1])
+            
+            buffer.selection.set_start(self.line, self.col)
+            buffer.selection.set_end(end_line, end_col)
+        
+    def redo(self, buffer):
+        # Calculate range
+        lines = self.text.split('\n')
+        if len(lines) == 1:
+            end_line = self.line
+            end_col = self.col + len(self.text)
+        else:
+            end_line = self.line + len(lines) - 1
+            end_col = len(lines[-1])
+            
+        buffer.selection.set_start(self.line, self.col)
+        buffer.selection.set_end(end_line, end_col)
+        buffer.delete_selection(_record_undo=False)
+
+    def merge(self, other):
+        if not isinstance(other, DeleteCommand):
+            return False
+            
+        # Merge sequential backward deletes (Backspace)
+        # Sequence: del 'c' at (0,2), then del 'b' at (0,1)
+        # other is new command.
+        
+        lines_other = other.text.split('\n')
+        if len(lines_other) == 1:
+             # Backward delete merge
+             if other.line == self.line and (other.col + len(other.text)) == self.col:
+                 self.col = other.col
+                 self.text = other.text + self.text
+                 self.timestamp = other.timestamp
+                 return True
+             
+             # Forward delete merge (Delete key)
+             if other.line == self.line and other.col == self.col:
+                 self.text += other.text
+                 self.timestamp = other.timestamp
+                 return True
+                 
+        return False
+
+
+class UndoStack:
+    def __init__(self, buffer):
+        self.buffer = buffer
+        self.undo_stack = []
+        self.redo_stack = []
+        self.max_size = 1000
+        self.is_doing_undo = False
+        
+    def add_command(self, cmd):
+        if self.is_doing_undo:
+            return
+            
+        # Try to merge with top of stack
+        if self.undo_stack:
+            if self.undo_stack[-1].merge(cmd):
+                return
+                
+        self.undo_stack.append(cmd)
+        self.redo_stack.clear()
+        
+        if len(self.undo_stack) > self.max_size:
+            self.undo_stack.pop(0)
+            
+    def undo(self):
+        if not self.undo_stack:
+            return
+            
+        cmd = self.undo_stack.pop()
+        self.redo_stack.append(cmd)
+        
+        self.is_doing_undo = True
+        try:
+            cmd.undo(self.buffer)
+        finally:
+            self.is_doing_undo = False
+            
+    def redo(self):
+        if not self.redo_stack:
+            return
+            
+        cmd = self.redo_stack.pop()
+        self.undo_stack.append(cmd)
+        
+        self.is_doing_undo = True
+        try:
+            cmd.redo(self.buffer)
+        finally:
+            self.is_doing_undo = False
+
+    def can_undo(self):
+        return len(self.undo_stack) > 0
+        
+    def can_redo(self):
+        return len(self.redo_stack) > 0
+
+
 class VirtualBuffer(GObject.Object):
     __gsignals__ = {
         "changed": (GObject.SignalFlags.RUN_FIRST, None, ())
@@ -727,6 +962,13 @@ class VirtualBuffer(GObject.Object):
         # State for Alt+Arrow movement
         self.last_move_was_partial = False
         self.expected_selection = None
+        self.undo_stack = UndoStack(self)
+
+    def undo(self):
+        self.undo_stack.undo()
+
+    def redo(self):
+        self.undo_stack.redo()
 
     def load(self, indexed_file, emit_changed=True):
         self.file = indexed_file
@@ -906,12 +1148,17 @@ class VirtualBuffer(GObject.Object):
             
             return '\n'.join(lines)
     
-    def delete_selection(self):
+    def delete_selection(self, _record_undo=True, restore_selection_on_undo=True):
         """Delete the selected text"""
         if not self.selection.has_selection():
             return False
         
+        # Capture text for undo
+        deleted_text = ""
         start_line, start_col, end_line, end_col = self.selection.get_bounds()
+
+        if _record_undo:
+             deleted_text = self.get_selected_text()
         
         if start_line == end_line:
             # Single line selection
@@ -979,11 +1226,13 @@ class VirtualBuffer(GObject.Object):
             
             self.inserted_lines = new_ins
             self.edits = new_ed
-            self.deleted_lines = new_del
-            
             # Update line offsets
             self._add_offset(start_line + 1, -lines_deleted)
         
+        if _record_undo:
+             cmd = DeleteCommand(start_line, start_col, deleted_text, restore_selection=restore_selection_on_undo)
+             self.undo_stack.add_command(cmd)
+
         self.cursor_line = start_line
         self.cursor_col = start_col
         self.selection.clear()
@@ -991,7 +1240,7 @@ class VirtualBuffer(GObject.Object):
         return True
 
 
-    def insert_text(self, text, overwrite=False):
+    def insert_text(self, text, overwrite=False, _record_undo=True):
         # If there's a selection, delete it first
         if self.selection.has_selection():
             self.delete_selection()
@@ -999,6 +1248,10 @@ class VirtualBuffer(GObject.Object):
         ln  = self.cursor_line
         col = self.cursor_col
         old = self.get_line(ln)
+        
+        # Save start pos for undo
+        start_ln = ln
+        start_col = col
 
         # Split insert by newline
         parts = text.split("\n")
@@ -1022,6 +1275,11 @@ class VirtualBuffer(GObject.Object):
                 self.edits[ln] = new_line
 
             self.cursor_col += len(text)
+            
+            if _record_undo:
+                cmd = InsertCommand(start_ln, start_col, text, self.cursor_line, self.cursor_col)
+                self.undo_stack.add_command(cmd)
+            
             self.emit("changed")
             return
 
@@ -1098,6 +1356,11 @@ class VirtualBuffer(GObject.Object):
         self.cursor_col  = len(last)
 
         self.selection.clear()
+        
+        if _record_undo:
+            cmd = InsertCommand(start_ln, start_col, text, self.cursor_line, self.cursor_col)
+            self.undo_stack.add_command(cmd)
+
         self.emit("changed")
 
 
@@ -1106,79 +1369,20 @@ class VirtualBuffer(GObject.Object):
         if self.selection.has_selection():
             self.delete_selection()
             return
-        
-        ln = self.cursor_line
-        line = self.get_line(ln)
-        col = self.cursor_col
 
+        ln = self.cursor_line
+        col = self.cursor_col
+        
         if col == 0:
-            # Deleting at start of line - merge with previous line
             if ln > 0:
                 prev_line = self.get_line(ln - 1)
-                new_line = prev_line + line
-                
-                # Update previous line with merged content
-                if ln - 1 in self.inserted_lines:
-                    self.inserted_lines[ln - 1] = new_line
-                else:
-                    self.edits[ln - 1] = new_line
-                
-                # Shift down all virtual lines after current line
-                new_ins = {}
-                for k, v in self.inserted_lines.items():
-                    if k < ln:
-                        new_ins[k] = v
-                    elif k == ln:
-                        # Skip - this line is being deleted
-                        pass
-                    else:
-                        # Shift down by 1
-                        new_ins[k - 1] = v
-                
-                new_ed = {}
-                for k, v in self.edits.items():
-                    if k < ln:
-                        new_ed[k] = v
-                    elif k == ln:
-                        # Skip - this line is being deleted
-                        pass
-                    else:
-                        # Shift down by 1
-                        new_ed[k - 1] = v
-                
-                new_del = set()
-                for k in self.deleted_lines:
-                    if k < ln:
-                        new_del.add(k)
-                    elif k == ln:
-                        # Skip - already being deleted
-                        pass
-                    else:
-                        # Shift down by 1
-                        new_del.add(k - 1)
-                
-                self.inserted_lines = new_ins
-                self.edits = new_ed
-                self.deleted_lines = new_del
-                
-                # Track offset change (1 line deleted)
-                self._add_offset(ln + 1, -1)
-                
-                self.cursor_line = ln - 1
-                self.cursor_col = len(prev_line)
+                self.selection.set_start(ln - 1, len(prev_line))
+                self.selection.set_end(ln, 0)
+                self.delete_selection(restore_selection_on_undo=False)
         else:
-            # Normal backspace within a line
-            new_line = line[:col-1] + line[col:]
-            
-            if ln in self.inserted_lines:
-                self.inserted_lines[ln] = new_line
-            else:
-                self.edits[ln] = new_line
-            
-            self.cursor_col = col - 1
-
-        self.selection.clear()
-        self.emit("changed")
+            self.selection.set_start(ln, col - 1)
+            self.selection.set_end(ln, col)
+            self.delete_selection(restore_selection_on_undo=False)
         
 
 
@@ -1189,72 +1393,18 @@ class VirtualBuffer(GObject.Object):
             return
         
         ln = self.cursor_line
-        line = self.get_line(ln)
         col = self.cursor_col
+        line = self.get_line(ln)
         
         if col >= len(line):
-            # At end of line - merge with next line
             if ln < self.total() - 1:
-                next_line = self.get_line(ln + 1)
-                new_line = line + next_line
-                
-                # Update current line with merged content
-                if ln in self.inserted_lines:
-                    self.inserted_lines[ln] = new_line
-                else:
-                    self.edits[ln] = new_line
-                
-                # Shift down all virtual lines after next line
-                new_ins = {}
-                for k, v in self.inserted_lines.items():
-                    if k <= ln:
-                        new_ins[k] = v
-                    elif k == ln + 1:
-                        # Skip - this line is being deleted
-                        pass
-                    else:
-                        # Shift down by 1
-                        new_ins[k - 1] = v
-                
-                new_ed = {}
-                for k, v in self.edits.items():
-                    if k <= ln:
-                        new_ed[k] = v
-                    elif k == ln + 1:
-                        # Skip - this line is being deleted
-                        pass
-                    else:
-                        # Shift down by 1
-                        new_ed[k - 1] = v
-                
-                new_del = set()
-                for k in self.deleted_lines:
-                    if k <= ln:
-                        new_del.add(k)
-                    elif k == ln + 1:
-                        # Skip - already being deleted
-                        pass
-                    else:
-                        # Shift down by 1
-                        new_del.add(k - 1)
-                
-                self.inserted_lines = new_ins
-                self.edits = new_ed
-                self.deleted_lines = new_del
-                
-                # Track offset change (1 line deleted)
-                self._add_offset(ln + 2, -1)
+                self.selection.set_start(ln, len(line))
+                self.selection.set_end(ln + 1, 0)
+                self.delete_selection(restore_selection_on_undo=False)
         else:
-            # Normal delete within a line
-            new_line = line[:col] + line[col+1:]
-            
-            if ln in self.inserted_lines:
-                self.inserted_lines[ln] = new_line
-            else:
-                self.edits[ln] = new_line
-        
-        self.selection.clear()
-        self.emit("changed")
+            self.selection.set_start(ln, col)
+            self.selection.set_end(ln, col + 1)
+            self.delete_selection(restore_selection_on_undo=False)
     
     def delete_word_backward(self):
         """Delete from cursor to start of current word (Ctrl+Backspace)"""
@@ -1277,49 +1427,9 @@ class VirtualBuffer(GObject.Object):
         if col == 0:
             if ln > 0:
                 prev_line = self.get_line(ln - 1)
-                new_line = prev_line + line
-                
-                if ln - 1 in self.inserted_lines:
-                    self.inserted_lines[ln - 1] = new_line
-                else:
-                    self.edits[ln - 1] = new_line
-                
-                new_ins = {}
-                for k, v in self.inserted_lines.items():
-                    if k < ln:
-                        new_ins[k] = v
-                    elif k == ln:
-                        pass
-                    else:
-                        new_ins[k - 1] = v
-                
-                new_ed = {}
-                for k, v in self.edits.items():
-                    if k < ln:
-                        new_ed[k] = v
-                    elif k == ln:
-                        pass
-                    else:
-                        new_ed[k - 1] = v
-                
-                new_del = set()
-                for k in self.deleted_lines:
-                    if k < ln:
-                        new_del.add(k)
-                    elif k == ln:
-                        pass
-                    else:
-                        new_del.add(k - 1)
-                
-                self.inserted_lines = new_ins
-                self.edits = new_ed
-                self.deleted_lines = new_del
-                self._add_offset(ln + 1, -1)
-                
-                self.cursor_line = ln - 1
-                self.cursor_col = len(prev_line)
-            
-            self.emit("changed")
+                self.selection.set_start(ln - 1, len(prev_line))
+                self.selection.set_end(ln, 0)
+                self.delete_selection(restore_selection_on_undo=False)
             return
         
         start_col = col
@@ -1334,15 +1444,9 @@ class VirtualBuffer(GObject.Object):
                 while start_col > 0 and not line[start_col - 1].isspace() and not is_word_char(line[start_col - 1]):
                     start_col -= 1
         
-        new_line = line[:start_col] + line[col:]
-        
-        if ln in self.inserted_lines:
-            self.inserted_lines[ln] = new_line
-        else:
-            self.edits[ln] = new_line
-        
-        self.cursor_col = start_col
-        self.emit("changed")
+        self.selection.set_start(ln, start_col)
+        self.selection.set_end(ln, col)
+        self.delete_selection(restore_selection_on_undo=False)
     
     def delete_word_forward(self):
         """Delete from cursor to end of current word (Ctrl+Delete)"""
@@ -1365,47 +1469,9 @@ class VirtualBuffer(GObject.Object):
         # If at end of line, delete the newline
         if col >= len(line):
             if ln < self.total() - 1:
-                next_line = self.get_line(ln + 1)
-                new_line = line + next_line
-                
-                if ln in self.inserted_lines:
-                    self.inserted_lines[ln] = new_line
-                else:
-                    self.edits[ln] = new_line
-                
-                new_ins = {}
-                for k, v in self.inserted_lines.items():
-                    if k <= ln:
-                        new_ins[k] = v
-                    elif k == ln + 1:
-                        pass
-                    else:
-                        new_ins[k - 1] = v
-                
-                new_ed = {}
-                for k, v in self.edits.items():
-                    if k <= ln:
-                        new_ed[k] = v
-                    elif k == ln + 1:
-                        pass
-                    else:
-                        new_ed[k - 1] = v
-                
-                new_del = set()
-                for k in self.deleted_lines:
-                    if k <= ln:
-                        new_del.add(k)
-                    elif k == ln + 1:
-                        pass
-                    else:
-                        new_del.add(k - 1)
-                
-                self.inserted_lines = new_ins
-                self.edits = new_ed
-                self.deleted_lines = new_del
-                self._add_offset(ln + 2, -1)
-            
-            self.emit("changed")
+                self.selection.set_start(ln, len(line))
+                self.selection.set_end(ln + 1, 0)
+                self.delete_selection(restore_selection_on_undo=False)
             return
         
         end_col = col
@@ -1420,14 +1486,9 @@ class VirtualBuffer(GObject.Object):
                 while end_col < len(line) and not line[end_col].isspace() and not is_word_char(line[end_col]):
                     end_col += 1
         
-        new_line = line[:col] + line[end_col:]
-        
-        if ln in self.inserted_lines:
-            self.inserted_lines[ln] = new_line
-        else:
-            self.edits[ln] = new_line
-        
-        self.emit("changed")
+        self.selection.set_start(ln, col)
+        self.selection.set_end(ln, end_col)
+        self.delete_selection(restore_selection_on_undo=False)
     
     def delete_to_line_end(self):
         """Delete from cursor to end of line (Ctrl+Shift+Delete)"""
@@ -1554,54 +1615,7 @@ class VirtualBuffer(GObject.Object):
             self.line_offsets[i] = (lo, off + delta)
 
     def insert_newline(self):
-        if self.selection.has_selection():
-            self.delete_selection()
-            return
-
-        ln = self.cursor_line
-        col = self.cursor_col
-
-        old = self.get_line(ln)
-        left  = old[:col]
-        right = old[col:]
-
-        # Update left part
-        if ln in self.inserted_lines:
-            self.inserted_lines[ln] = left
-        else:
-            self.edits[ln] = left
-
-        # ---- SHIFT ONLY VIRTUAL LINES ----
-        # Inserted
-        new_ins = {}
-        for k, v in self.inserted_lines.items():
-            new_ins[k if k <= ln else k+1] = v
-
-        # Edits
-        new_ed = {}
-        for k, v in self.edits.items():
-            new_ed[k if k <= ln else k+1] = v
-
-        # Deleted
-        new_del = set()
-        for k in self.deleted_lines:
-            new_del.add(k if k <= ln else k+1)
-
-        # Insert right half as NEW line at ln+1
-        new_ins[ln + 1] = right
-
-        self.inserted_lines = new_ins
-        self.edits = new_ed
-        self.deleted_lines = new_del
-
-        # Track logical offset (1 new line)
-        self._add_offset(ln + 1, 1)
-
-        # Cursor
-        self.cursor_line = ln + 1
-        self.cursor_col = 0
-        self.selection.clear()
-        self.emit("changed")
+        self.insert_text("\n")
 
     def indent_selection(self):
         """Indent selected lines or current line"""
@@ -5539,6 +5553,20 @@ class VirtualTextView(Gtk.DrawingArea):
         shift_pressed = (state & Gdk.ModifierType.SHIFT_MASK) != 0
         ctrl_pressed = (state & Gdk.ModifierType.CONTROL_MASK) != 0
         alt_pressed = (state & Gdk.ModifierType.ALT_MASK) != 0
+
+        # Undo (Ctrl+Z)
+        if ctrl_pressed and not shift_pressed and not alt_pressed and (name == "z" or name == "Z"):
+            self.buf.undo()
+            self.queue_draw()
+            return True
+            
+        # Redo (Ctrl+Y or Ctrl+Shift+Z)
+        if ctrl_pressed and \
+           ((not shift_pressed and (name == "y" or name == "Y")) or \
+            (shift_pressed and (name == "z" or name == "Z"))):
+            self.buf.redo()
+            self.queue_draw()
+            return True
 
         # Alt+Z - Toggle word wrap
         if alt_pressed and (name == "z" or name == "Z"):
