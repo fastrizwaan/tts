@@ -4798,6 +4798,9 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # NEW: debounce heavy resize handling
         self.resize_update_pending = False
+        
+        # NEW: debounce triple click vs drag
+        self._pending_triple_click = False
 
         self.set_focusable(True)
         self.set_vexpand(True)
@@ -6046,17 +6049,18 @@ class VirtualTextView(Gtk.DrawingArea):
 
 
     def install_mouse(self):
-        click = Gtk.GestureClick()
-        click.set_button(1)
-        click.connect("pressed", self.on_click_pressed)
-        self.add_controller(click)
-
         drag = Gtk.GestureDrag()
         drag.set_button(1)
         drag.connect("drag-begin", self.on_drag_begin)
         drag.connect("drag-update", self.on_drag_update)
         drag.connect("drag-end", self.on_drag_end)
         self.add_controller(drag)
+
+        click = Gtk.GestureClick()
+        click.set_button(1)
+        click.connect("pressed", self.on_click_pressed)
+        click.connect("released", self.on_click_released)
+        self.add_controller(click)
         
         # Middle-click paste
         middle_click = Gtk.GestureClick()
@@ -6262,6 +6266,7 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def on_click_pressed(self, g, n_press, x, y):
         """Handle mouse click."""
+        print(f"DEBUG: Click Pressed. Count={n_press}")
         self.grab_focus()
 
         # Always use accurate xy_to_line_col - Pango hit-testing is fast enough
@@ -6294,8 +6299,27 @@ class VirtualTextView(Gtk.DrawingArea):
             self.queue_draw()
             return
 
-        # TRIPLE CLICK unchanged
+        # TRIPLE CLICK
         if self.click_count == 3:
+            # Check if we are clicking inside an established selection (from double-click)
+            # If so, defer the triple click action until release, in case user drags instead.
+            if self.buf.selection.has_selection():
+                s_line, s_col, e_line, e_col = self.buf.selection.get_bounds()
+                is_inside = False
+                if s_line == e_line:
+                    if ln == s_line and s_col <= col < e_col:
+                        is_inside = True
+                else:
+                    # Multi-line word selection? Possible.
+                    if s_line <= ln <= e_line: # simplified check
+                         is_inside = True
+                
+                if is_inside:
+                    self._pending_triple_click = True
+                    self._triple_click_ln = ln
+                    self._triple_click_line_len = line_len
+                    return # DEFER
+            
             self.buf.selection.set_start(ln, 0)
             self.buf.selection.set_end(ln, line_len)
             self.buf.cursor_line = ln
@@ -6456,6 +6480,32 @@ class VirtualTextView(Gtk.DrawingArea):
                     self.queue_draw()
                     return
 
+        # Check if we are clicking inside an established selection
+        # If so, do NOT clear selection yet (wait for drag or release)
+        if self.buf.selection.has_selection():
+            s_line, s_col, e_line, e_col = self.buf.selection.get_bounds()
+            is_inside = False
+            if s_line == e_line:
+                if ln == s_line and s_col <= col < e_col:
+                    is_inside = True
+            else:
+                if ln == s_line and col >= s_col:
+                    is_inside = True
+                elif ln == e_line and col < e_col:
+                    is_inside = True
+                elif s_line < ln < e_line:
+                    is_inside = True
+            
+            if is_inside:
+                self._clicked_in_selection = True
+                self._click_ln = ln
+                self._click_col = col
+                self._pending_click = True
+                print("DEBUG: Clicked INSIDE selection. Pending Click Set. Returning.")
+                self.queue_draw()
+                return
+
+        print("DEBUG: Clicked OUTSIDE selection. Clearing selection.")
         self._clicked_in_selection = False
         self.buf.selection.clear()
         self.ctrl.start_drag(ln, col)
@@ -6527,6 +6577,7 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def on_drag_begin(self, g, x, y):
         """Handle drag begin event."""
+        print(f"DEBUG: Drag Begin at {x},{y}")
         # Always use accurate xy_to_line_col
         ln, col = self.xy_to_line_col(x, y)
         
@@ -6573,6 +6624,7 @@ class VirtualTextView(Gtk.DrawingArea):
             self.drag_and_drop_mode = False
             self._drag_pending = False
             self._pending_click = False
+            self._pending_triple_click = False # Cancel triple click if dragging with shift
             
             # Manually set dragging state to allow update_drag to work
             # But DO NOT call ctrl.start_drag() because that clears the selection!
@@ -6870,7 +6922,10 @@ class VirtualTextView(Gtk.DrawingArea):
             self.drag_and_drop_mode = True
             self._drag_pending = False
             # Now we know it's a drag, so it's NOT a click-to-clear
+            print("DEBUG: Drag Update. Mode Active. Clearing Pending Click.")
             self._clicked_in_selection = False
+            self._pending_click = False # Cancel pending click
+            self._pending_triple_click = False # failsafe
             self.queue_draw()
 
         # Store current drag position for auto-scroll
@@ -6998,9 +7053,23 @@ class VirtualTextView(Gtk.DrawingArea):
 
 
     def on_click_released(self, g, n, x, y):
+        print(f"DEBUG: Released. PendingClick={self._pending_click}. PendingTriple={self._pending_triple_click}")
         if self._pending_click:
+            print("DEBUG: Executing Pending Click (Clear/Move)")
             self.ctrl.click(self._click_ln, self._click_col)
         self._pending_click = False
+        
+        if self._pending_triple_click:
+            # Execute deferred triple click
+            ln = self._triple_click_ln
+            line_len = self._triple_click_line_len
+            self.buf.selection.set_start(ln, 0)
+            self.buf.selection.set_end(ln, line_len)
+            self.buf.cursor_line = ln
+            self.buf.cursor_col = line_len
+            self._pending_triple_click = False
+            self.queue_draw()
+            
         self.queue_draw()
 
     def on_drag_end(self, g, dx, dy):
@@ -7080,6 +7149,25 @@ class VirtualTextView(Gtk.DrawingArea):
                         # Insert at adjusted position
                         self.buf.set_cursor(drop_ln, drop_col)
                         self.buf.insert_text(self.dragged_text)
+                    
+                    # Select the inserted text (Move/Copy should leave text selected)
+                    lines = self.dragged_text.split('\n')
+                    new_lines_count = len(lines) - 1
+                    select_start_ln = drop_ln
+                    select_start_col = drop_col
+                    
+                    if new_lines_count == 0:
+                         select_end_ln = drop_ln
+                         select_end_col = drop_col + len(lines[0])
+                    else:
+                         select_end_ln = drop_ln + new_lines_count
+                         select_end_col = len(lines[-1])
+                    
+                    self.buf.selection.set_start(select_start_ln, select_start_col)
+                    self.buf.selection.set_end(select_end_ln, select_end_col)
+                    self.buf.cursor_line = select_end_ln
+                    self.buf.cursor_col = select_end_col
+                    print(f"DEBUG: Drag End. Selected text: {select_start_ln},{select_start_col} - {select_end_ln},{select_end_col}")
                 
                 self.keep_cursor_visible()
             
