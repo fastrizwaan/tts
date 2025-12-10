@@ -5,6 +5,7 @@ from array import array
 import math 
 import datetime
 import bisect
+import re
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
@@ -398,6 +399,169 @@ def detect_rtl_line(text):
         if t in ("R", "AL", "RLE", "RLO"):
             return True
     return False
+
+
+# ==========================================================
+# SYNTAX PATTERNS
+# ==========================================================
+
+class SyntaxPatterns:
+    """Static regex definitions for all supported languages."""
+
+    PYTHON = {
+        'keywords': r'\b(False|None|True|and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b',
+        'builtins': r'\b(abs|all|any|ascii|bin|bool|bytearray|bytes|callable|chr|classmethod|compile|complex|delattr|dict|dir|divmod|enumerate|eval|exec|filter|float|format|frozenset|getattr|globals|hasattr|hash|help|hex|id|input|int|isinstance|issubclass|iter|len|list|locals|map|max|memoryview|min|next|object|oct|open|ord|pow|print|property|range|repr|reversed|round|set|setattr|slice|sorted|staticmethod|str|sum|super|tuple|type|vars|zip|__import__)\b',
+        'string': r'(""".*?"""|\'\'\'.*?\'\'\'|"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\')',
+        'comment': r'#.*$',
+        'decorator': r'@\w+',
+        'number': r'\b\d+\.?\d*([eE][+-]?\d+)?\b',
+        'function': r'\bdef\s+(\w+)',
+        'class': r'\bclass\s+(\w+)',
+        'personal': r'\b(Adw|Gtk)\b'
+    }
+
+    JAVASCRIPT = {
+        'keywords': r'\b(break|case|catch|class|const|continue|debugger|default|delete|do|else|export|extends|finally|for|function|if|import|in|instanceof|let|new|return|super|switch|this|throw|try|typeof|var|void|while|with|yield)\b',
+        'builtins': r'\b(Array|Boolean|Date|Error|Function|JSON|Math|Number|Object|Promise|RegExp|String|Symbol|console|document|window)\b',
+        'string': r'(`(?:[^`\\]|\\.)*`|"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\')',
+        'comment': r'(//.*$|/\*[\s\S]*?\*/)',
+        'number': r'\b\d+\.?\d*([eE][+-]?\d+)?\b',
+        'function': r'\bfunction\s+(\w+)',
+        'class': r'\bclass\s+(\w+)'
+    }
+
+    C = {
+        'keywords': r'\b(auto|break|case|char|const|continue|default|do|double|else|enum|extern|float|for|goto|if|inline|int|long|register|restrict|return|short|signed|sizeof|static|struct|switch|typedef|union|unsigned|void|volatile|while)\b',
+        'preprocessor': r'#\s*(include|define|undef|ifdef|ifndef|if|else|elif|endif|pragma)',
+        'string': r'"(?:[^"\\]|\\.)*"',
+        'comment': r'(//.*$|/\*[\s\S]*?\*/)',
+        'number': r'\b\d+\.?\d*([eE][+-]?\d+)?[fFuUlL]?\b'
+    }
+
+    RUST = {
+        'keywords': r'\b(as|async|await|break|const|continue|crate|dyn|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|struct|super|trait|true|type|unsafe|use|where|while)\b',
+        'types': r'\b(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64|bool|char|str|String|Vec|Box|Option|Result)\b',
+        'string': r'(r#".*?"#|"(?:[^"\\]|\\.)*")',
+        'comment': r'(//.*$|/\*[\s\S]*?\*/)',
+        'number': r'\b\d+\.?\d*([eE][+-]?\d+)?\b',
+        'macro': r'\b\w+!'
+    }
+
+    HTML = {
+        'tag': r'</?[\w-]+>?',
+        'attribute': r'\b[\w-]+=',
+        'string': r'"[^"]*"|\'[^\']*\'',
+        'comment': r'<!--[\s\S]*?-->',
+        'entity': r'&\w+;'
+    }
+
+    CSS = {
+        'selector': r'[.#]?[\w-]+(?=\s*\{)',
+        'property': r'\b[\w-]+(?=:)',
+        'string': r'"[^"]*"|\'[^\']*\'',
+        'comment': r'/\*[\s\S]*?\*/',
+        'number': r'\b\d+\.?\d*(px|em|rem|%|vh|vw)?\b',
+        'color': r'#[0-9a-fA-F]{3,8}\b'
+    }
+
+    @classmethod
+    def get(cls, lang):
+        """Return dict of patterns for a given language."""
+        if not lang:
+            return {}
+        lang = lang.lower()
+        return {
+            'python': cls.PYTHON,
+            'javascript': cls.JAVASCRIPT,
+            'c': cls.C,
+            'rust': cls.RUST,
+            'html': cls.HTML,
+            'css': cls.CSS
+        }.get(lang, {})
+
+# ==========================================================
+# SYNTAX ENGINE
+# ==========================================================
+
+class SyntaxEngine:
+    """
+    Performs syntax tokenization using regex patterns.
+    Manages syntax cache.
+    """
+
+    TOKEN_ORDER = [
+        'personal', 'comment', 'string', 'decorator', 'preprocessor',
+        'keywords', 'builtins', 'types', 'function', 'class',
+        'number', 'tag', 'attribute', 'property', 'selector',
+        'color', 'entity', 'macro'
+    ]
+
+    def __init__(self):
+        self.language = None
+        self.patterns = {}
+        self.cache = {}
+
+    # -----------------------------
+    # Language / pattern management
+    # -----------------------------
+    def set_language(self, lang):
+        self.language = lang
+        self.patterns = SyntaxPatterns.get(lang)
+        self.cache.clear()
+
+    # -----------------------------
+    # Cache invalidation
+    # -----------------------------
+    def invalidate_from(self, start_line):
+        keys_to_del = [k for k in self.cache if k >= start_line]
+        for k in keys_to_del:
+            del self.cache[k]
+
+    # -----------------------------
+    # Core tokenization
+    # -----------------------------
+    def tokenize(self, line_num, text):
+        if not self.patterns:
+            return []
+
+        if line_num in self.cache:
+            return self.cache[line_num]
+
+        tokens = []
+        covered = set()
+
+        for name in self.TOKEN_ORDER:
+            pattern = self.patterns.get(name)
+            if not pattern:
+                continue
+
+            try:
+                for match in re.finditer(pattern, text, re.MULTILINE):
+                    # Use specific capture group if available (e.g. for def foo)
+                    if match.lastindex and match.lastindex >= 1:
+                        start, end = match.span(match.lastindex)
+                    else:
+                        start, end = match.span()
+
+                    # avoid overlaps
+                    is_overlap = False
+                    for pos in range(start, end):
+                         if pos in covered:
+                             is_overlap = True
+                             break
+                    
+                    if is_overlap:
+                        continue
+
+                    tokens.append((start, end, name))
+                    covered.update(range(start, end))
+
+            except re.error:
+                continue
+
+        tokens.sort(key=lambda t: t[0])
+        self.cache[line_num] = tokens
+        return tokens
 
 
 # ============================================================
@@ -963,6 +1127,7 @@ class VirtualBuffer(GObject.Object):
         self.last_move_was_partial = False
         self.expected_selection = None
         self.undo_stack = UndoStack(self)
+        self.syntax_engine = SyntaxEngine()
 
     def undo(self):
         self.undo_stack.undo()
@@ -1236,6 +1401,7 @@ class VirtualBuffer(GObject.Object):
         self.cursor_line = start_line
         self.cursor_col = start_col
         self.selection.clear()
+        self.syntax_engine.invalidate_from(start_line)
         self.emit("changed")
         return True
 
@@ -1280,6 +1446,7 @@ class VirtualBuffer(GObject.Object):
                 cmd = InsertCommand(start_ln, start_col, text, self.cursor_line, self.cursor_col)
                 self.undo_stack.add_command(cmd)
             
+            self.syntax_engine.invalidate_from(start_ln)
             self.emit("changed")
             return
 
@@ -1361,6 +1528,7 @@ class VirtualBuffer(GObject.Object):
             cmd = InsertCommand(start_ln, start_col, text, self.cursor_line, self.cursor_col)
             self.undo_stack.add_command(cmd)
 
+        self.syntax_engine.invalidate_from(start_ln)
         self.emit("changed")
 
 
@@ -1557,6 +1725,7 @@ class VirtualBuffer(GObject.Object):
         self.cursor_line = ln + 1
         self.cursor_col = 0
         self.selection.clear()
+        self.syntax_engine.invalidate_from(ln)
         self.emit("changed")
         
 
@@ -3366,16 +3535,62 @@ class Renderer:
             self.editor_background_color = (r, g, b, a)
 
         # The other colors stay user-defined as before
+        def hex_to_pango(hex_str):
+            r, g, b, a = self.hex_to_rgba_floats(hex_str)
+            return (int(r * 65535), int(g * 65535), int(b * 65535))
+
         if is_dark:
             self.text_foreground_color = (0.90, 0.90, 0.90)
             self.linenumber_foreground_color = (0.60, 0.60, 0.60)
             self.selection_background_color = (0.2, 0.4, 0.6)
             self.selection_foreground_color = (1.0, 1.0, 1.0)
+            
+            # Syntax Colors (Atom One Dark)
+            self.syntax_colors = {
+                'keywords': hex_to_pango("#c678dd"),     # Purple
+                'builtins': hex_to_pango("#56b6c2"),     # Cyan
+                'string': hex_to_pango("#98c379"),       # Green
+                'comment': hex_to_pango("#5c6370"),      # Grey
+                'number': hex_to_pango("#d19a66"),       # Orange
+                'function': hex_to_pango("#61afef"),     # Blue
+                'class': hex_to_pango("#e5c07b"),        # Yellow/Gold
+                'decorator': hex_to_pango("#56b6c2"),    # Cyan
+                'personal': hex_to_pango("#e06c75"),     # Red
+                'tag': hex_to_pango("#e06c75"),          # Red
+                'attribute': hex_to_pango("#d19a66"),    # Orange
+                'property': hex_to_pango("#56b6c2"),     # Cyan
+                'selector': hex_to_pango("#c678dd"),     # Purple
+                'macro': hex_to_pango("#e5c07b"),        # Yellow
+                'preprocessor': hex_to_pango("#c678dd"), # Purple
+                'types': hex_to_pango("#56b6c2"),        # Cyan
+                'entity': hex_to_pango("#d19a66"),       # Orange
+            }
         else:
-            self.text_foreground_color = (0.10, 0.10, 0.10)
-            self.linenumber_foreground_color = (0.50, 0.50, 0.50)
-            self.selection_background_color = (0.6, 0.8, 1.0)
+            self.text_foreground_color = (0.22, 0.23, 0.25) # Darker text for light mode
+            self.linenumber_foreground_color = (0.60, 0.60, 0.60)
+            self.selection_background_color = (0.85, 0.85, 0.90) # Subtler selection
             self.selection_foreground_color = (0.0, 0.0, 0.0)
+            
+            # Syntax Colors (Atom One Light)
+            self.syntax_colors = {
+                'keywords': hex_to_pango("#a626a4"),     # Purple
+                'builtins': hex_to_pango("#0184bc"),     # Cyan/Blue
+                'string': hex_to_pango("#50a14f"),       # Green
+                'comment': hex_to_pango("#a0a1a7"),      # Grey
+                'number': hex_to_pango("#986801"),       # Orange
+                'function': hex_to_pango("#4078f2"),     # Blue
+                'class': hex_to_pango("#c18401"),        # Orange/Gold
+                'decorator': hex_to_pango("#a626a4"),    # Purple
+                'personal': hex_to_pango("#e45649"),     # Red
+                'tag': hex_to_pango("#e45649"),          # Red
+                'attribute': hex_to_pango("#986801"),    # Orange
+                'property': hex_to_pango("#0184bc"),     # Cyan
+                'selector': hex_to_pango("#a626a4"),     # Purple
+                'macro': hex_to_pango("#c18401"),        # Orange
+                'preprocessor': hex_to_pango("#a626a4"), # Purple
+                'types': hex_to_pango("#0184bc"),        # Cyan
+                'entity': hex_to_pango("#986801"),       # Orange
+            }
 
 
     def create_text_layout(self, cr, text="", auto_dir=True):
@@ -4393,7 +4608,43 @@ class Renderer:
 
                 # Draw text segment
                 cr.set_source_rgb(*self.text_foreground_color)
-                layout.set_text(text_segment if text_segment else " ", -1)
+                
+                final_text = text_segment if text_segment else " "
+                layout.set_text(final_text, -1)
+                
+                # Apply syntax highlighting
+                if text_segment and buf.syntax_engine.language:
+                    tokens = buf.syntax_engine.tokenize(ln, line_text)
+                    if tokens:
+                        attrs = Pango.AttrList()
+                        has_attrs = False
+                        
+                        for t_start, t_end, t_type in tokens:
+                            # Intersect token with visible segment [col_start, col_end]
+                            s = max(t_start, col_start)
+                            e = min(t_end, col_end)
+                            
+                            if s < e:
+                                # Found overlap
+                                rel_s = s - col_start
+                                rel_e = e - col_start
+                                
+                                # Convert chars to bytes for Pango
+                                byte_start = len(text_segment[:rel_s].encode('utf-8'))
+                                byte_end = len(text_segment[:rel_e].encode('utf-8'))
+                                
+                                color = self.syntax_colors.get(t_type)
+                                if color:
+                                    r, g, b = color
+                                    # Use Pango.attr_foreground_new (C-style constructor via introspection)
+                                    attr = Pango.attr_foreground_new(r, g, b)
+                                    attr.start_index = byte_start
+                                    attr.end_index = byte_end
+                                    attrs.insert(attr)
+                                    has_attrs = True
+                        
+                        if has_attrs:
+                            layout.set_attributes(attrs)
 
                 # RTL detection
                 rtl = line_is_rtl(text_segment)
@@ -10350,6 +10601,18 @@ class EditorWindow(Adw.ApplicationWindow):
             # Set current encoding to match the loaded file
             editor.current_encoding = idx.encoding
             editor.current_file_path = path
+
+            # Detect language for syntax highlighting
+            ext = os.path.splitext(path)[1].lower()
+            lang = {
+                '.py': 'python',
+                '.js': 'javascript',
+                '.c': 'c', '.h': 'c',
+                '.rs': 'rust',
+                '.html': 'html', '.htm': 'html',
+                '.css': 'css'
+            }.get(ext)
+            editor.buf.syntax_engine.set_language(lang)
             
             # Trigger width scan for the new file
             editor.view.file_loaded()
