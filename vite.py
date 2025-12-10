@@ -377,6 +377,12 @@ CSS_OVERLAY_SCROLLBAR = """
 
 }}
 
+/* Find Bar Styling */
+.find-bar {{
+    background-color: @headerbar_bg_color;
+    border-bottom: 1px solid alpha(@window_fg_color, 0.15);
+    padding: 0px;
+}}
 """
 
 
@@ -1428,6 +1434,26 @@ class DeleteCommand(UndoCommand):
         return False
 
 
+class CompositeCommand(UndoCommand):
+    """Represents a group of commands executed as a single undo step"""
+    def __init__(self, commands):
+        self.commands = commands # List of commands in execution order
+        
+    def undo(self, buffer):
+        # Undo in reverse order
+        for cmd in reversed(self.commands):
+            cmd.undo(buffer)
+            
+    def redo(self, buffer):
+        # Redo in execution order
+        for cmd in self.commands:
+            cmd.redo(buffer)
+            
+    def merge(self, other):
+        return False
+
+
+
 class UndoStack:
     def __init__(self, buffer):
         self.buffer = buffer
@@ -1506,12 +1532,46 @@ class VirtualBuffer(GObject.Object):
         self.undo_stack = UndoStack(self)
         self.syntax_engine = SyntaxEngine()
         self.syntax_engine.set_text_provider(self.get_line)
+        
+        # Optimization: Suppress change signals during batch operations
+        self._suppress_changed_count = 0
+        self._pending_changed = False
+
+    def begin_action(self):
+        """Begin a batch action - suppresses changed signals"""
+        self._suppress_changed_count += 1
+        
+    def end_action(self):
+        """End a batch action - emits pending changed signal if count reaches 0"""
+        self._suppress_changed_count -= 1
+        if self._suppress_changed_count <= 0:
+            self._suppress_changed_count = 0
+            if self._pending_changed:
+                self._pending_changed = False
+                self._emit_changed()
+
+                
+    def _emit_changed(self):
+        """Emit changed signal or mark as pending if suppressed"""
+        if self._suppress_changed_count > 0:
+            self._pending_changed = True
+        else:
+            self.emit("changed")
+
 
     def undo(self):
-        self.undo_stack.undo()
+        self.begin_action()
+        try:
+            self.undo_stack.undo()
+        finally:
+            self.end_action()
 
     def redo(self):
-        self.undo_stack.redo()
+        self.begin_action()
+        try:
+            self.undo_stack.redo()
+        finally:
+            self.end_action()
 
     def load(self, indexed_file, emit_changed=True):
         self.file = indexed_file
@@ -1524,7 +1584,8 @@ class VirtualBuffer(GObject.Object):
         self.selection.clear()
 
         if emit_changed:
-            self.emit("changed")
+            self._emit_changed()
+
 
 
     def get_text(self):
@@ -1543,13 +1604,24 @@ class VirtualBuffer(GObject.Object):
         self.inserted_lines.clear()
         self.line_offsets = []
         self.file = None # Detach file if any
-        
-        # Insert new lines
-        lines = text.split('\n')
-        for i, line in enumerate(lines):
-            self.inserted_lines[i] = line
+        self.begin_action()
+        try:
+            # Clear existing
+            self.edits.clear()
+            self.deleted_lines.clear()
+            self.inserted_lines.clear()
+            self.line_offsets = []
+            self.file = None # Detach file if any
             
-        self.emit("changed")
+            # Insert new lines
+            lines = text.split('\n')
+            for i, line in enumerate(lines):
+                self.inserted_lines[i] = line
+                            
+            self._emit_changed()
+        finally:
+            self.end_action()
+
 
     def _logical_to_physical(self, logical_line):
         """Convert logical line number to physical file line number"""
@@ -1666,7 +1738,8 @@ class VirtualBuffer(GObject.Object):
         self.selection.set_end(last_line, len(last_line_text))
         self.cursor_line = last_line
         self.cursor_col = len(last_line_text)
-        self.emit("changed")
+        self._emit_changed()
+
     
     def get_selected_text(self):
         """Get the currently selected text"""
@@ -1780,7 +1853,8 @@ class VirtualBuffer(GObject.Object):
         self.cursor_col = start_col
         self.selection.clear()
         self.syntax_engine.invalidate_from(start_line)
-        self.emit("changed")
+        self._emit_changed()
+
         return True
 
 
@@ -1825,7 +1899,7 @@ class VirtualBuffer(GObject.Object):
                 self.undo_stack.add_command(cmd)
             
             self.syntax_engine.invalidate_from(start_ln)
-            self.emit("changed")
+            self._emit_changed()
             return
 
         # ------------------------------------------------------------
@@ -1907,7 +1981,8 @@ class VirtualBuffer(GObject.Object):
             self.undo_stack.add_command(cmd)
 
         self.syntax_engine.invalidate_from(start_ln)
-        self.emit("changed")
+        self._emit_changed()
+
 
 
 
@@ -2053,7 +2128,8 @@ class VirtualBuffer(GObject.Object):
         else:
             self.edits[ln] = new_line
         
-        self.emit("changed")
+        self._emit_changed()
+
     
     def delete_to_line_start(self):
         """Delete from cursor to start of line (Ctrl+Shift+Backspace)"""
@@ -2073,7 +2149,8 @@ class VirtualBuffer(GObject.Object):
             self.edits[ln] = new_line
         
         self.cursor_col = 0
-        self.emit("changed")
+        self._emit_changed()
+
         
 
 
@@ -2104,7 +2181,8 @@ class VirtualBuffer(GObject.Object):
         self.cursor_col = 0
         self.selection.clear()
         self.syntax_engine.invalidate_from(ln)
-        self.emit("changed")
+        self._emit_changed()
+
         
 
 
@@ -2190,7 +2268,8 @@ class VirtualBuffer(GObject.Object):
             
         self.selection.end_col += 4
         self.cursor_col += 4
-        self.emit("changed")
+        self._emit_changed()
+
 
     def unindent_selection(self):
         """Unindent selected lines or current line"""
@@ -2220,7 +2299,8 @@ class VirtualBuffer(GObject.Object):
                 self.edits[ln] = new_line
             
             self.cursor_col = max(0, self.cursor_col - removed)
-            self.emit("changed")
+            self._emit_changed()
+
             return
 
         start_line, start_col, end_line, end_col = self.selection.get_bounds()
@@ -2263,7 +2343,8 @@ class VirtualBuffer(GObject.Object):
         # But we should try to keep it valid.
         self.selection.start_col = max(0, self.selection.start_col - removed_start)
         self.selection.end_col = max(0, self.selection.end_col - removed_end)
-        self.emit("changed")
+        self._emit_changed()
+
         
     def move_word_left_with_text(self):
         """Move text left: full words swap, partial selection moves 1 char (Alt+Left)"""
@@ -2351,7 +2432,8 @@ class VirtualBuffer(GObject.Object):
                     self.selection.set_start(ins_start_ln, ins_start_col)
                     self.selection.set_end(sel_end_ln, sel_end_col)
                     
-                    self.emit("changed")
+                    self._emit_changed()
+
                     return
                 
                 selected_text = line[start_col:end_col]
@@ -2450,7 +2532,8 @@ class VirtualBuffer(GObject.Object):
                         self.last_move_was_partial = False
                         self.expected_selection = (prev_ln, prev_word_start, prev_ln, prev_word_start + len(selected_text))
                         
-                        self.emit("changed")
+                        self._emit_changed()
+
                         return
                     
                     prev_word_start = prev_word_end - 1
@@ -2482,7 +2565,8 @@ class VirtualBuffer(GObject.Object):
                     self.last_move_was_partial = False
                     self.expected_selection = (ln, prev_word_start, ln, prev_word_start + len(selected_text))
                     
-                    self.emit("changed")
+                    self._emit_changed()
+
                 else:
                     # Partial selection - ALWAYS use character-wise movement
                     # 1. Identify char before
@@ -2541,7 +2625,8 @@ class VirtualBuffer(GObject.Object):
                     self.last_move_was_partial = True
                     self.expected_selection = (ins_start_ln, ins_start_col, sel_end_ln, sel_end_col)
                     
-                    self.emit("changed")
+                    self._emit_changed()
+
                 return
         
         # No selection - swap current word with previous word
@@ -2641,7 +2726,8 @@ class VirtualBuffer(GObject.Object):
             self.selection.set_start(self.cursor_line, self.cursor_col)
             self.selection.set_end(self.cursor_line, self.cursor_col)
             
-            self.emit("changed")
+            self._emit_changed()
+
             return
         
         prev_word_start = prev_word_end - 1
@@ -2670,7 +2756,8 @@ class VirtualBuffer(GObject.Object):
         self.selection.set_start(ln, prev_word_start)
         self.selection.set_end(ln, prev_word_start + len(current_word))
         
-        self.emit("changed")
+        self._emit_changed()
+
     
     def move_word_right_with_text(self):
         """Move text right: full words swap, partial selection moves 1 char (Alt+Right)"""
@@ -2762,7 +2849,8 @@ class VirtualBuffer(GObject.Object):
                     self.selection.set_start(sel_start_ln, sel_start_col)
                     self.selection.set_end(sel_end_ln, sel_end_col)
                     
-                    self.emit("changed")
+                    self._emit_changed()
+
                     return
                 
                 selected_text = line[start_col:end_col]
@@ -2861,7 +2949,8 @@ class VirtualBuffer(GObject.Object):
                         self.last_move_was_partial = False
                         self.expected_selection = (next_ln, next_word_start, next_ln, next_word_start + len(selected_text))
                         
-                        self.emit("changed")
+                        self._emit_changed()
+
                         return
 
                     next_word_end = next_word_start
@@ -2894,7 +2983,8 @@ class VirtualBuffer(GObject.Object):
                     self.last_move_was_partial = False
                     self.expected_selection = (ln, new_sel_start, ln, new_sel_start + len(selected_text))
                     
-                    self.emit("changed")
+                    self._emit_changed()
+
                 else:
                     # Partial selection - ALWAYS use character-wise movement
                     # 1. Identify char after
@@ -2955,7 +3045,8 @@ class VirtualBuffer(GObject.Object):
                     self.last_move_was_partial = True
                     self.expected_selection = (sel_start_ln, sel_start_col, sel_end_ln, sel_end_col)
                     
-                    self.emit("changed")
+                    self._emit_changed()
+
                 return
         
         # No selection - swap current word with next word
@@ -3052,7 +3143,8 @@ class VirtualBuffer(GObject.Object):
             self.selection.set_start(self.cursor_line, self.cursor_col)
             self.selection.set_end(self.cursor_line, self.cursor_col)
             
-            self.emit("changed")
+            self._emit_changed()
+
             return
 
         next_word_end = next_word_start
@@ -3082,7 +3174,325 @@ class VirtualBuffer(GObject.Object):
         self.selection.set_start(ln, new_cursor_col)
         self.selection.set_end(ln, new_cursor_col) # This line was syntactically incorrect in the instruction, assuming it meant to clear selection or set cursor as end. Reverting to original behavior of selecting the moved word.
         
-        self.emit("changed")
+        self._emit_changed()
+
+
+    def search(self, query, case_sensitive=False, is_regex=False, max_matches=0):
+        """Search in buffer for query. max_matches=0 means unlimited."""
+        if not query:
+            return []
+            
+        matches = []
+        
+        flags = 0 if case_sensitive else re.IGNORECASE
+        
+        pattern = None
+        if is_regex:
+            try:
+                pattern = re.compile(query, flags)
+            except re.error:
+                print(f"Invalid regex: {query}")
+                return []
+        
+        # Prepare query for non-regex search
+        query_text = query if case_sensitive else query.lower()
+        if not query_text:
+            return []
+            
+        total_lines = self.total()
+        
+        for i in range(total_lines):
+            line_text = self.get_line(i)
+            if not line_text:
+                continue
+                
+            line_matches = []
+            
+            if is_regex:
+                for m in pattern.finditer(line_text):
+                    start_col = m.start()
+                    end_col = m.end()
+                    line_matches.append((i, start_col, i, end_col, m.group()))
+            else:
+                start = 0
+                search_text = line_text if case_sensitive else line_text.lower()
+
+                while True:
+                    idx = search_text.find(query_text, start)
+                    if idx == -1:
+                        break
+                    
+                    end_idx = idx + len(query_text)
+                    line_matches.append((i, idx, i, end_idx, line_text[idx:end_idx]))
+                    start = end_idx
+                    
+            matches.extend(line_matches)
+            if max_matches > 0 and len(matches) >= max_matches:
+                matches = matches[:max_matches]
+                break
+            
+        return matches
+
+    def search_async(self, query, case_sensitive, is_regex, max_matches, 
+                     on_progress, on_complete, chunk_size=10000):
+        """
+        Asynchronous search that processes lines in chunks to keep UI responsive.
+        
+        Args:
+            query: Search query
+            case_sensitive: Case sensitive flag
+            is_regex: Use regex flag
+            max_matches: Maximum matches to find (0=unlimited)
+            on_progress: Callback(matches_so_far, lines_searched, total_lines) - called after each chunk
+            on_complete: Callback(final_matches) - called when search is done
+            chunk_size: Number of lines to process per idle callback (default 10000)
+        
+        Returns:
+            A cancel function that can be called to abort the search.
+        """
+        if not query:
+            on_complete([])
+            return lambda: None
+            
+        flags = 0 if case_sensitive else re.IGNORECASE
+        
+        pattern = None
+        if is_regex:
+            try:
+                pattern = re.compile(query, flags)
+            except re.error:
+                print(f"Invalid regex: {query}")
+                on_complete([])
+                return lambda: None
+        
+        query_text = query if case_sensitive else query.lower()
+        if not query_text and not is_regex:
+            on_complete([])
+            return lambda: None
+            
+        total_lines = self.total()
+        
+        # State for the async search
+        state = {
+            'matches': [],
+            'current_line': 0,
+            'cancelled': False,
+            'idle_id': None
+        }
+        
+        def search_chunk():
+            if state['cancelled']:
+                return False  # Stop idle callback
+                
+            end_line = min(state['current_line'] + chunk_size, total_lines)
+            
+            for i in range(state['current_line'], end_line):
+                line_text = self.get_line(i)
+                if not line_text:
+                    continue
+                    
+                line_matches = []
+                
+                if is_regex:
+                    for m in pattern.finditer(line_text):
+                        start_col = m.start()
+                        end_col = m.end()
+                        line_matches.append((i, start_col, i, end_col, m.group()))
+                else:
+                    start = 0
+                    search_text = line_text if case_sensitive else line_text.lower()
+
+                    while True:
+                        idx = search_text.find(query_text, start)
+                        if idx == -1:
+                            break
+                        
+                        end_idx = idx + len(query_text)
+                        line_matches.append((i, idx, i, end_idx, line_text[idx:end_idx]))
+                        start = end_idx
+                        
+                state['matches'].extend(line_matches)
+                
+                # Check if we've hit the match limit
+                if max_matches > 0 and len(state['matches']) >= max_matches:
+                    state['matches'] = state['matches'][:max_matches]
+                    on_complete(state['matches'])
+                    return False  # Stop
+            
+            state['current_line'] = end_line
+            
+            # Report progress
+            if on_progress:
+                on_progress(state['matches'], state['current_line'], total_lines)
+            
+            # Check if we're done
+            if state['current_line'] >= total_lines:
+                on_complete(state['matches'])
+                return False  # Stop
+                
+            return True  # Continue with next chunk
+        
+        # Start the async search
+        state['idle_id'] = GLib.idle_add(search_chunk)
+        
+        def cancel():
+            state['cancelled'] = True
+            if state['idle_id']:
+                GLib.source_remove(state['idle_id'])
+                state['idle_id'] = None
+        
+        return cancel
+
+    def search_viewport(self, query, case_sensitive, is_regex, 
+                        start_line, end_line, max_matches=500):
+        """
+        Search only within a specific line range (for viewport-based searching).
+        
+        Args:
+            query: Search query
+            case_sensitive: Case sensitive flag
+            is_regex: Use regex flag
+            start_line: First line to search (inclusive)
+            end_line: Last line to search (inclusive)
+            max_matches: Maximum matches to find
+        
+        Returns:
+            List of matches within the specified range.
+        """
+        if not query:
+            return []
+            
+        matches = []
+        
+        flags = 0 if case_sensitive else re.IGNORECASE
+        
+        pattern = None
+        if is_regex:
+            try:
+                pattern = re.compile(query, flags)
+            except re.error:
+                return []
+        
+        query_text = query if case_sensitive else query.lower()
+        if not query_text and not is_regex:
+            return []
+            
+        total_lines = self.total()
+        start_line = max(0, start_line)
+        end_line = min(total_lines - 1, end_line)
+        
+        for i in range(start_line, end_line + 1):
+            line_text = self.get_line(i)
+            if not line_text:
+                continue
+                
+            if is_regex:
+                for m in pattern.finditer(line_text):
+                    matches.append((i, m.start(), i, m.end(), m.group()))
+                    if max_matches > 0 and len(matches) >= max_matches:
+                        return matches
+            else:
+                start = 0
+                search_text = line_text if case_sensitive else line_text.lower()
+
+                while True:
+                    idx = search_text.find(query_text, start)
+                    if idx == -1:
+                        break
+                    
+                    end_idx = idx + len(query_text)
+                    matches.append((i, idx, i, end_idx, line_text[idx:end_idx]))
+                    start = end_idx
+                    
+                    if max_matches > 0 and len(matches) >= max_matches:
+                        return matches
+        
+        return matches
+
+
+    def replace_current(self, match, replacement, _record_undo=True):
+        """Replace the text of the given match with replacement.
+        
+        Args:
+            match: tuple (start_ln, start_col, end_ln, end_col, match_text)
+            replacement: string to replace with
+            _record_undo: whether to record this action in undo stack
+            
+        Returns:
+            (new_match, commands_list)
+            new_match: tuple describing the replaced range
+            commands_list: list of UndoCommands used
+        """
+        s_ln, s_col, e_ln, e_col, text = match
+        
+        # Prepare commands
+        commands = []
+        
+        # 1. Delete Command
+        # Set restore_selection=True so undo highlights the restored text (user request)
+        del_cmd = DeleteCommand(s_ln, s_col, text, restore_selection=True)
+        commands.append(del_cmd)
+        
+        # 2. Insert Command
+        # Calculate cursor position after insert
+        lines = replacement.split('\n')
+        if len(lines) == 1:
+            after_ln = s_ln
+            after_col = s_col + len(replacement)
+        else:
+            after_ln = s_ln + len(lines) - 1
+            after_col = len(lines[-1])
+            
+        ins_cmd = InsertCommand(s_ln, s_col, replacement, after_ln, after_col)
+        commands.append(ins_cmd)
+        
+        # Execute
+        # 1. Delete
+        self.selection.set_start(s_ln, s_col)
+        self.selection.set_end(e_ln, e_col)
+        self.delete_selection(_record_undo=False)
+        
+        # 2. Insert
+        self.cursor_line = s_ln
+        self.cursor_col = s_col
+        self.insert_text(replacement, _record_undo=False)
+        
+        # Record Undo
+        if _record_undo:
+            comp = CompositeCommand(commands)
+            self.undo_stack.add_command(comp)
+            
+        new_match = (s_ln, s_col, after_ln, after_col, replacement)
+        return new_match, commands
+
+    def replace_all(self, query, replacement, case_sensitive=False, is_regex=False):
+        """Replace all occurrences of query with replacement."""
+        # Get all matches first 
+        matches = self.search(query, case_sensitive, is_regex, max_matches=0)
+        if not matches:
+            return 0
+            
+        all_cmds = []
+        count = 0
+        
+        self.begin_action()
+        try:
+            # Iterate backwards to avoid index invalidation
+            for i in range(len(matches) - 1, -1, -1):
+                match = matches[i]
+                # Perform replacement without individual undo recording
+                _, cmds = self.replace_current(match, replacement, _record_undo=False)
+                all_cmds.extend(cmds)
+                count += 1
+                
+            if all_cmds:
+                # Create a single composite command for all replacements
+                comp = CompositeCommand(all_cmds)
+                self.undo_stack.add_command(comp)
+        finally:
+            self.end_action()
+            
+        return count
     
     def move_line_up_with_text(self):
         """Move current line or selection up one line (Alt+Up)"""
@@ -3142,7 +3552,8 @@ class VirtualBuffer(GObject.Object):
                     self.cursor_line = start_ln - 1
                     self.cursor_col = start_col
                     
-                    self.emit("changed")
+                    self._emit_changed()
+
                     return
                 
                 # Single-line selection - move text to previous line
@@ -3181,7 +3592,8 @@ class VirtualBuffer(GObject.Object):
                 self.cursor_line = ln - 1
                 self.cursor_col = insert_pos
                 
-                self.emit("changed")
+                self._emit_changed()
+
                 return
         
         # No selection - swap entire line
@@ -3211,7 +3623,8 @@ class VirtualBuffer(GObject.Object):
         # Clear selection
         self.selection.clear()
         
-        self.emit("changed")
+        self._emit_changed()
+
     
     def move_line_down_with_text(self):
         """Move current line or selection down one line (Alt+Down)"""
@@ -3261,7 +3674,8 @@ class VirtualBuffer(GObject.Object):
                     self.cursor_line = start_ln + 1
                     self.cursor_col = start_col
                     
-                    self.emit("changed")
+                    self._emit_changed()
+
                     return
                 
                 # Single-line selection - move text to next line
@@ -3300,7 +3714,8 @@ class VirtualBuffer(GObject.Object):
                 self.cursor_line = ln + 1
                 self.cursor_col = insert_pos
                 
-                self.emit("changed")
+                self._emit_changed()
+
                 return
         
         # No selection - swap entire line
@@ -3330,7 +3745,8 @@ class VirtualBuffer(GObject.Object):
         # Clear selection
         self.selection.clear()
         
-        self.emit("changed")
+        self._emit_changed()
+
 
 
 
@@ -4894,7 +5310,8 @@ class Renderer:
         # (Will be rebuilt on next draw)
 
     def draw(self, cr, alloc, buf, scroll_line, scroll_x,
-            cursor_visible=True, cursor_phase=0.0, scroll_visual_offset=0):
+            cursor_visible=True, cursor_phase=0.0, scroll_visual_offset=0,
+            search_matches=None, current_match=None):
 
         import math
         import unicodedata
@@ -5054,6 +5471,87 @@ class Renderer:
                     # nothing to draw in text area, keep clipped to empty rect
                     cr.rectangle(0, 0, 0, 0)
                     cr.clip()
+
+                # --- DRAW SEARCH MATCHES ---
+                if search_matches and ln in search_matches:
+                    ranges = search_matches[ln]
+                    for s_col, e_col in ranges:
+                        # Intersect with current visual line segment
+                        seg_s = max(s_col, col_start)
+                        seg_e = min(e_col, col_end)
+                        
+                        if seg_s < seg_e:
+                            # Draw yellow highlight
+                            # Calculate pixel positions
+                            # Extract segment of text to measure
+                            
+                            # Note: simplistic measurement, assuming ltr for positions relative to base_x
+                            # But we need accurate visualization.
+                            # We can re-use layout but without setting text yet? No.
+                            # We need pixel offsets.
+                            
+                            # Optimized approach:
+                            # We are inside the loop where we process text_segment. 
+                            # But we haven't set text on layout yet for this segment.
+                            
+                            # Let's set the text on the layout now to calculate positions
+                            # (We do it again below, but it's cheap if efficient)
+                            final_text = text_segment if text_segment else " "
+                            layout.set_text(final_text, -1)
+                            
+                            # Convert cols to byte indices relative to text_segment start
+                            # seg_s is relative to line start. 
+                            # text_segment starts at col_start.
+                            # So index in text_segment is (seg_s - col_start)
+                            
+                            idx1 = visual_byte_index(text_segment, seg_s - col_start)
+                            idx2 = visual_byte_index(text_segment, seg_e - col_start)
+                            
+                            r1_strong, _ = layout.get_cursor_pos(idx1)
+                            r2_strong, _ = layout.get_cursor_pos(idx2)
+                            
+                            x1 = r1_strong.x / Pango.SCALE
+                            x2 = r2_strong.x / Pango.SCALE
+                            
+                            # RTL check
+                            rtl = line_is_rtl(text_segment)
+                            text_w, _ = layout.get_pixel_size()
+                            base_x = self.calculate_text_base_x(rtl, text_w, alloc.width, ln_width, scroll_x)
+                            
+                            h_x = base_x + min(x1, x2)
+                            h_w = abs(x2 - x1)
+                            
+                            if h_w > 0:
+                                # Normal search match: transparent yellow
+                                cr.set_source_rgba(1.0, 1.0, 0.0, 0.4) 
+                                
+                                # Check if this is the CURRENT match
+                                # current_match is (start_ln, start_col, end_ln, end_col, match_txt)
+                                # We check if this range matches exactly or is contained
+                                is_current = False
+                                if current_match:
+                                    # Unpack 5 elements, ignore text
+                                    c_sl, c_sc, c_el, c_ec, _ = current_match
+                                    # Simple check: if we are solely painting this range?
+                                    # Or just strict equality of the partial range?
+                                    # search_matches gives us ranges for THIS line.
+                                    # If the original match is single line, s_col/e_col matches.
+                                    # If multi-line, it's more complex.
+                                    # For now assume single line match logic mostly.
+                                    # Logic: If the highlight range provided corresponds to the current match range on this line.
+                                    
+                                    # We can pass is_current flag in search_matches dict? 
+                                    # search_matches = {ln: [(start, end, is_current), ...]}
+                                    pass
+
+                                cr.rectangle(h_x, y, h_w, self.line_h)
+                                cr.fill()
+
+                # --- DRAW CURRENT MATCH EXTRA HIGHLIGHT ---
+                # Drawn on top or differently?
+                # If we passed is_current in search_matches, we handled it. 
+                # Let's rely on search_matches having a flag if we update it, or just different color.
+                # For now, simplistic yellow for all.
 
                 # Draw text segment
                 cr.set_source_rgb(*self.text_foreground_color)
@@ -5503,6 +6001,15 @@ class VirtualTextView(Gtk.DrawingArea):
         # NEW: debounce triple click vs drag
         self._pending_triple_click = False
 
+        # Search highlights
+        self.search_matches = []  # List of (start_ln, start_col, end_ln, end_col, text)
+        self.highlight_cache = {} # Dict {ln: [(start_col, end_col), ...]}
+        self.current_match_idx = -1
+        self.current_match = None
+        
+        # Scroll callback for viewport-based search refresh
+        self.on_scroll_callback = None
+
         self.set_focusable(True)
         self.set_vexpand(True)
         self.set_hexpand(True)
@@ -5577,7 +6084,102 @@ class VirtualTextView(Gtk.DrawingArea):
         # Connect to size changes to update scrollbars
         self.connect('resize', self.on_resize)
 
+    def set_search_results(self, matches):
+        """Update search results and rebuild highlight cache"""
+        self.search_matches = matches
+        self.highlight_cache = {}
+        self.current_match_idx = -1
+        self.current_match = None
+        
+        if not matches:
+            self.queue_draw()
+            return
+
+        # Build cache: {line: [(start_col, end_col), ...]}
+        # Support multi-line matches by splitting them
+        for s_ln, s_col, e_ln, e_col, text in matches:
+            if s_ln == e_ln:
+                # Single line
+                if s_ln not in self.highlight_cache:
+                    self.highlight_cache[s_ln] = []
+                self.highlight_cache[s_ln].append((s_col, e_col))
+            else:
+                # Multi-line: split into segments
+                # First line: s_col to end
+                if s_ln not in self.highlight_cache:
+                    self.highlight_cache[s_ln] = []
+                # append using large number for end or len(text) of that line?
+                # We don't have line length easily here without querying buffer.
+                # Renderer loop will clamp seg_e = min(e_col, col_end). 
+                # So passing a large number is safe-ish if we assume renderer handles it.
+                # But renderer uses `e_col` to calculate `idx2`. `visual_byte_index` might crash if out of bounds?
+                # `visual_byte_index` iterates `text[:col]`. Python slicing is safe even if out of bounds.
+                # So 1000000 is likely safe.
+                self.highlight_cache[s_ln].append((s_col, 1000000))
+                
+                # Intermediate lines: 0 to end
+                for ln in range(s_ln + 1, e_ln):
+                    if ln not in self.highlight_cache:
+                        self.highlight_cache[ln] = []
+                    self.highlight_cache[ln].append((0, 1000000))
+                
+                # Last line: 0 to e_col
+                if e_ln not in self.highlight_cache:
+                    self.highlight_cache[e_ln] = []
+                self.highlight_cache[e_ln].append((0, e_col))
+        
+        if self.search_matches:
+            self.current_match_idx = 0
+            self.current_match = self.search_matches[0]
+            # Scroll to first match? Maybe let caller handle that.
+            
+        self.queue_draw()
+
+    def next_match(self):
+        if not self.search_matches:
+            return
+        
+        self.current_match_idx = (self.current_match_idx + 1) % len(self.search_matches)
+        self.current_match = self.search_matches[self.current_match_idx]
+        self._scroll_to_match(self.current_match)
+        self.queue_draw()
+
+    def prev_match(self):
+        if not self.search_matches:
+            return
+            
+        self.current_match_idx = (self.current_match_idx - 1) % len(self.search_matches)
+        self.current_match = self.search_matches[self.current_match_idx]
+        self._scroll_to_match(self.current_match)
+        self.queue_draw()
+
+    def _scroll_to_match(self, match):
+        s_ln, s_col, _, _, _ = match
+        
+        # Check if wrapping is enabled to determine target scroll value
+        if self.renderer.wrap_enabled:
+            # Convert logical line to visual line
+            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+            cr = cairo.Context(surface)
+            ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
+            viewport_width = self.get_width()
+            
+            # Use visual line calculation
+            visual_line = self.renderer.logical_to_visual_line(cr, self.buf, s_ln, s_col, ln_width, viewport_width)
+            
+            visible_lines = max(1, self.get_height() // self.renderer.line_h)
+            target_scroll = max(0, visual_line - visible_lines // 2)
+        else:
+            # Logical lines
+            visible_lines = max(1, self.get_height() // self.renderer.line_h)
+            target_scroll = max(0, s_ln - visible_lines // 2)
+        
+        # We need to update vadj
+        if self.vadj:
+            self.vadj.set_value(target_scroll)
+
     def on_buffer_changed(self, *args):
+
         # Optimize: Only invalidate affected lines in wrap cache, not the entire cache
         if self.renderer.wrap_enabled:
             # Only invalidate the current line and a small range around it
@@ -5821,6 +6423,10 @@ class VirtualTextView(Gtk.DrawingArea):
             self.scroll_line = logical_line
             self.scroll_visual_offset = vis_idx
             self.queue_draw()
+            
+            # Notify scroll callback (for viewport-based search refresh)
+            if self.on_scroll_callback:
+                self.on_scroll_callback()
         
         self.scroll_update_pending = False
         return False
@@ -8111,25 +8717,100 @@ class VirtualTextView(Gtk.DrawingArea):
                 # OPTIMIZATION: For huge files (>10M lines), use fast approximation
                 if total_lines > 10_000_000:
                     # Use cached estimate - no expensive calculations
-                    estimated_total = self.renderer.estimated_total_cache or total_lines
+                    # If no cache, use a reasonable default (assume ~1.2x wrap factor)
+                    if self.renderer.estimated_total_cache is not None:
+                        estimated_total = self.renderer.estimated_total_cache
+                    else:
+                        # Default: assume ~20% line wrapping on average
+                        estimated_total = int(total_lines * 1.2)
+                        self.renderer.estimated_total_cache = estimated_total
+                    
                     max_scroll_visual = max(0, estimated_total - visible)
                     
-                    # Calculate approximate current visual line
+                    # Calculate approximate current visual line (including current visual offset)
                     current_ratio = self.scroll_line / max(1, total_lines)
-                    current_visual = int(current_ratio * estimated_total)
+                    current_visual = int(current_ratio * estimated_total) + self.scroll_visual_offset
                     
                     # Apply scroll steps
                     new_visual = current_visual + steps
                     new_visual = max(0, min(new_visual, max_scroll_visual))
                     
-                    if new_visual != current_visual:
+                    # Always update if steps != 0 (allows scrolling through wrapped lines on same logical line)
+                    if steps != 0:
                         # Convert back to logical line using simple ratio
                         new_ratio = new_visual / max(1, estimated_total)
                         new_log = int(new_ratio * total_lines)
                         new_log = max(0, min(new_log, total_lines - 1))
                         
+                        # Calculate visual offset within the target logical line
+                        new_vis_off = 0
+                        
+                        # CRITICAL: If we're staying on the same logical line, 
+                        # directly adjust the visual offset instead of using ratio calculation
+                        # (ratio calculation loses precision and breaks continuous scrolling)
+                        if new_log == self.scroll_line:
+                            # Scrolling within the same wrapped line - directly adjust offset
+                            # Get wrap info to validate bounds
+                            if new_log in self.renderer.wrap_cache:
+                                wrap_points = self.renderer.wrap_cache[new_log]
+                            else:
+                                wrap_points = self.renderer.get_wrap_points_for_line(
+                                    cr, self.buf, new_log, ln_width, viewport_width
+                                )
+                            
+                            num_visual_for_line = len(wrap_points)
+                            
+                            # Directly increment/decrement the visual offset by steps
+                            new_vis_off = self.scroll_visual_offset + steps
+                            
+                            # Handle boundary crossing
+                            if new_vis_off >= num_visual_for_line and steps > 0:
+                                # Scrolling down past the last wrapped line - move to next logical line
+                                overflow = new_vis_off - (num_visual_for_line - 1)
+                                new_log = min(new_log + 1, total_lines - 1)
+                                new_vis_off = 0  # Start at first visual line of next logical line
+                                
+                                # Recursively handle if overflow is more than 1
+                                # (though typically steps=3, so this is rare)
+                                if overflow > 1 and new_log < total_lines - 1:
+                                    new_vis_off = min(overflow - 1, 0)  # Usually stays at 0
+                            elif new_vis_off < 0 and steps < 0:
+                                # Scrolling up past the first wrapped line - move to previous logical line
+                                underflow = abs(new_vis_off)
+                                new_log = max(new_log - 1, 0)
+                                
+                                # Get wrap info for previous line to set offset to last visual line
+                                if new_log in self.renderer.wrap_cache:
+                                    prev_wrap_points = self.renderer.wrap_cache[new_log]
+                                else:
+                                    prev_wrap_points = self.renderer.get_wrap_points_for_line(
+                                        cr, self.buf, new_log, ln_width, viewport_width
+                                    )
+                                prev_num_visual = len(prev_wrap_points)
+                                new_vis_off = max(prev_num_visual - underflow, 0)
+                            else:
+                                # Within bounds - clamp to valid range
+                                new_vis_off = max(0, min(new_vis_off, num_visual_for_line - 1))
+                        else:
+                            # Changed to a different logical line - calculate offset from ratio
+                            if new_log in self.renderer.wrap_cache:
+                                wrap_points = self.renderer.wrap_cache[new_log]
+                            else:
+                                wrap_points = self.renderer.get_wrap_points_for_line(
+                                    cr, self.buf, new_log, ln_width, viewport_width
+                                )
+                            
+                            num_visual_for_line = len(wrap_points)
+                            
+                            # Calculate how many visual lines before this logical line
+                            logical_visual_start = int((new_log / max(1, total_lines)) * estimated_total)
+                            
+                            # Visual offset is the difference
+                            new_vis_off = new_visual - logical_visual_start
+                            new_vis_off = max(0, min(new_vis_off, num_visual_for_line - 1))
+                        
                         self.scroll_line = new_log
-                        self.scroll_visual_offset = 0
+                        self.scroll_visual_offset = new_vis_off
                         
                         # Update scrollbar
                         self.vadj.handler_block_by_func(self.on_vadj_changed)
@@ -8261,7 +8942,9 @@ class VirtualTextView(Gtk.DrawingArea):
             self.scroll_x,
             show_cursor,
             self.cursor_phase,
-            self.scroll_visual_offset  # Pass visual offset
+            self.scroll_visual_offset,  # Pass visual offset
+            search_matches=self.highlight_cache,
+            current_match=self.current_match
         )
         render_elapsed = time.time() - render_start
         
@@ -8311,7 +8994,6 @@ class LoadingDialog(Adw.Window):
         self.set_modal(True)
         self.set_default_size(300, 150)
         self.set_title("Loading File")
-        
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         box.set_margin_top(24)
         box.set_margin_bottom(24)
@@ -9136,6 +9818,384 @@ class ChromeTabBar(Adw.WrapBox):
 #   WINDOW
 # ============================================================
 
+# ============================================================
+#   FIND AND REPLACE BAR
+# ============================================================
+
+class FindReplaceBar(Gtk.Box):
+    def __init__(self, editor_page):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.editor = editor_page
+        self.add_css_class("find-bar")
+        self.set_visible(False)
+        self._search_timeout_id = None
+        self._scroll_refresh_timeout = None
+        
+        # Connect scroll callback for viewport-based search refresh
+        self.editor.view.on_scroll_callback = self._on_editor_scrolled
+        # We'll use CSS to style it properly
+        
+        # --- Top Row: Find ---
+        find_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        find_box.set_margin_top(6)
+        find_box.set_margin_bottom(6)
+        find_box.set_margin_start(12)
+        find_box.set_margin_end(12)
+        
+        # Toggle Replace Mode Button (Arrow)
+        self.reveal_replace_btn = Gtk.Button()
+        self.reveal_replace_btn.set_icon_name("pan-down-symbolic")
+        self.reveal_replace_btn.add_css_class("flat")
+        self.reveal_replace_btn.connect("clicked", self.toggle_replace_mode)
+        self.reveal_replace_btn.set_tooltip_text("Toggle Replace")
+        find_box.append(self.reveal_replace_btn)
+        
+        # Find Entry
+        self.find_entry = Gtk.SearchEntry()
+        self.find_entry.set_hexpand(True)
+        self.find_entry.set_placeholder_text("Find")
+        self.find_entry.connect("search-changed", self.on_search_changed)
+        self.find_entry.connect("activate", self.on_find_next)
+        # Capture Esc to close
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect("key-pressed", self.on_key_pressed)
+        self.find_entry.add_controller(key_ctrl)
+        
+        find_box.append(self.find_entry)
+        
+        # Options Box (linked)
+        opt_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        opt_box.add_css_class("linked")
+        
+        self.case_btn = Gtk.ToggleButton(label="Aa")
+        self.case_btn.set_tooltip_text("Case Sensitive")
+        self.case_btn.connect("toggled", self.on_search_changed)
+        opt_box.append(self.case_btn)
+        
+        self.regex_btn = Gtk.ToggleButton(label=".*")
+        self.regex_btn.set_tooltip_text("Regular Expression")
+        self.regex_btn.connect("toggled", self.on_search_changed)
+        opt_box.append(self.regex_btn)
+        
+        find_box.append(opt_box)
+        
+        # Navigation Box (linked)
+        nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        nav_box.add_css_class("linked")
+        
+        self.prev_btn = Gtk.Button(icon_name="go-up-symbolic")
+        self.prev_btn.set_tooltip_text("Previous Match (Shift+Enter)")
+        self.prev_btn.connect("clicked", self.on_find_prev)
+        nav_box.append(self.prev_btn)
+        
+        self.next_btn = Gtk.Button(icon_name="go-down-symbolic")
+        self.next_btn.set_tooltip_text("Next Match (Enter)")
+        self.next_btn.connect("clicked", self.on_find_next)
+        nav_box.append(self.next_btn)
+        
+        find_box.append(nav_box)
+        
+        # Close Button
+        close_btn = Gtk.Button(icon_name="window-close-symbolic")
+        close_btn.add_css_class("flat")
+        close_btn.set_tooltip_text("Close Find Bar (Esc)")
+        close_btn.connect("clicked", self.close)
+        find_box.append(close_btn)
+        
+        self.append(find_box)
+        
+        # --- Bottom Row: Replace (Hidden by default) ---
+        self.replace_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.replace_box.set_margin_bottom(6)
+        self.replace_box.set_margin_start(12 + 30) # Indent to align with entry roughly
+        self.replace_box.set_margin_end(12)
+        self.replace_box.set_visible(False)
+        
+        self.replace_entry = Gtk.Entry()
+        self.replace_entry.set_hexpand(True)
+        self.replace_entry.set_placeholder_text("Replace")
+        self.replace_entry.connect("activate", self.on_replace)
+        
+        # New controller for replace entry
+        replace_key_ctrl = Gtk.EventControllerKey()
+        replace_key_ctrl.connect("key-pressed", self.on_key_pressed)
+        self.replace_entry.add_controller(replace_key_ctrl)
+
+        
+        self.replace_box.append(self.replace_entry)
+        
+        # Action Buttons
+        self.replace_btn = Gtk.Button(label="Replace")
+        self.replace_btn.connect("clicked", self.on_replace)
+        self.replace_box.append(self.replace_btn)
+        
+        self.replace_all_btn = Gtk.Button(label="Replace All")
+        self.replace_all_btn.connect("clicked", self.on_replace_all)
+        self.replace_box.append(self.replace_all_btn)
+        
+        self.append(self.replace_box)
+
+    def toggle_replace_mode(self, btn):
+        vis = not self.replace_box.get_visible()
+        self.replace_box.set_visible(vis)
+        icon = "pan-up-symbolic" if vis else "pan-down-symbolic"
+        self.reveal_replace_btn.set_icon_name(icon)
+        
+        if vis:
+            self.replace_entry.grab_focus()
+        else:
+            self.find_entry.grab_focus()
+
+    def show_search(self):
+        self.set_visible(True)
+        self.replace_box.set_visible(False)
+        self.reveal_replace_btn.set_icon_name("pan-down-symbolic")
+        self.find_entry.grab_focus()
+        # Select all text in find entry
+        self.find_entry.select_region(0, -1)
+        
+    def show_replace(self):
+        self.set_visible(True)
+        self.replace_box.set_visible(True)
+        self.reveal_replace_btn.set_icon_name("pan-up-symbolic")
+        self.find_entry.grab_focus() # Focus find first usually? Or replace? 
+        # Usu. focus find, but show replace options.
+        
+    def close(self, *args):
+        self.set_visible(False)
+        self.editor.view.grab_focus()
+        # Clear highlights?
+        # self.editor.view.set_search_results([]) 
+        # Usually we might want to keep them until search changes? 
+        # But standard is clearing.
+        # Let's clear for now.
+        # Actually user might want to see highlights while editing. 
+        # VS Code clears highlights when ESC is pressed but keeps widget open?
+        # ESC in widget closes widget AND clears highlights.
+        self.editor.view.set_search_results([])
+
+    def on_key_pressed(self, controller, keyval, keycode, state):
+        if keyval == Gdk.KEY_Escape:
+            self.close()
+            return True
+            
+        # Handle Undo/Redo here to effect the EDITOR buffer, not the entry
+        # This is what users typically expect when focus is in Find/Replace but they want to undo a replacement
+        if state & Gdk.ModifierType.CONTROL_MASK:
+            # Ctrl+Z and Ctrl+Shift+Z
+            if keyval == Gdk.KEY_z or keyval == Gdk.KEY_Z:
+                if state & Gdk.ModifierType.SHIFT_MASK:
+                    self.editor.buf.redo()
+                else:
+                    self.editor.buf.undo()
+                return True
+                
+            # Ctrl+Y
+            if keyval == Gdk.KEY_y or keyval == Gdk.KEY_Y:
+                self.editor.buf.redo()
+                return True
+                
+        return False
+
+    def on_search_changed(self, *args):
+        # Debounce to prevent excessive searches while typing
+        if self._search_timeout_id:
+            GLib.source_remove(self._search_timeout_id)
+        self._search_timeout_id = GLib.timeout_add(200, self._perform_search)
+        
+    def _perform_search(self):
+        self._search_timeout_id = None
+        
+        # Cancel any ongoing async search
+        if hasattr(self, '_cancel_search') and self._cancel_search:
+            self._cancel_search()
+            self._cancel_search = None
+        
+        query = self.find_entry.get_text()
+        case_sensitive = self.case_btn.get_active()
+        is_regex = self.regex_btn.get_active()
+        
+        if not query:
+            self.editor.view.set_search_results([])
+            self._current_search_query = None
+            return False
+        
+        # Store search params for viewport refresh
+        self._current_search_query = query
+        self._current_search_case = case_sensitive
+        self._current_search_regex = is_regex
+        
+        total_lines = self.editor.buf.total()
+        
+        # For small files (<50k lines), use synchronous search
+        if total_lines < 50000:
+            matches = self.editor.buf.search(query, case_sensitive, is_regex, max_matches=5000)
+            self.editor.view.set_search_results(matches)
+            return False
+        
+        # For medium files (50k-500k), use async search
+        if total_lines < 500000:
+            def on_progress(matches, lines_searched, total):
+                self.editor.view.set_search_results(matches)
+            
+            def on_complete(matches):
+                self._cancel_search = None
+                self.editor.view.set_search_results(matches)
+            
+            self._cancel_search = self.editor.buf.search_async(
+                query, case_sensitive, is_regex, 
+                max_matches=5000,
+                on_progress=on_progress,
+                on_complete=on_complete,
+                chunk_size=20000
+            )
+            return False
+        
+        # For huge files (>500k lines), use viewport-only search
+        # This provides instant results in the visible area
+        self._update_viewport_matches()
+        
+        return False
+    
+    def _on_editor_scrolled(self):
+        """Called when editor scrolls - refresh viewport matches for huge files."""
+        # Only refresh for huge files (>500k lines)
+        if self.editor.buf.total() < 500000:
+            return
+            
+        # Debounce scroll refresh
+        if self._scroll_refresh_timeout:
+            GLib.source_remove(self._scroll_refresh_timeout)
+        self._scroll_refresh_timeout = GLib.timeout_add(100, self._do_scroll_refresh)
+    
+    def _do_scroll_refresh(self):
+        """Debounced scroll refresh of viewport matches."""
+        self._scroll_refresh_timeout = None
+        self._update_viewport_matches()
+        return False
+    
+    def _update_viewport_matches(self):
+        """Update search matches for the current viewport (for huge files)."""
+        if not hasattr(self, '_current_search_query') or not self._current_search_query:
+            return
+            
+        # Get visible line range with buffer
+        visible_lines = max(50, self.editor.view.get_height() // self.editor.view.renderer.line_h)
+        start_line = max(0, self.editor.view.scroll_line - visible_lines)
+        end_line = min(self.editor.buf.total() - 1, 
+                       self.editor.view.scroll_line + visible_lines * 2)
+        
+        matches = self.editor.buf.search_viewport(
+            self._current_search_query,
+            self._current_search_case,
+            self._current_search_regex,
+            start_line, end_line,
+            max_matches=500  # Limit for viewport
+        )
+        self.editor.view.set_search_results(matches)
+
+
+    def on_find_next(self, *args):
+        self.editor.view.next_match()
+        
+    def on_find_prev(self, *args):
+        self.editor.view.prev_match()
+        
+    def on_replace(self, *args):
+        # Get replacement text
+        replacement = self.replace_entry.get_text()
+        
+        # Get current match
+        if self.editor.view.current_match:
+            # Perform replacement
+            new_match, _ = self.editor.buf.replace_current(self.editor.view.current_match, replacement)
+            
+            # Update search results (re-search to keep sync)
+
+            self.on_search_changed()
+            
+            # The re-search might pick up the replaced text as a match? 
+            # If so, we want to skip it?
+            # Standard behavior: move to next match after replace.
+            
+            # self.editor.view.next_match() called via on_search_changed reset?
+            # on_search_changed resets matches.
+            
+            # We want to find the NEXT match from the current position.
+            # But search() finds from start.
+            
+            # Let's simplify: replace, then re-search, then try to find match after the edit.
+            # Or just next_match() after re-search?
+            # VirtualTextView.set_search_results resets current_match to 0.
+            
+            # We need to preserve position.
+            # Ideally `search` shouldn't be full re-scan if we can avoid it.
+            # But for now reliability > speed.
+            
+            # We can find where we were (line/col) and advance.
+            old_ln, old_col = self.editor.view.current_match[:2]
+            
+            # Re-search
+            self.on_search_changed()
+            
+            # Find the match that comes after (old_ln, old_col)
+            # Since we replaced, the text is changed. The next match is likely further ahead.
+            
+            # Find index of match that is >= old_ln, old_col (adjusted)
+            # Actually, we just need to find the first match that triggers 'next'.
+            # set_search_results sets current to 0.
+            
+            if self.editor.view.search_matches:
+                 # Find first match after old position
+                 for i, m in enumerate(self.editor.view.search_matches):
+                     ms_ln, ms_col = m[:2]
+                     if (ms_ln > old_ln) or (ms_ln == old_ln and ms_col >= old_col + len(replacement)):
+                         self.editor.view.current_match_idx = i
+                         self.editor.view.current_match = m
+                         self.editor.view._scroll_to_match(m)
+                         self.editor.view.queue_draw()
+                         break
+        
+    def on_replace_all(self, *args):
+        replacement = self.replace_entry.get_text()
+        query = self.find_entry.get_text()
+        case_sensitive = self.case_btn.get_active()
+        is_regex = self.regex_btn.get_active()
+        
+        total_lines = self.editor.buf.total()
+        
+        # For huge files, warn user that this is a heavy operation
+        if total_lines > 500000:
+            # Show a simple inline warning for now
+            print(f"Warning: Replace All on {total_lines:,} lines is very slow. Consider using an external tool like sed.")
+            
+            # Limit to first 10000 matches to prevent total freeze
+            matches = self.editor.buf.search(query, case_sensitive, is_regex, max_matches=10000)
+            if not matches:
+                return
+            
+            count = 0
+            self.editor.buf.begin_action()
+            try:
+                # Replace in reverse order
+                for i in range(len(matches) - 1, -1, -1):
+                    match = matches[i]
+                    self.editor.buf.replace_current(match, replacement, _record_undo=False)
+                    count += 1
+            finally:
+                self.editor.buf.end_action()
+            
+            print(f"Replaced {count} occurrences (limited to 10,000 for performance)")
+            self.on_search_changed()
+            return
+        
+        count = self.editor.buf.replace_all(query, replacement, case_sensitive, is_regex)
+        
+        # Clear results as they are all replaced (unless replacement contains query)
+        self.on_search_changed()
+
+
+
 class EditorPage:
     """A single editor page containing buffer and view"""
     def __init__(self, untitled_title="Untitled 1"):
@@ -9144,7 +10204,10 @@ class EditorPage:
         self.view.set_margin_top(0)
         self.current_encoding = "utf-8"
         self.current_file_path = None
+        self.current_file_path = None
         self.untitled_title = untitled_title  # Store custom Untitled title
+        self.find_bar = None
+
         
     def get_title(self):
         if self.current_file_path:
@@ -9616,6 +10679,30 @@ class EditorWindow(Adw.ApplicationWindow):
                 if page:
                     self.close_tab(page)
                 return True
+
+            # Ctrl+F: Find
+            elif keyval == Gdk.KEY_f or keyval == Gdk.KEY_F:
+                page = self.tab_view.get_selected_page()
+                if page:
+                    # page.get_child() gives tab_root
+                    # tab_root._editor gives EditorPage
+                    root = page.get_child()
+                    if hasattr(root, '_editor'):
+                        editor = root._editor
+                        if editor.find_bar:
+                            editor.find_bar.show_search()
+                return True
+                
+            # Ctrl+H: Replace
+            elif keyval == Gdk.KEY_h or keyval == Gdk.KEY_H:
+                page = self.tab_view.get_selected_page()
+                if page:
+                    root = page.get_child()
+                    if hasattr(root, '_editor'):
+                        editor = root._editor
+                        if editor.find_bar:
+                            editor.find_bar.show_replace()
+                return True
                 
         return False
     
@@ -9829,7 +10916,21 @@ class EditorWindow(Adw.ApplicationWindow):
             editor: EditorPage instance
             add_close_button: If True, adds a close button for split views
         """
+        
+        # Create FindReplaceBar
+        editor.find_bar = FindReplaceBar(editor)
+        
+        # Create container for FindBar + Editor View
+        # We want the FindBar to be above the editor view
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        main_box.append(editor.find_bar)
+        
         overlay = Gtk.Overlay()
+        
+        main_box.append(overlay)
+        overlay.set_hexpand(True)
+        overlay.set_vexpand(True)
+
             
         # Setup scrollbars
         vscroll = Gtk.Scrollbar(
@@ -9889,7 +10990,13 @@ class EditorWindow(Adw.ApplicationWindow):
             overlay._close_button = close_btn
 
         overlay._editor = editor
-        return overlay, editor
+        # Return the main_box instead of just overlay, as it's now the root of this editor part
+        # CAUTION: modify callers if they expect overlay specifically.
+        # add_tab does: overlay, editor = self._create_editor_overlay(editor)
+        # then tab_root.append(overlay)
+        # returning main_box is fine as it's a widget.
+        return main_box, editor
+
 
     def add_tab_button(self, page):
         editor = page.get_child()._editor
