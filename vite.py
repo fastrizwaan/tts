@@ -6261,6 +6261,16 @@ class VirtualTextView(Gtk.DrawingArea):
         # Undo (Ctrl+Z)
         if ctrl_pressed and not shift_pressed and not alt_pressed and (name == "z" or name == "Z"):
             self.buf.undo()
+            
+            # Clear wrap cache and update scrollbar before scrolling
+            # This ensures visual line calculations are accurate
+            if self.renderer.wrap_enabled:
+                self.renderer.wrap_cache.clear()
+                self.renderer.total_visual_lines_cache = None
+            
+            self.update_scrollbar()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
             self.queue_draw()
             return True
             
@@ -6269,6 +6279,16 @@ class VirtualTextView(Gtk.DrawingArea):
            ((not shift_pressed and (name == "y" or name == "Y")) or \
             (shift_pressed and (name == "z" or name == "Z"))):
             self.buf.redo()
+            
+            # Clear wrap cache and update scrollbar before scrolling
+            # This ensures visual line calculations are accurate
+            if self.renderer.wrap_enabled:
+                self.renderer.wrap_cache.clear()
+                self.renderer.total_visual_lines_cache = None
+            
+            self.update_scrollbar()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
             self.queue_draw()
             return True
 
