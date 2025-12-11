@@ -491,6 +491,51 @@ class SyntaxPatterns:
         'color': r'#[0-9a-fA-F]{3,8}\b'
     }
 
+    DSL = {
+        # Header directives (must start with #)
+        'header': r'#[A-Z_]+\b',
+        
+        # Comments in double curly braces {{...}}
+        'comment': r'\{\{[^}]*\}\}',
+        
+        # Phonetic transcription - IPA in slashes or brackets
+        'phonetic': r'/[^/]+/|\[[^\[\]]*?\](?=\s|$|[,;.])',
+        
+        # Part of speech and grammar labels - enhanced pattern
+        'pos_label': r'\((?:n|v|adj|adv|prep|conj|pron|interj|num|det|aux|part|abbr|pl|sing|def|indef|sense_t|usage|var|pos)\)',
+        
+        # Tag brackets only (structural markers)
+        'tag_bracket': r'(?:\[(?:/?(?:m[0-9]?|ex|com|trn|p|b|i|u|sub|sup|s)\b|\*)|\]|/\*\])',
+        
+        # Color tag with attribute - [c colorname]
+        'color_tag': r'\[c\s+[^\]]+\]|\[/c\]',
+        
+        # Special linguistic tags with attributes
+        'attr_tag': r'\[(?:ref|url|lang)\s+[^\]]+\]|\[/(?:ref|url|lang)\]',
+        
+        # Special zones and markers
+        'zone': r'\[\*\]|\[/\*\]',
+        'stress': r"\[(?:'|/)\]",
+        
+        # Links - two angle brackets <<...>>
+        'link': r'<<[^>]*>>',
+        
+        # Color names (for use in tags and elsewhere)
+        'color_name': r'\b(?:aliceblue|antiquewhite|aqua|aquamarine|azure|beige|bisque|blanchedalmond|blue|blueviolet|brown|burlywood|cadetblue|chartreuse|chocolate|coral|cornflower|cornsilk|crimson|cyan|darkblue|darkcyan|darkgoldenrod|darkgray|darkgreen|darkkhaki|darkmagenta|darkolivegreen|darkorange|darkorchid|darkred|darksalmon|darkseagreen|darkslateblue|darkslategray|darkturquoise|darkviolet|deeppink|deepskyblue|dimgray|dodgerblue|firebrick|floralwhite|forestgreen|fuchsia|gainsboro|ghostwhite|gold|goldenrod|gray|green|greenyellow|honeydew|hotpink|indianred|indigo|ivory|khaki|lavender|lavenderblush|lawngreen|lemonchiffon|lightblue|lightcoral|lightcyan|lightgoldenrodyellow|lightgreen|lightgray|lightpink|lightsalmon|lightseagreen|lightskyblue|lightslategray|lightsteelblue|lightyellow|lime|limegreen|linen|magenta|maroon|mediumaquamarine|mediumblue|mediumorchid|mediumpurple|mediumseagreen|mediumslateblue|mediumspringgreen|mediumturquoise|mediumvioletred|midnightblue|mintcream|mistyrose|moccasin|navajowhite|navy|oldlace|olive|olivedrab|orange|orangered|orchid|palegoldenrod|palegreen|paleturquoise|palevioletred|papayawhip|peachpuff|peru|pink|plum|powderblue|purple|red|rosybrown|royalblue|saddlebrown|salmon|sandybrown|seagreen|seashell|sienna|silver|skyblue|slateblue|slategray|snow|springgreen|steelblue|tan|teal|thistle|tomato|turquoise|violet|wheat|white|whitesmoke|yellow|yellowgreen)\b',
+        
+        # File references (audio/image files)
+        'file_ref': r'\b[\w-]+\.(?:wav|mp3|ogg|bmp|png|jpg|jpeg|gif)\b',
+        
+        # Special escaped characters
+        'escape': r'\\[~@\[\]{}\\]',
+        
+        # Tilde replacement symbol (non-escaped)
+        'tilde': r'~',
+        
+        # At-sign for sub-entries (non-escaped)
+        'at_sign': r'@',
+    }
+
     @classmethod
     def get(cls, lang):
         """Return dict of patterns for a given language."""
@@ -503,7 +548,8 @@ class SyntaxPatterns:
             'c': cls.C,
             'rust': cls.RUST,
             'html': cls.HTML,
-            'css': cls.CSS
+            'css': cls.CSS,
+            'dsl': cls.DSL
         }.get(lang, {})
 
 # ==========================================================
@@ -522,12 +568,19 @@ class SyntaxEngine:
         'f_triple_start', 'b_triple_start', 'r_triple_start', 'u_triple_start', 'triple_start',
         'f_string_start', 'b_string_start', 'r_string_start', 'u_string_start', 'string_start',
         
-        'decorator', 'preprocessor',
+        'decorator', 'preprocessor', 'header',
         'operators',  # Process operators AFTER strings to allow overlay
         'bool_ops', 'brackets', 
         'function', 'class', 'keywords', 'helpers', 'builtins', 'types',
-        'number', 'tag', 'attribute', 'property', 'selector',
-        'color', 'entity', 'macro'
+        'number', 'attribute', 'property', 'selector',
+        'color', 'entity', 'macro',
+        # DSL-specific tokens (order matters!)
+        'phonetic',        # IPA notation first
+        'color_tag',       # Color tags before generic tags
+        'attr_tag',        # Attribute tags before tag_bracket
+        'tag_bracket',     # Generic tag brackets
+        'zone', 'stress', 'link', 'pos_label', 'file_ref',
+        'escape', 'color_name', 'tilde', 'at_sign'
     ]
 
     # Tokens that allow overlay
@@ -4394,6 +4447,22 @@ class Renderer:
                 'raw_string_content': hex_to_pango("#98c379"),  # Green (overlayable)
                 'f_string_content': hex_to_pango("#98c379"),    # Green
                 'string_content': hex_to_pango("#98c379"),      # Green
+                
+                # DSL-specific colors (minimal - just muted tags)
+                'header': hex_to_pango("#c678dd"),          # Purple for header directives
+                'tag_bracket': hex_to_pango("#5c6370"),     # Muted grey
+                'color_tag': hex_to_pango("#5c6370"),       # Muted grey
+                'attr_tag': hex_to_pango("#5c6370"),        # Muted grey
+                'phonetic': hex_to_pango("#5c6370"),        # Muted grey
+                'pos_label': hex_to_pango("#5c6370"),       # Muted grey
+                'zone': hex_to_pango("#5c6370"),            # Muted grey
+                'stress': hex_to_pango("#5c6370"),          # Muted grey
+                'link': hex_to_pango("#5c6370"),            # Muted grey
+                'color_name': hex_to_pango("#5c6370"),      # Muted grey
+                'file_ref': hex_to_pango("#5c6370"),        # Muted grey
+                'escape': hex_to_pango("#5c6370"),          # Muted grey
+                'tilde': hex_to_pango("#5c6370"),           # Muted grey
+                'at_sign': hex_to_pango("#5c6370"),         # Muted grey
             }
         else:
             self.text_foreground_color = (0.22, 0.23, 0.25) # Darker text for light mode
@@ -4455,6 +4524,22 @@ class Renderer:
                 'raw_string_content': hex_to_pango("#50a14f"),
                 'f_string_content': hex_to_pango("#50a14f"),
                 'string_content': hex_to_pango("#50a14f"),
+                
+                # DSL-specific colors (minimal - just muted tags)
+                'header': hex_to_pango("#a626a4"),          # Purple for header directives
+                'tag_bracket': hex_to_pango("#a0a1a7"),     # Muted grey
+                'color_tag': hex_to_pango("#a0a1a7"),       # Muted grey
+                'attr_tag': hex_to_pango("#a0a1a7"),        # Muted grey
+                'phonetic': hex_to_pango("#a0a1a7"),        # Muted grey
+                'pos_label': hex_to_pango("#a0a1a7"),       # Muted grey
+                'zone': hex_to_pango("#a0a1a7"),            # Muted grey
+                'stress': hex_to_pango("#a0a1a7"),          # Muted grey
+                'link': hex_to_pango("#a0a1a7"),            # Muted grey
+                'color_name': hex_to_pango("#a0a1a7"),      # Muted grey
+                'file_ref': hex_to_pango("#a0a1a7"),        # Muted grey
+                'escape': hex_to_pango("#a0a1a7"),          # Muted grey
+                'tilde': hex_to_pango("#a0a1a7"),           # Muted grey
+                'at_sign': hex_to_pango("#a0a1a7"),         # Muted grey
             }
 
 
@@ -12187,7 +12272,8 @@ class EditorWindow(Adw.ApplicationWindow):
                 '.c': 'c', '.h': 'c',
                 '.rs': 'rust',
                 '.html': 'html', '.htm': 'html',
-                '.css': 'css'
+                '.css': 'css',
+                '.dsl': 'dsl'
             }.get(ext)
             editor.buf.syntax_engine.set_language(lang)
             
