@@ -6,6 +6,7 @@ import math
 import datetime
 import bisect
 import re
+import json
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
@@ -4428,25 +4429,24 @@ class Renderer:
                 'raw_string': hex_to_pango("#98c379"),   # Green
                 'f_string': hex_to_pango("#98c379"),     # Green
                 'string': hex_to_pango("#98c379"),       # Green
-                'raw_prefix': hex_to_pango("#c678dd"),   # Pink
-                
-                # String Delimiters (Start Tokens)
+                'raw_prefix': hex_to_pango("#a626a4"),   # Pink
+
+                # String Delimiters
                 'triple_start': hex_to_pango("#98c379"),
                 'string_start': hex_to_pango("#98c379"),
                 'f_triple_start': hex_to_pango("#98c379"),
                 'f_string_start': hex_to_pango("#98c379"),
-                'b_triple_start': hex_to_pango("#56b6c2"), # Cyan for b"""
+                'b_triple_start': hex_to_pango("#56b6c2"),
                 'b_string_start': hex_to_pango("#56b6c2"),
-                'r_triple_start': hex_to_pango("#98c379"), # Green (content is raw)
+                'r_triple_start': hex_to_pango("#98c379"),
                 'r_string_start': hex_to_pango("#98c379"),
                 'u_triple_start': hex_to_pango("#98c379"),
                 'u_string_start': hex_to_pango("#98c379"),
 
-                # New content tokens
-                'byte_string_content': hex_to_pango("#56b6c2"), # Cyan
-                'raw_string_content': hex_to_pango("#98c379"),  # Green (overlayable)
-                'f_string_content': hex_to_pango("#98c379"),    # Green
-                'string_content': hex_to_pango("#98c379"),      # Green
+                'byte_string_content': hex_to_pango("#56b6c2"), 
+                'raw_string_content': hex_to_pango("#98c379"),
+                'f_string_content': hex_to_pango("#98c379"),
+                'string_content': hex_to_pango("#98c379"),
                 
                 # DSL-specific colors (minimal - just muted tags)
                 'header': hex_to_pango("#c678dd"),          # Purple for header directives
@@ -4465,40 +4465,40 @@ class Renderer:
                 'at_sign': hex_to_pango("#5c6370"),         # Muted grey
             }
         else:
-            self.text_foreground_color = (0.22, 0.23, 0.25) # Darker text for light mode
-            self.linenumber_foreground_color = (0.60, 0.60, 0.60)
-            self.selection_background_color = (0.85, 0.85, 0.90) # Subtler selection
+            self.text_foreground_color = (0.2, 0.2, 0.2)
+            self.linenumber_foreground_color = (0.6, 0.6, 0.6)
+            self.selection_background_color = (0.8, 0.9, 1.0)
             self.selection_foreground_color = (0.0, 0.0, 0.0)
             
             # Syntax Colors (Atom One Light)
             self.syntax_colors = {
-                'keywords': hex_to_pango("#a626a4"),     # Purple
-                'builtins': hex_to_pango("#0184bc"),     # Cyan/Blue
-                'string': hex_to_pango("#50a14f"),       # Green
-                'comment': hex_to_pango("#a0a1a7"),      # Grey
-                'number': hex_to_pango("#986801"),       # Orange
-                'function': hex_to_pango("#4078f2"),     # Blue
-                'class': hex_to_pango("#c18401"),        # Orange/Gold
-                'decorator': hex_to_pango("#a626a4"),    # Purple
-                'personal': hex_to_pango("#e45649"),     # Red
-                'tag': hex_to_pango("#e45649"),          # Red
-                'attribute': hex_to_pango("#986801"),    # Orange
-                'property': hex_to_pango("#0184bc"),     # Cyan
-                'selector': hex_to_pango("#a626a4"),     # Purple
-                'macro': hex_to_pango("#c18401"),        # Orange
-                'preprocessor': hex_to_pango("#a626a4"), # Purple
-                'types': hex_to_pango("#0184bc"),        # Cyan
-                'entity': hex_to_pango("#986801"),       # Orange
-                'bool_ops': hex_to_pango("#986801"),     # Orange
-                'brackets': hex_to_pango("#986801"),     # Orange
-                'types': hex_to_pango("#0184bc"),        # Cyan
-                'entity': hex_to_pango("#986801"),       # Orange
-                'bool_ops': hex_to_pango("#986801"),     # Orange
-                'brackets': hex_to_pango("#986801"),     # Orange
-                'bool_ops': hex_to_pango("#986801"),     # Orange
-                'brackets': hex_to_pango("#a626a4"),     # Pink (Changed from Orange)
-                'raw_prefix': hex_to_pango("#a626a4"),   # Pink/Purple
-                'operators': hex_to_pango("#a626a4"),    # Pink/Purple
+                'keywords': hex_to_pango("#a626a4"),
+                'builtins': hex_to_pango("#0184bc"),
+                'string': hex_to_pango("#50a14f"),
+                'comment': hex_to_pango("#a0a1a7"),
+                'number': hex_to_pango("#986801"),
+                'function': hex_to_pango("#4078f2"),
+                'class': hex_to_pango("#c18401"),
+                'decorator': hex_to_pango("#a626a4"),
+                'personal': hex_to_pango("#e45649"),
+                'tag': hex_to_pango("#e45649"),
+                'attribute': hex_to_pango("#986801"),
+                'property': hex_to_pango("#0184bc"),
+                'selector': hex_to_pango("#a626a4"),
+                'macro': hex_to_pango("#c18401"),
+                'preprocessor': hex_to_pango("#a626a4"),
+                'types': hex_to_pango("#0184bc"),
+                'entity': hex_to_pango("#986801"),
+                'bool_ops': hex_to_pango("#986801"),
+                'brackets': hex_to_pango("#986801"),
+                'operators': hex_to_pango("#0184bc"),
+                'regex': hex_to_pango("#50a14f"),
+                'namespace': hex_to_pango("#c18401"),
+                'special': hex_to_pango("#0184bc"),
+                'file_ref': hex_to_pango("#a0a1a7"),        # Muted grey
+                'escape': hex_to_pango("#a0a1a7"),          # Muted grey
+                'tilde': hex_to_pango("#a0a1a7"),           # Muted grey
+                'at_sign': hex_to_pango("#a0a1a7"),         # Muted grey
                 'docstring': hex_to_pango("#50a14f"),    # Green
                 'helpers': hex_to_pango("#e45649"),     # Red
                 'argument': hex_to_pango("#986801"),     # Orange (New)
@@ -4524,23 +4524,30 @@ class Renderer:
                 'raw_string_content': hex_to_pango("#50a14f"),
                 'f_string_content': hex_to_pango("#50a14f"),
                 'string_content': hex_to_pango("#50a14f"),
-                
-                # DSL-specific colors (minimal - just muted tags)
-                'header': hex_to_pango("#a626a4"),          # Purple for header directives
-                'tag_bracket': hex_to_pango("#a0a1a7"),     # Muted grey
-                'color_tag': hex_to_pango("#a0a1a7"),       # Muted grey
-                'attr_tag': hex_to_pango("#a0a1a7"),        # Muted grey
-                'phonetic': hex_to_pango("#a0a1a7"),        # Muted grey
-                'pos_label': hex_to_pango("#a0a1a7"),       # Muted grey
-                'zone': hex_to_pango("#a0a1a7"),            # Muted grey
-                'stress': hex_to_pango("#a0a1a7"),          # Muted grey
-                'link': hex_to_pango("#a0a1a7"),            # Muted grey
-                'color_name': hex_to_pango("#a0a1a7"),      # Muted grey
-                'file_ref': hex_to_pango("#a0a1a7"),        # Muted grey
-                'escape': hex_to_pango("#a0a1a7"),          # Muted grey
-                'tilde': hex_to_pango("#a0a1a7"),           # Muted grey
-                'at_sign': hex_to_pango("#a0a1a7"),         # Muted grey
             }
+
+    def set_font(self, font_desc):
+        """Update font and recalculate metrics."""
+        self.font = font_desc
+        
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surface)
+
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(self.font)
+        layout.set_text("Ag", -1)
+
+        ink_rect, logical_rect = layout.get_pixel_extents()
+        self.text_h = logical_rect.height
+        self.line_h = self.text_h
+        
+        # Calculate average character width dynamically
+        layout.set_text("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", -1)
+        ink, logical = layout.get_pixel_extents()
+        self.avg_char_width = logical.width / 62.0
+        
+        # Invalidate wrap cache as metrics changed
+
 
 
     def create_text_layout(self, cr, text="", auto_dir=True):
@@ -4556,6 +4563,14 @@ class Renderer:
         """
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.font)
+        
+        # Apply tab width
+        if hasattr(self, 'tab_width') and hasattr(self, 'avg_char_width'):
+            tab_width_px = self.tab_width * self.avg_char_width
+            tabs = Pango.TabArray.new(1, True)
+            tabs.set_tab(0, Pango.TabAlign.LEFT, int(tab_width_px))
+            layout.set_tabs(tabs)
+
         if auto_dir:
             layout.set_auto_dir(True)
         if text:
@@ -4644,6 +4659,10 @@ class Renderer:
 
     def calculate_line_number_width(self, cr, total_lines):
         """Calculate width needed for line numbers based on total lines"""
+        # Return 2 pixels if line numbers are disabled (visual margin)
+        if not getattr(self, "show_line_numbers", True):
+            return 5
+            
         # Format the largest line number
         max_line_num = str(total_lines)
         width = self.get_text_width(cr, max_line_num)
@@ -5511,7 +5530,8 @@ class Renderer:
 
                 # Draw current line highlight (extends from line number to viewport)
                 # Use foreground color with 5% alpha
-                if ln == buf.cursor_line:
+                highlight_current = getattr(buf, '_view', None) and getattr(buf._view, 'highlight_current_line', True)
+                if ln == buf.cursor_line and highlight_current:
                     r_fg, g_fg, b_fg = self.text_foreground_color
                     
                     cr.save()
@@ -5531,8 +5551,9 @@ class Renderer:
                     cr.set_source_rgb(*ln_fg)
                     if vis_idx == 0:
                         ln_text = str(ln + 1)
-                        # Make current line number bold
-                        if ln == buf.cursor_line:
+                        # Make current line number bold if enabled
+                        highlight_current = getattr(buf, '_view', None) and getattr(buf._view, 'highlight_current_line', True)
+                        if ln == buf.cursor_line and highlight_current:
                             layout.set_markup(f"<b>{ln_text}</b>", -1)
                         else:
                             layout.set_text(ln_text, -1)
@@ -5631,6 +5652,56 @@ class Renderer:
 
                                 cr.rectangle(h_x, y, h_w, self.line_h)
                                 cr.fill()
+
+                # --- DRAW MATCHING BRACKETS ---
+                if hasattr(self, 'matching_brackets') and self.matching_brackets:
+                    # matching_brackets is list of (ln, col)
+                    # Filter for current line
+                    current_line_brackets = [b for b in self.matching_brackets if b[0] == ln]
+                    
+                    if current_line_brackets:
+                        # Prepare layout for calc if not already set (re-use optimization idea)
+                        final_text = text_segment if text_segment else " "
+                        layout.set_text(final_text, -1)
+                        
+                        text_w, _ = layout.get_pixel_size()
+                        rtl = line_is_rtl(text_segment)
+                        base_x = self.calculate_text_base_x(rtl, text_w, alloc.width, ln_width, scroll_x)
+
+                        for b_ln, b_col in current_line_brackets:
+                            # Check if bracket is in this visual line segment
+                            if col_start <= b_col < col_end:
+                                # Calculate position
+                                rel_col = b_col - col_start
+                                idx1 = visual_byte_index(text_segment, rel_col)
+                                idx2 = visual_byte_index(text_segment, rel_col + 1)
+                                
+                                r1_strong, _ = layout.get_cursor_pos(idx1)
+                                r2_strong, _ = layout.get_cursor_pos(idx2)
+                                
+                                x1 = r1_strong.x / Pango.SCALE
+                                x2 = r2_strong.x / Pango.SCALE
+                                
+                                b_x = base_x + min(x1, x2)
+                                b_w = abs(x2 - x1)
+                                
+                                if b_w > 0:
+                                    # Draw box around bracket
+                                    # Use Pango syntax color or specific color? 
+                                    # Users usually expect a box or background.
+                                    # Let's do a faint background + border
+                                    
+                                    # Background
+                                    cr.set_source_rgba(0.6, 0.6, 0.6, 0.2)
+                                    cr.rectangle(b_x, y, b_w, self.line_h)
+                                    cr.fill()
+                                    
+                                    # Border
+                                    cr.set_source_rgba(0.6, 0.6, 0.6, 0.8)
+                                    cr.set_line_width(1)
+                                    # Inset slightly to look nice
+                                    cr.rectangle(b_x + 0.5, y + 0.5, b_w - 1, self.line_h - 1)
+                                    cr.stroke()
 
                 # --- DRAW CURRENT MATCH EXTRA HIGHLIGHT ---
                 # Drawn on top or differently?
@@ -6057,6 +6128,8 @@ class VirtualTextView(Gtk.DrawingArea):
         self.buf = buf
         # Add reference from buffer to view for drag-and-drop
         buf._view = self
+        self.use_tabs = True
+        self.auto_indent = True
         self.renderer = Renderer()
         self.ctrl = InputController(self, buf)
         self.scroll_line = 0
@@ -6091,6 +6164,10 @@ class VirtualTextView(Gtk.DrawingArea):
         self.highlight_cache = {} # Dict {ln: [(start_col, end_col), ...]}
         self.current_match_idx = -1
         self.current_match = None
+
+        # Highlighting flags (default True, managed by settings)
+        self.highlight_current_line = True
+        self.highlight_brackets = True
         
         # Scroll callback for viewport-based search refresh
         self.on_scroll_callback = None
@@ -6118,6 +6195,14 @@ class VirtualTextView(Gtk.DrawingArea):
         """
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.renderer.font)
+
+        # Apply tab width
+        if hasattr(self.renderer, 'tab_width') and hasattr(self.renderer, 'avg_char_width'):
+            tab_width_px = self.renderer.tab_width * self.renderer.avg_char_width
+            tabs = Pango.TabArray.new(1, True)
+            tabs.set_tab(0, Pango.TabAlign.LEFT, int(tab_width_px))
+            layout.set_tabs(tabs)
+
         if auto_dir:
             layout.set_auto_dir(True)
         if text:
@@ -7199,8 +7284,12 @@ class VirtualTextView(Gtk.DrawingArea):
                     self.queue_draw()
                     return True
             
-            # Normal Tab (Insert spaces)
-            self.buf.insert_text("    ")
+            # Normal Tab (Insert tabs or spaces)
+            if getattr(self, "use_tabs", True):
+                self.buf.insert_text("\t")
+            else:
+                tab_width = getattr(self.renderer, "tab_width", 4)
+                self.buf.insert_text(" " * tab_width)
             self.queue_draw()
             return True
 
@@ -7279,6 +7368,22 @@ class VirtualTextView(Gtk.DrawingArea):
 
         if name == "Return":
             self.buf.insert_newline()
+            
+            # Auto-indentation
+            if getattr(self, "auto_indent", True):
+                current_line_idx = self.buf.cursor_line - 1 # Line we just left
+                if current_line_idx >= 0:
+                    line_text = self.buf.get_line(current_line_idx)
+                    indent = ""
+                    for char in line_text:
+                        if char in (" ", "\t"):
+                            indent += char
+                        else:
+                            break
+                    
+                    if indent:
+                        self.buf.insert_text(indent)
+
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
@@ -7708,6 +7813,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.buf.selection.set_start(self.buf.cursor_line, self.buf.cursor_col)
             self.buf.selection.set_end(ln, col)
             self.buf.set_cursor(ln, col, extend_selection=True)
+            self.update_matching_brackets()
             self.queue_draw()
             return
 
@@ -7736,6 +7842,7 @@ class VirtualTextView(Gtk.DrawingArea):
             self.buf.selection.set_end(ln, line_len)
             self.buf.cursor_line = ln
             self.buf.cursor_col = line_len
+            self.update_matching_brackets()
             self.queue_draw()
             return
 
@@ -7780,6 +7887,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 # Enable word selection mode for drag (treat empty lines as "words")
                 self.word_selection_mode = True
                 
+                self.update_matching_brackets()
                 self.queue_draw()
                 return
 
@@ -7926,6 +8034,7 @@ class VirtualTextView(Gtk.DrawingArea):
         self._click_ln = ln
         self._click_col = col
 
+        self.update_matching_brackets()
         self.queue_draw()
 
 
@@ -8624,12 +8733,105 @@ class VirtualTextView(Gtk.DrawingArea):
         self.queue_draw()
 
 
+    def update_matching_brackets(self):
+        """Find matching brackets and update renderer"""
+        if not getattr(self, 'highlight_brackets', True):
+            self.renderer.matching_brackets = []
+            return
+
+        cursor_ln = self.buf.cursor_line
+        cursor_col = self.buf.cursor_col
+        line_text = self.buf.get_line(cursor_ln)
+        
+        matches = []
+        
+        # Check char at cursor (or char before cursor if at end of line/word)
+        # Priority: char after cursor (what we are on), then char before cursor
+        
+        chars_to_check = []
+        if cursor_col < len(line_text):
+            chars_to_check.append((cursor_ln, cursor_col, line_text[cursor_col]))
+        if cursor_col > 0:
+            chars_to_check.append((cursor_ln, cursor_col - 1, line_text[cursor_col - 1]))
+            
+        params = {
+            '(': (')', 1), ')': ('(', -1),
+            '[': (']', 1), ']': ('[', -1),
+            '{': ('}', 1), '}': ('{', -1),
+            '<': ('>', 1), '>': ('<', -1)
+        }
+        
+        found_start = None
+        
+        for ln, col, char in chars_to_check:
+            if char in params:
+                target, direction = params[char]
+                found_start = (ln, col)
+                
+                # Scan for match
+                depth = 1
+                curr_ln = ln
+                curr_col = col + direction
+                
+                total_lines = self.buf.total()
+                # Limit scan lines to reasonable amount (e.g. 2000 lines)
+                scan_limit = 2000
+                lines_scanned = 0
+                
+                while 0 <= curr_ln < total_lines and lines_scanned < scan_limit:
+                    text = self.buf.get_line(curr_ln)
+                    
+                    # Determine range to check in this line
+                    if direction == 1:
+                        # Forward
+                        # if same line as start, start from col + 1 (already handled in curr_col init)
+                        # else start from 0
+                        start_c = curr_col if curr_ln == ln else 0
+                        range_iter = range(start_c, len(text))
+                    else:
+                        # Backward
+                        # if same line as start, start from col - 1
+                        # else start from len(text) - 1
+                        start_c = curr_col if curr_ln == ln else len(text) - 1
+                        range_iter = range(start_c, -1, -1)
+                        
+                    curr_col_next = -1 # indicator to move to next line
+                    
+                    for c_idx in range_iter:
+                        c = text[c_idx]
+                        if c == char:
+                            depth += 1
+                        elif c == target:
+                            depth -= 1
+                            if depth == 0:
+                                matches = [found_start, (curr_ln, c_idx)]
+                                break
+                    
+                    if matches:
+                        break
+                        
+                    # Move to next/prev line
+                    curr_ln += direction
+                    lines_scanned += 1
+                    
+                    # Reset col for new line
+                    if 0 <= curr_ln < total_lines:
+                        pass # Loop logic handles it
+                
+                if matches:
+                    break
+        
+        self.renderer.matching_brackets = matches
+        if matches:
+            self.queue_draw()
+
     def keep_cursor_visible(self):
         """Keep cursor visible by scrolling if necessary.
         
         OPTIMIZED: Quick check for obviously visible cursor to avoid
         expensive visual line calculations during normal typing.
         """
+        self.update_matching_brackets()
         cl = self.buf.cursor_line
         cc = self.buf.cursor_col
 
@@ -9353,6 +9555,8 @@ class ChromeTab(Gtk.Box):
     def get_title(self):
         return self._original_title
     
+
+
     def update_label(self):
         """Update the label text."""
         self.label.set_text(self._original_title)
@@ -9847,19 +10051,25 @@ class ChromeTabBar(Adw.WrapBox):
                 dragged_tab.connect('activate-requested', target_window.on_tab_activated)
                 dragged_tab.connect('close-requested', target_window.on_tab_close_requested)
 
-                page = dragged_tab._page
-                # Transfer page to target window's tab view
-                source_window.tab_view.transfer_page(page, target_window.tab_view, drop_position)
-                
-                # Ensure the page is selected in the new window
-                def select_page():
-                    n_pages = target_window.tab_view.get_n_pages()
-                    if drop_position < n_pages:
-                        new_page = target_window.tab_view.get_nth_page(drop_position)
-                        if new_page:
-                            target_window.tab_view.set_selected_page(new_page)
+                page = getattr(dragged_tab, '_page', None)
+                if page:
+                    # Transfer page to target window's tab view
+                    # IMPORTANT: transfer_page returns the NEW Adw.TabPage belonging to the target view
+                    new_page = source_window.tab_view.transfer_page(page, target_window.tab_view, drop_position)
+                    
+                    # Update the tab's page reference immediately
+                    if new_page:
+                        dragged_tab._page = new_page
+                        
+                        # Ensure the page is selected in the new window
+                        def select_page():
+                            if new_page.get_selected_page() != new_page:
+                                 target_window.tab_view.set_selected_page(new_page)
+                            return False
+                        GLib.idle_add(select_page)
+                else:
+                    print("Error: dragged_tab has no _page")
                     return False
-                GLib.idle_add(select_page)
             
             # 4. Activate the tab
             self.set_tab_active(dragged_tab)
@@ -9927,42 +10137,19 @@ class FindReplaceBar(Gtk.Box):
         find_box.set_margin_start(12)
         find_box.set_margin_end(12)
         
-        # Toggle Replace Mode Button (Arrow)
-        self.reveal_replace_btn = Gtk.Button()
-        self.reveal_replace_btn.set_icon_name("pan-down-symbolic")
-        self.reveal_replace_btn.add_css_class("flat")
-        self.reveal_replace_btn.connect("clicked", self.toggle_replace_mode)
-        self.reveal_replace_btn.set_tooltip_text("Toggle Replace")
-        find_box.append(self.reveal_replace_btn)
-        
         # Find Entry
         self.find_entry = Gtk.SearchEntry()
         self.find_entry.set_hexpand(True)
         self.find_entry.set_placeholder_text("Find")
         self.find_entry.connect("search-changed", self.on_search_changed)
         self.find_entry.connect("activate", self.on_find_next)
+        
         # Capture Esc to close
         key_ctrl = Gtk.EventControllerKey()
         key_ctrl.connect("key-pressed", self.on_key_pressed)
         self.find_entry.add_controller(key_ctrl)
         
         find_box.append(self.find_entry)
-        
-        # Options Box (linked)
-        opt_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        opt_box.add_css_class("linked")
-        
-        self.case_btn = Gtk.ToggleButton(label="Aa")
-        self.case_btn.set_tooltip_text("Case Sensitive")
-        self.case_btn.connect("toggled", self.on_search_changed)
-        opt_box.append(self.case_btn)
-        
-        self.regex_btn = Gtk.ToggleButton(label=".*")
-        self.regex_btn.set_tooltip_text("Regular Expression")
-        self.regex_btn.connect("toggled", self.on_search_changed)
-        opt_box.append(self.regex_btn)
-        
-        find_box.append(opt_box)
         
         # Navigation Box (linked)
         nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -9979,6 +10166,48 @@ class FindReplaceBar(Gtk.Box):
         nav_box.append(self.next_btn)
         
         find_box.append(nav_box)
+
+        # Toggle Replace Mode Button (Icon)
+        self.reveal_replace_btn = Gtk.Button()
+        self.reveal_replace_btn.set_icon_name("edit-find-replace-symbolic")
+        self.reveal_replace_btn.add_css_class("flat")
+        self.reveal_replace_btn.connect("clicked", self.toggle_replace_mode)
+        self.reveal_replace_btn.set_tooltip_text("Toggle Replace")
+        find_box.append(self.reveal_replace_btn)
+
+        # Search Options (Cog Wheel)
+        self.options_btn = Gtk.MenuButton()
+        self.options_btn.set_icon_name("system-run-symbolic") # or emblem-system-symbolic / preferences-system-symbolic
+        self.options_btn.set_tooltip_text("Search Options")
+        self.options_btn.add_css_class("flat")
+        
+        # Create Popover Content
+        popover_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        popover_box.set_margin_top(12)
+        popover_box.set_margin_bottom(12)
+        popover_box.set_margin_start(12)
+        popover_box.set_margin_end(12)
+        
+        # Regex Option
+        self.regex_check = Gtk.CheckButton(label="Regular Expressions")
+        self.regex_check.connect("toggled", self.on_search_changed)
+        popover_box.append(self.regex_check)
+        
+        # Case Option
+        self.case_check = Gtk.CheckButton(label="Case Sensitive")
+        self.case_check.connect("toggled", self.on_search_changed)
+        popover_box.append(self.case_check)
+        
+        # Whole Word Option
+        self.whole_word_check = Gtk.CheckButton(label="Match Whole Word Only")
+        self.whole_word_check.connect("toggled", self.on_search_changed)
+        popover_box.append(self.whole_word_check)
+        
+        self.options_popover = Gtk.Popover()
+        self.options_popover.set_child(popover_box)
+        self.options_btn.set_popover(self.options_popover)
+        
+        find_box.append(self.options_btn)
         
         # Close Button
         close_btn = Gtk.Button(icon_name="window-close-symbolic")
@@ -10097,13 +10326,28 @@ class FindReplaceBar(Gtk.Box):
             self._cancel_search = None
         
         query = self.find_entry.get_text()
-        case_sensitive = self.case_btn.get_active()
-        is_regex = self.regex_btn.get_active()
+        case_sensitive = self.case_check.get_active()
+        is_regex = self.regex_check.get_active()
+        whole_word = self.whole_word_check.get_active()
         
         if not query:
             self.editor.view.set_search_results([])
             self._current_search_query = None
             return False
+
+        # Adjust query for Whole Word if not already regex (or if we want to force it)
+        # If user selected Regex AND Whole Word, we typically wrap in \b...\b, 
+        # but simplistic approach: if Whole Word, treat as regex \b...\b
+        if whole_word:
+            if not is_regex:
+                # Escape the query so it's treated as literal text inside the regex
+                import re
+                escaped_query = re.escape(query)
+                query = f"\\b{escaped_query}\\b"
+                is_regex = True
+            else:
+                # If already regex, just wrap it
+                query = f"\\b{query}\\b"
         
         # Store search params for viewport refresh
         self._current_search_query = query
@@ -10244,8 +10488,19 @@ class FindReplaceBar(Gtk.Box):
     def on_replace_all(self, *args):
         replacement = self.replace_entry.get_text()
         query = self.find_entry.get_text()
-        case_sensitive = self.case_btn.get_active()
-        is_regex = self.regex_btn.get_active()
+        case_sensitive = self.case_check.get_active()
+        is_regex = self.regex_check.get_active()
+        whole_word = self.whole_word_check.get_active()
+        
+        # Apply Whole Word logic
+        if whole_word:
+            if not is_regex:
+                import re
+                escaped_query = re.escape(query)
+                query = f"\\b{escaped_query}\\b"
+                is_regex = True
+            else:
+                query = f"\\b{query}\\b"
         
         total_lines = self.editor.buf.total()
         
@@ -10563,6 +10818,199 @@ class SaveChangesDialog(Adw.Window):
         return None, False, None
 
 
+class SettingsManager(GObject.Object):
+    __gsignals__ = {
+        'setting-changed': (GObject.SignalFlags.RUN_LAST, None, (str,)),
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.config_dir = os.path.join(GLib.get_user_config_dir(), "vite")
+        self.config_file = os.path.join(self.config_dir, "settings.json")
+        self.settings = {
+            "font-size": 11,
+            "word-wrap": True,
+            "line-numbers": True,
+            "theme": "System",
+            "tab-width": 4,
+            "use-tabs": False,
+            "auto-indent": True,
+            "highlight-current-line": True,
+            "highlight-brackets": True,
+        }
+        self.load()
+
+    def load(self):
+        try:
+            os.makedirs(self.config_dir, exist_ok=True)
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r') as f:
+                    saved = json.load(f)
+                    self.settings.update(saved)
+        except Exception as e:
+            print(f"Error loading settings: {e}")
+
+    def save(self):
+        try:
+            os.makedirs(self.config_dir, exist_ok=True)
+            with open(self.config_file, 'w') as f:
+                json.dump(self.settings, f, indent=4)
+        except Exception as e:
+            print(f"Error saving settings: {e}")
+
+    def get_setting(self, key):
+        return self.settings.get(key)
+
+    def set_setting(self, key, value):
+        if self.settings.get(key) != value:
+            self.settings[key] = value
+            self.save()
+            self.emit("setting-changed", key)
+
+
+class SettingsDialog(Adw.PreferencesWindow):
+    def __init__(self, parent, settings_manager):
+        super().__init__()
+        self.set_transient_for(parent)
+        self.set_modal(True)
+        self.set_title("Preferences")
+        self.settings = settings_manager
+
+        # Appearance Page
+        page_appearance = Adw.PreferencesPage()
+        page_appearance.set_title("Appearance")
+        page_appearance.set_icon_name("preferences-desktop-display-symbolic")
+
+        # Display Group
+        group_display = Adw.PreferencesGroup()
+        group_display.set_title("Display")
+
+        # Line Numbers
+        row_lines = Adw.ActionRow()
+        row_lines.set_title("Show Line Numbers")
+        switch_lines = Gtk.Switch()
+        switch_lines.set_active(self.settings.get_setting("line-numbers"))
+        switch_lines.set_valign(Gtk.Align.CENTER)
+        switch_lines.connect("notify::active", lambda w, p: self.settings.set_setting("line-numbers", w.get_active()))
+        row_lines.add_suffix(switch_lines)
+        group_display.add(row_lines)
+
+        # Word Wrap
+        row_wrap = Adw.ActionRow()
+        row_wrap.set_title("Word Wrap")
+        switch_wrap = Gtk.Switch()
+        switch_wrap.set_active(self.settings.get_setting("word-wrap"))
+        switch_wrap.set_valign(Gtk.Align.CENTER)
+        switch_wrap.connect("notify::active", lambda w, p: self.settings.set_setting("word-wrap", w.get_active()))
+        row_wrap.add_suffix(switch_wrap)
+        group_display.add(row_wrap)
+
+        # Theme
+        row_theme = Adw.ActionRow()
+        row_theme.set_title("Theme")
+        combo_theme = Gtk.ComboBoxText()
+        combo_theme.append("System", "System")
+        combo_theme.append("Light", "Light")
+        combo_theme.append("Dark", "Dark")
+
+        current_theme = self.settings.get_setting("theme")
+        if current_theme in ["System", "Light", "Dark"]:
+            combo_theme.set_active_id(current_theme)
+        else:
+            combo_theme.set_active_id("System")
+
+        combo_theme.set_valign(Gtk.Align.CENTER)
+        combo_theme.connect("changed", self.on_theme_combo_changed)
+        row_theme.add_suffix(combo_theme)
+        group_display.add(row_theme)
+
+        page_appearance.add(group_display)
+        self.add(page_appearance)
+
+        # Editor Page
+        page_editor = Adw.PreferencesPage()
+        page_editor.set_title("Editor")
+        page_editor.set_icon_name("accessories-text-editor-symbolic")
+
+        group_editor = Adw.PreferencesGroup()
+        group_editor.set_title("Behavior")
+
+        # Use Tabs
+        row_tabs = Adw.ActionRow()
+        row_tabs.set_title("Use Tabs")
+        row_tabs.set_subtitle("Insert real tabs (\\t) instead of spaces")
+        switch_tabs = Gtk.Switch()
+        switch_tabs.set_active(self.settings.get_setting("use-tabs"))
+        switch_tabs.set_valign(Gtk.Align.CENTER)
+        switch_tabs.connect("notify::active", lambda w, p: self.settings.set_setting("use-tabs", w.get_active()))
+        row_tabs.add_suffix(switch_tabs)
+        group_editor.add(row_tabs)
+
+        # Automatic Indentation
+        row_indent = Adw.ActionRow()
+        row_indent.set_title("Automatic Indentation")
+        row_indent.set_subtitle("Preserve indentation on new line")
+        switch_indent = Gtk.Switch()
+        switch_indent.set_active(self.settings.get_setting("auto-indent"))
+        switch_indent.set_valign(Gtk.Align.CENTER)
+        switch_indent.connect("notify::active", lambda w, p: self.settings.set_setting("auto-indent", w.get_active()))
+        row_indent.add_suffix(switch_indent)
+        group_editor.add(row_indent)
+
+        # Highlighting Group
+        group_highlight = Adw.PreferencesGroup()
+        group_highlight.set_title("Highlighting")
+
+        # Highlight Current Line
+        row_hl_line = Adw.ActionRow()
+        row_hl_line.set_title("Highlight Current Line")
+        switch_hl_line = Gtk.Switch()
+        switch_hl_line.set_active(self.settings.get_setting("highlight-current-line"))
+        switch_hl_line.set_valign(Gtk.Align.CENTER)
+        switch_hl_line.connect("notify::active", lambda w, p: self.settings.set_setting("highlight-current-line", w.get_active()))
+        row_hl_line.add_suffix(switch_hl_line)
+        group_highlight.add(row_hl_line)
+
+        # Highlight Matching Brackets
+        row_hl_brackets = Adw.ActionRow()
+        row_hl_brackets.set_title("Highlight Matching Brackets")
+        switch_hl_brackets = Gtk.Switch()
+        switch_hl_brackets.set_active(self.settings.get_setting("highlight-brackets"))
+        switch_hl_brackets.set_valign(Gtk.Align.CENTER)
+        switch_hl_brackets.connect("notify::active", lambda w, p: self.settings.set_setting("highlight-brackets", w.get_active()))
+        row_hl_brackets.add_suffix(switch_hl_brackets)
+        group_highlight.add(row_hl_brackets)
+
+        page_editor.add(group_editor)
+        page_editor.add(group_highlight)
+
+        # Font Size
+        row_font = Adw.ActionRow()
+        row_font.set_title("Font Size")
+        spin_font = Gtk.SpinButton.new_with_range(8, 72, 1)
+        spin_font.set_value(self.settings.get_setting("font-size"))
+        spin_font.set_valign(Gtk.Align.CENTER)
+        spin_font.connect("value-changed", lambda w: self.settings.set_setting("font-size", int(w.get_value())))
+        row_font.add_suffix(spin_font)
+        group_editor.add(row_font)
+        
+        # Tab Width
+        row_tab = Adw.ActionRow()
+        row_tab.set_title("Tab Width")
+        spin_tab = Gtk.SpinButton.new_with_range(2, 8, 1)
+        spin_tab.set_value(self.settings.get_setting("tab-width"))
+        spin_tab.set_valign(Gtk.Align.CENTER)
+        spin_tab.connect("value-changed", lambda w: self.settings.set_setting("tab-width", int(w.get_value())))
+        row_tab.add_suffix(spin_tab)
+        group_editor.add(row_tab)
+
+        self.add(page_editor)
+
+    def on_theme_combo_changed(self, combo):
+        theme = combo.get_active_id()
+        if theme:
+            self.settings.set_setting("theme", theme)
+
 class EditorWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
@@ -10640,8 +11088,13 @@ class EditorWindow(Adw.ApplicationWindow):
         # Add menu button
         menu_button = Gtk.MenuButton()
         menu_button.set_icon_name("open-menu-symbolic")
-        menu_button.set_menu_model(self.create_menu())
-#        menu_button.set_size_request(16, 20)
+        
+        # Create PopoverMenu from model but add custom child for zoom
+        menu_model = self.create_menu()
+        popover = Gtk.PopoverMenu.new_from_model(menu_model)
+        popover.add_child(self._create_zoom_widget(), "zoom_controls")
+        
+        menu_button.set_popover(popover)
         self.header.pack_end(menu_button)
 
         # Tab dropdown button (for file list)
@@ -10668,12 +11121,16 @@ class EditorWindow(Adw.ApplicationWindow):
         # Setup actions
         self.setup_actions()
         self.setup_tab_actions()
+
+        # Connect to settings
+        self.get_application().settings_manager.connect("setting-changed", self.on_setting_changed_win)
         
         # Add initial tab
         self.add_tab()
         
         # Add key controller for shortcuts (Ctrl+Tab)
         key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         key_ctrl.connect("key-pressed", self.on_window_key_pressed)
         self.add_controller(key_ctrl)
         
@@ -10742,6 +11199,25 @@ class EditorWindow(Adw.ApplicationWindow):
                     new_page = self.tab_view.get_nth_page(new_idx)
                     self.tab_view.set_selected_page(new_page)
                     return True
+
+            # Intercept Ctrl+Home/End to prevent tab switching (Adw.TabView default)
+            # and force editor navigation instead
+            elif keyval in (Gdk.KEY_Home, Gdk.KEY_End, Gdk.KEY_KP_Home, Gdk.KEY_KP_End):
+                page = self.tab_view.get_selected_page()
+                if page:
+                    root = page.get_child()
+                    if hasattr(root, '_editor'):
+                        editor = root._editor
+                        shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
+                        
+                        if keyval in (Gdk.KEY_Home, Gdk.KEY_KP_Home):
+                            editor.view.ctrl.move_document_start(extend_selection=shift)
+                        else:
+                            editor.view.ctrl.move_document_end(extend_selection=shift)
+                        
+                        editor.view.keep_cursor_visible()
+                        editor.view.queue_draw()
+                        return True
             
             # Ctrl+T: New Tab
             elif keyval == Gdk.KEY_t or keyval == Gdk.KEY_T:
@@ -10991,6 +11467,9 @@ class EditorWindow(Adw.ApplicationWindow):
 
         # Update UI state
         self.update_ui_state()
+
+        # Apply settings
+        self.apply_settings_to_editor(editor)
 
         return editor
 
@@ -11310,6 +11789,12 @@ class EditorWindow(Adw.ApplicationWindow):
         
         # Close the original page (it's now empty, so this is fast)
         self.tab_view.close_page(page)
+
+    def grab_focus_editor(self):
+        """Helper to grab focus on the current editor view"""
+        editor = self.get_current_page()
+        if editor:
+            editor.view.grab_focus()
         
         # Remove the chrome tab
         for tab in self.tab_bar.tabs:
@@ -11868,27 +12353,69 @@ class EditorWindow(Adw.ApplicationWindow):
         # Update dropdown
         self.update_tab_dropdown()
     
+
+
     def create_menu(self):
-        """Create the application menu"""
+        """Create the application menu model"""
         menu = Gio.Menu()
         
-        # File section
-        file_section = Gio.Menu()
-        file_section.append("Save As...", "win.save-as")
-        menu.append_section("File", file_section)
+        # Actions
+        menu.append("New Window", "win.new_window")
+        menu.append("Find...", "win.find")
+        menu.append("Save", "win.save")
+        menu.append("Save As...", "win.save-as")
+        menu.append("Save Copy As...", "win.save-copy")
         
-        # Encoding section with submenu
+        # Zoom Section (Custom Widget)
+        # We use a placeholder item with a custom attribute
+        zoom_item = Gio.MenuItem.new("Zoom", None)
+        zoom_item.set_attribute_value("custom", GLib.Variant.new_string("zoom_controls"))
+        menu.append_item(zoom_item)
+        
+        # View Submenu
+        view_submenu = Gio.Menu()
+        view_submenu.append("Show Line Numbers", "win.toggle_line_numbers")
+        view_submenu.append("Word Wrap", "win.toggle_word_wrap")
+        menu.append_submenu("View", view_submenu)
+    
+        # Encoding Submenu
         encoding_submenu = Gio.Menu()
         encoding_submenu.append("UTF-8", "win.encoding::utf-8")
         encoding_submenu.append("UTF-8 with BOM", "win.encoding::utf-8-sig")
         encoding_submenu.append("UTF-16 LE", "win.encoding::utf-16le")
         encoding_submenu.append("UTF-16 BE", "win.encoding::utf-16be")
-        
-        encoding_section = Gio.Menu()
-        encoding_section.append_submenu("Encoding", encoding_submenu)
-        menu.append_section(None, encoding_section)
+        menu.append_submenu("Encoding", encoding_submenu)
+
+        menu.append("Preferences", "win.preferences")
         
         return menu
+
+    def _create_zoom_widget(self):
+        zoom_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        zoom_box.set_halign(Gtk.Align.FILL)
+        zoom_box.add_css_class("linked")
+        zoom_box.set_margin_bottom(6)
+        zoom_box.set_margin_top(6)
+        zoom_box.set_margin_start(12)
+        zoom_box.set_margin_end(12)
+
+        btn_minus = Gtk.Button(label="-")
+        btn_minus.set_action_name("win.zoom_out")
+        btn_minus.set_hexpand(True)
+        
+        btn_reset = Gtk.Button(label="100%")
+        btn_reset.set_action_name("win.zoom_reset")
+        btn_reset.add_css_class("flat") # Make it look like a label
+        btn_reset.set_hexpand(True)
+        
+        btn_plus = Gtk.Button(label="+")
+        btn_plus.set_action_name("win.zoom_in")
+        btn_plus.set_hexpand(True)
+        
+        zoom_box.append(btn_minus)
+        zoom_box.append(btn_reset)
+        zoom_box.append(btn_plus)
+        return zoom_box
     
     def update_tab_dropdown(self):
         """Update the tab dropdown menu with file list"""
@@ -11910,10 +12437,23 @@ class EditorWindow(Adw.ApplicationWindow):
     
     def setup_actions(self):
         """Setup window actions for menu items"""
-        # Save As action
-        save_as_action = Gio.SimpleAction.new("save-as", None)
-        save_as_action.connect("activate", self.on_save_as)
-        self.add_action(save_as_action)
+        # File Actions
+        self.add_simple_action("new_tab", self.on_new_tab)
+        self.add_simple_action("new_window", self.on_new_window)
+        self.add_simple_action("open", lambda *_: self.open_file())
+        self.add_simple_action("save", self.on_save)
+        self.add_simple_action("save-as", self.on_save_as)
+        self.add_simple_action("save-copy", self.on_save_copy)
+        
+        # View Actions (Toggles)
+        self.add_simple_action("toggle_line_numbers", self.on_toggle_line_numbers)
+        self.add_simple_action("toggle_word_wrap", self.on_toggle_word_wrap)
+        self.add_simple_action("zoom_in", self.on_zoom_in)
+        self.add_simple_action("zoom_out", self.on_zoom_out)
+        self.add_simple_action("zoom_reset", self.on_zoom_reset)
+
+        # Tools
+        self.add_simple_action("preferences", self.on_preferences)
         
         # Encoding action with parameter
         encoding_action = Gio.SimpleAction.new_stateful(
@@ -11924,7 +12464,7 @@ class EditorWindow(Adw.ApplicationWindow):
         encoding_action.connect("activate", self.on_encoding_changed)
         self.add_action(encoding_action)
         
-        # Tab activate action (for dropdown menu)
+        # Tab activate action
         tab_activate_action = Gio.SimpleAction.new("tab_activate", GLib.VariantType.new("i"))
         tab_activate_action.connect("activate", self.on_tab_activate_from_menu)
         self.add_action(tab_activate_action)
@@ -11938,6 +12478,133 @@ class EditorWindow(Adw.ApplicationWindow):
         clear_recent_action = Gio.SimpleAction.new("clear_recent", None)
         clear_recent_action.connect("activate", self.on_clear_recent)
         self.add_action(clear_recent_action)
+
+
+    def add_simple_action(self, name, callback):
+        action = Gio.SimpleAction.new(name, None)
+        action.connect("activate", callback)
+        self.add_action(action)
+
+    def on_new_window(self, action, param):
+        app = self.get_application()
+        win = EditorWindow(app)
+        win.present()
+
+    def on_save(self, action, param):
+        editor = self.get_current_page()
+        if editor:
+            if editor.current_file_path:
+                self.save_file(editor, editor.current_file_path)
+            else:
+                self.on_save_as(action, param)
+
+    def on_save_copy(self, action, param):
+        editor = self.get_current_page()
+        if not editor: return
+        
+        def on_save(dialog, result):
+            try:
+                gfile = dialog.save_finish(result)
+                path = gfile.get_path()
+                text = editor.get_text()
+                with open(path, 'w', encoding=editor.current_encoding) as f:
+                    f.write(text)
+            except Exception as e:
+                print(f"Error saving copy: {e}")
+
+        dialog = Gtk.FileDialog()
+        dialog.save(self, None, on_save)
+
+    def on_preferences(self, action, param):
+        dlg = SettingsDialog(self, self.get_application().settings_manager)
+        dlg.present()
+
+    def on_toggle_line_numbers(self, action, param):
+        manager = self.get_application().settings_manager
+        current = manager.get_setting("line-numbers")
+        manager.set_setting("line-numbers", not current)
+        self.grab_focus_editor()
+
+    def on_toggle_word_wrap(self, action, param):
+        manager = self.get_application().settings_manager
+        current = manager.get_setting("word-wrap")
+        manager.set_setting("word-wrap", not current)
+        self.grab_focus_editor()
+
+    def on_zoom_in(self, action, param):
+        manager = self.get_application().settings_manager
+        current = manager.get_setting("font-size")
+        manager.set_setting("font-size", current + 1)
+        self.grab_focus_editor()
+
+    def on_zoom_out(self, action, param):
+        manager = self.get_application().settings_manager
+        current = manager.get_setting("font-size")
+        if current > 8:
+            manager.set_setting("font-size", current - 1)
+        self.grab_focus_editor()
+
+    def on_zoom_reset(self, action, param):
+        manager = self.get_application().settings_manager
+        manager.set_setting("font-size", 11)
+        self.grab_focus_editor()
+
+    def on_setting_changed_win(self, manager, key):
+        # Update all tabs
+        for i in range(self.tab_view.get_n_pages()):
+            page = self.tab_view.get_nth_page(i)
+            editor = page.get_child()._editor
+            self.apply_settings_to_editor(editor)
+
+    def apply_settings_to_editor(self, editor):
+        app = self.get_application()
+        if not app:
+            app = Gio.Application.get_default()
+        
+        if not app or not hasattr(app, 'settings_manager'):
+            return
+
+        manager = app.settings_manager
+        # Font size
+        font_size = manager.get_setting("font-size")
+        editor.view.renderer.set_font(Pango.FontDescription(f"Monospace {font_size}"))
+        
+        # Word wrap - handle state change properly
+        new_wrap = manager.get_setting("word-wrap")
+        if getattr(editor.view.renderer, 'wrap_enabled', False) != new_wrap:
+            editor.view.renderer.wrap_enabled = new_wrap
+            # Clear caches and force recalculation
+            editor.view.renderer.wrap_cache = {}
+            editor.view.renderer.visual_line_map = []
+            editor.view.renderer.total_visual_lines_locked = False
+            editor.view.renderer.visual_line_anchor = (0, 0)
+            
+            # Reset scroll if needed or re-adjust
+            if new_wrap:
+                editor.view.renderer.max_line_width = 0
+                editor.view.scroll_x = 0
+                editor.view.hadj.set_value(0)
+            
+            # Recalculate everything
+            editor.view.on_resize(editor.view, editor.view.get_width(), editor.view.get_height())
+        
+        # Line numbers
+        editor.view.renderer.show_line_numbers = manager.get_setting("line-numbers")
+        
+        # Tab width
+        editor.view.renderer.tab_width = manager.get_setting("tab-width")
+        
+        # Use Tabs
+        editor.view.use_tabs = manager.get_setting("use-tabs")
+
+        # Auto Indent
+        editor.view.auto_indent = manager.get_setting("auto-indent")
+
+        # Highlighting
+        editor.view.highlight_current_line = manager.get_setting("highlight-current-line")
+        editor.view.highlight_brackets = manager.get_setting("highlight-brackets")
+
+        editor.view.queue_draw()
     
     def on_open_recent(self, action, parameter):
         """Handle opening a recent file"""
@@ -12384,6 +13051,24 @@ class VirtualTextEditor(Adw.Application):
         super().__init__(application_id="io.github.fastrizwaan.vite",
                          flags=Gio.ApplicationFlags.HANDLES_OPEN)
         self.files_to_open = []
+        self.settings_manager = SettingsManager()
+        self.settings_manager.connect("setting-changed", self.on_setting_changed)
+        # Apply initial theme
+        self.apply_theme()
+
+    def on_setting_changed(self, manager, key):
+        if key == "theme":
+            self.apply_theme()
+
+    def apply_theme(self):
+        theme = self.settings_manager.get_setting("theme")
+        style_manager = Adw.StyleManager.get_default()
+        if theme == "Dark":
+            style_manager.set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+        elif theme == "Light":
+            style_manager.set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
+        else:
+            style_manager.set_color_scheme(Adw.ColorScheme.DEFAULT)
 
     
     def update_scrollbar_css(self, r, g, b, a):
