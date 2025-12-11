@@ -6376,7 +6376,10 @@ class VirtualTextView(Gtk.DrawingArea):
             else:
                 # Small/medium file: invalidate normally but keep lock flag
                 # Don't reset total_visual_lines_cache - let it recalculate lazily
-                pass
+                # invalidating it is safer to prevent "stuck" scrollbar
+                self.renderer.total_visual_lines_cache = None
+                self.renderer.estimated_total_cache = None
+                self.renderer.visual_line_map = []
             
             # Don't reset anchor - it's still valid for most of the file
             # Only reset if we're far from it
@@ -6388,6 +6391,9 @@ class VirtualTextView(Gtk.DrawingArea):
         # Don't update scrollbar on every keystroke - it's expensive
         # Only queue a redraw
         self.queue_draw()
+
+        # Update scrollbar (throttled via idle_add to prevent blocking typing)
+        GLib.idle_add(self.update_scrollbar)
 
 
     def on_vadj_changed(self, adj):
