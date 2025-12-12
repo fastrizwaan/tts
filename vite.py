@@ -664,6 +664,12 @@ class SyntaxEngine:
     # Cache invalidation
     # -----------------------------
     def invalidate_from(self, start_line):
+        if start_line == 0:
+            # Optimization for "Select All" -> Delete/Cut
+            self.cache.clear()
+            self.line_states.clear()
+            return
+
         keys_to_del = [k for k in self.cache if k >= start_line]
         for k in keys_to_del:
             del self.cache[k]
@@ -1211,6 +1217,24 @@ class IndexedFile:
         raw = self.mm[start:end]
         return raw.decode(self.encoding, errors="replace").rstrip("\n\r")
 
+    def get_byte_range(self, start_line, end_line):
+        """Get raw bytes for a range of lines [start_line, end_line)"""
+        if self.is_empty:
+            return b""
+            
+        total = self.total_lines()
+        if start_line >= total:
+            return b""
+            
+        end_line = min(end_line, total)
+        if start_line >= end_line:
+            return b""
+            
+        start_idx = self.index[start_line]
+        end_idx = self.index[end_line]
+        
+        return self.mm[start_idx:end_idx]
+
 
 # ============================================================
 #   SELECTION
@@ -1327,28 +1351,42 @@ class UndoCommand:
 
 
 class InsertCommand(UndoCommand):
-    def __init__(self, line, col, text, cursor_after_line, cursor_after_col):
+    def __init__(self, line, col, text, cursor_after_line, cursor_after_col, lines=None):
         self.line = line
         self.col = col
         self.text = text
+        self.lines = lines
+        
+        # Memory Optimization: If direct lines list provided, don't store full text
+        # This allows sharing string objects with the buffer's inserted_lines
+        if self.lines and len(self.lines) > 100:
+             self.text = None
+
         self.cursor_after_line = cursor_after_line
         self.cursor_after_col = cursor_after_col
         self.timestamp = time.time()
         
     def undo(self, buffer):
         # To undo an insertion, we delete the inserted range.
-        # We know where it started (line, col) and how long ‘text’ is.
-        # However, calculating the exact end line/col from ‘text’ is safer than relying on stored end state,
-        # but for now we can rely on inverse logic.
+        # We know where it started (line, col).
         
-        # Calculate end position based on text content
-        lines = self.text.split('\n')
-        if len(lines) == 1:
-            end_line = self.line
-            end_col = self.col + len(self.text)
+        if self.lines:
+            lines_count = len(self.lines)
+            if lines_count == 1:
+                end_line = self.line
+                end_col = self.col + len(self.lines[0])
+            else:
+                end_line = self.line + lines_count - 1
+                end_col = len(self.lines[-1])
         else:
-            end_line = self.line + len(lines) - 1
-            end_col = len(lines[-1])
+            # Fallback for legacy commands or small edits
+            text_lines = self.text.split('\n')
+            if len(text_lines) == 1:
+                end_line = self.line
+                end_col = self.col + len(self.text)
+            else:
+                end_line = self.line + len(text_lines) - 1
+                end_col = len(text_lines[-1])
             
         # Select the range
         buffer.selection.set_start(self.line, self.col)
@@ -1365,7 +1403,14 @@ class InsertCommand(UndoCommand):
         buffer.cursor_line = self.line
         buffer.cursor_col = self.col
         buffer.selection.clear()
-        buffer.insert_text(self.text, _record_undo=False)
+        
+        # Reconstruct text if needed
+        if self.text is None and self.lines:
+            text_to_insert = '\n'.join(self.lines)
+        else:
+            text_to_insert = self.text
+            
+        buffer.insert_text(text_to_insert, _record_undo=False)
         
         # Restore cursor
         buffer.cursor_line = self.cursor_after_line
@@ -1377,13 +1422,21 @@ class InsertCommand(UndoCommand):
             
         # Check if other immediately follows self
         # We need to know where 'self' ended.
-        lines = self.text.split('\n')
-        if len(lines) == 1:
-            my_end_line = self.line
-            my_end_col = self.col + len(self.text)
+        if self.lines:
+            if len(self.lines) == 1:
+                my_end_line = self.line
+                my_end_col = self.col + len(self.lines[0])
+            else:
+                my_end_line = self.line + len(self.lines) - 1
+                my_end_col = len(self.lines[-1])
         else:
-            my_end_line = self.line + len(lines) - 1
-            my_end_col = len(lines[-1])
+            lines = self.text.split('\n')
+            if len(lines) == 1:
+                my_end_line = self.line
+                my_end_col = self.col + len(self.text)
+            else:
+                my_end_line = self.line + len(lines) - 1
+                my_end_col = len(lines[-1])
             
         if other.line != my_end_line or other.col != my_end_col:
             return False
@@ -1394,6 +1447,10 @@ class InsertCommand(UndoCommand):
         if other.timestamp - self.timestamp > 2.0:
             return False
             
+        # If we have complex lines structure (paste), don't merge simple typing
+        if self.lines or other.lines:
+            return False
+
         def group_type(txt):
             if not txt: return 0
             if txt.isspace(): return 1 # Whitespace
@@ -1806,6 +1863,93 @@ class VirtualBuffer(GObject.Object):
             line = self.get_line(start_line)
             return line[start_col:end_col]
         else:
+            # OPTIMIZATION for large files
+            can_optimize = False
+            offset = 0
+            
+            if self.file:
+                # 1. Simple Case: Global pristine (fastest)
+                if not self.edits and not self.inserted_lines and not self.deleted_lines:
+                    can_optimize = True
+                    offset = 0
+                else:
+                    # 2. Robust Case: Check for conflicts in the specific range
+                    conflict = False
+                    LIMIT = 1000 # If too many edits, skip scan to avoid overhead
+                    
+                    if len(self.edits) > LIMIT or len(self.inserted_lines) > LIMIT or len(self.deleted_lines) > LIMIT:
+                        conflict = True
+                    else:
+                        range_start = start_line + 1
+                        range_end = end_line
+                        
+                        # Check edits
+                        if not conflict:
+                            for k in self.edits:
+                                if range_start <= k < range_end:
+                                    conflict = True; break
+                        # Check insertions
+                        if not conflict:
+                            for k in self.inserted_lines:
+                                if range_start <= k < range_end:
+                                    conflict = True; break
+                        # Check deletions
+                        if not conflict:
+                            for k in self.deleted_lines:
+                                if range_start <= k < range_end:
+                                    conflict = True; break
+                    
+                    if not conflict:
+                        # Check and calculate offset
+                        current_offset = 0
+                        # line_offsets is sorted by logical line
+                        # We need the offset applicable at start_line+1
+                        # And ensure no new offset starts within the range
+                        for ln, off in self.line_offsets:
+                            if ln <= range_start:
+                                current_offset = off
+                            elif ln < range_end:
+                                # Offset changes inside our range
+                                conflict = True
+                                break
+                        
+                        if not conflict:
+                            can_optimize = True
+                            offset = current_offset
+
+            if can_optimize and end_line > start_line + 1:
+                try:
+                    # Map logical to physical
+                    # physical = logical - offset
+                    # range_start (logical) -> phys_start
+                    # range_end (logical) -> phys_end
+                    
+                    phys_start = (start_line + 1) - offset
+                    phys_end = end_line - offset
+                    
+                    # Sanity check physical bounds
+                    if phys_start >= 0 and phys_end > phys_start:
+                        # Get first line part
+                        first_line = self.get_line(start_line)
+                        first_part = first_line[start_col:]
+                        
+                        # Get last line part
+                        last_line = self.get_line(end_line)
+                        last_part = last_line[:end_col]
+                        
+                        # Get middle block directly from file
+                        raw_bytes = self.file.get_byte_range(phys_start, phys_end)
+                        
+                        # Decode and normalizew
+                        middle_text = raw_bytes.decode(self.file.encoding, errors='replace')
+                        
+                        if '\r' in middle_text:
+                            middle_text = middle_text.replace('\r\n', '\n').replace('\r', '\n')
+                        
+                        return first_part + "\n" + middle_text + last_part
+                except Exception as e:
+                    print(f"Error in optimized copy: {e}, falling back")
+            
             lines = []
             first_line = self.get_line(start_line)
             lines.append(first_line[start_col:])
@@ -1818,7 +1962,7 @@ class VirtualBuffer(GObject.Object):
             
             return '\n'.join(lines)
     
-    def delete_selection(self, _record_undo=True, restore_selection_on_undo=True):
+    def delete_selection(self, _record_undo=True, restore_selection_on_undo=True, provided_text=None):
         """Delete the selected text"""
         if not self.selection.has_selection():
             return False
@@ -1828,7 +1972,10 @@ class VirtualBuffer(GObject.Object):
         start_line, start_col, end_line, end_col = self.selection.get_bounds()
 
         if _record_undo:
-             deleted_text = self.get_selected_text()
+             if provided_text is not None:
+                 deleted_text = provided_text
+             else:
+                 deleted_text = self.get_selected_text()
         
         if start_line == end_line:
             # Single line selection
@@ -2031,7 +2178,10 @@ class VirtualBuffer(GObject.Object):
         self.selection.clear()
         
         if _record_undo:
-            cmd = InsertCommand(start_ln, start_col, text, self.cursor_line, self.cursor_col)
+            # OPTIMIZATION: Pass 'parts' (list of strings) to InsertCommand
+            # This allows sharing string objects between buffer and undo stack,
+            # preventing memory duplication for huge pastes.
+            cmd = InsertCommand(start_ln, start_col, text, self.cursor_line, self.cursor_col, lines=parts)
             self.undo_stack.add_command(cmd)
 
         self.syntax_engine.invalidate_from(start_ln)
@@ -4357,6 +4507,9 @@ class Renderer:
         # Colors - will be updated based on theme
         self.update_colors_for_theme()
 
+        # Cache for line number width to ensure hit testing matches rendering
+        self.last_ln_width = None
+
     def hex_to_rgba_floats(self, hex_str, alpha=1.0):
         hex_str = hex_str.lstrip('#')
         r = int(hex_str[0:2], 16) / 255.0
@@ -4530,21 +4683,30 @@ class Renderer:
         """Update font and recalculate metrics."""
         self.font = font_desc
         
+        # Recalculate average character width
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
-
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.font)
-        layout.set_text("Ag", -1)
-
-        ink_rect, logical_rect = layout.get_pixel_extents()
-        self.text_h = logical_rect.height
-        self.line_h = self.text_h
+        layout.set_text("M", -1)
+        w, h = layout.get_pixel_size()
+        self.avg_char_width = max(1, w)
+        self.line_h = max(1, h)
         
-        # Calculate average character width dynamically
-        layout.set_text("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", -1)
-        ink, logical = layout.get_pixel_extents()
-        self.avg_char_width = logical.width / 62.0
+        # Cache TabArray
+        if hasattr(self, 'tab_width'):
+            tab_width_px = self.tab_width * self.avg_char_width
+            self.tab_array = Pango.TabArray.new(1, True)
+            self.tab_array.set_tab(0, Pango.TabAlign.LEFT, int(tab_width_px))
+        else:
+            self.tab_array = None
+
+        # Reset caches that depend on metrics
+        self.invalidate_wrap_cache()
+        if hasattr(self, 'total_visual_lines_cache'):
+            self.total_visual_lines_cache = None
+        if hasattr(self, 'estimated_total_cache'):
+            self.estimated_total_cache = None
         
         # Invalidate wrap cache as metrics changed
 
@@ -4582,6 +4744,7 @@ class Renderer:
         layout = self.create_text_layout(cr)
         total = buf.total()
         ln_width = self.calculate_line_number_width(cr, total)
+        self.last_ln_width = ln_width # Cache for consistency
         max_width = 0
         
         # Scan first 1000 lines to get a quick estimate
@@ -4613,6 +4776,7 @@ class Renderer:
         max_width = 0
         total = buf.total()
         ln_width = self.calculate_line_number_width(cr, total)
+        self.last_ln_width = ln_width # Cache for consistency
         
         # Check all lines
         for ln in range(total):
@@ -4681,6 +4845,9 @@ class Renderer:
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.font)
         layout.set_auto_dir(True)
+        if hasattr(self, 'tab_array') and self.tab_array:
+            layout.set_tabs(self.tab_array)
+            
         layout.set_text(text, -1)
         layout.set_width(max_width * Pango.SCALE)  # Set wrap width in Pango units
         layout.set_wrap(Pango.WrapMode.WORD_CHAR)  # Smart wrap: prefer words, fall back to char
@@ -4698,10 +4865,11 @@ class Renderer:
             start_index = line.start_index
             length = line.length
             
-            # Convert byte indices to character indices
-            start_col = len(text.encode('utf-8')[:start_index].decode('utf-8'))
+            # Safe, non-incremental conversion
+            # This is O(N^2) but robust and guaranteed to work if Pango works
+            start_col = len(text.encode('utf-8')[:start_index].decode('utf-8', errors='replace'))
             end_byte = start_index + length
-            end_col = len(text.encode('utf-8')[:end_byte].decode('utf-8'))
+            end_col = len(text.encode('utf-8')[:end_byte].decode('utf-8', errors='replace'))
             
             wrap_points.append((start_col, end_col))
         
@@ -4994,16 +5162,8 @@ class Renderer:
                 dist = logical_line - current_ln
                 
                 # Check if we can use optimization (either have cache or file stats)
-                if not (hasattr(self, 'total_visual_lines_cache') and self.total_visual_lines_cache):
-                     if not (hasattr(self, 'estimated_total_cache') and self.estimated_total_cache):
-                         # Force calculation of estimate if missing
-                         self.get_total_visual_lines(cr, buf, ln_width, viewport_width)
-
                 can_optimize = False
                 if hasattr(self, 'total_visual_lines_cache') and self.total_visual_lines_cache:
-                    can_optimize = True
-                elif hasattr(self, 'estimated_total_cache') and self.estimated_total_cache:
-                    # NEW: Use estimated cache
                     can_optimize = True
                 elif hasattr(buf, 'file') and buf.file and hasattr(buf.file, 'mm'):
                     can_optimize = True
@@ -5019,10 +5179,6 @@ class Renderer:
                      if hasattr(self, 'total_visual_lines_cache') and self.total_visual_lines_cache:
                          est_visual_per_line = self.total_visual_lines_cache / max(1, total_logical)
                      
-                     # NEW: Use robust estimated cache
-                     elif hasattr(self, 'estimated_total_cache') and self.estimated_total_cache:
-                         est_visual_per_line = self.estimated_total_cache / max(1, total_logical)
-
                      # FALLBACK: Use byte-based estimation
                      elif hasattr(buf, 'file') and buf.file and hasattr(buf.file, 'mm'):
                          total_bytes = len(buf.file.mm)
@@ -5051,10 +5207,10 @@ class Renderer:
                     allow_approximation=self.use_fast_approximation
                 )
                 current_ln -= 1
-    
+
         # Update anchor
         self.visual_line_anchor = (visual_line, logical_line)
-    
+
         # Find which visual line within this logical line
         wrap_points = self.get_wrap_points_for_line(cr, buf, logical_line, ln_width, viewport_width)
         for vis_idx, (start_col, end_col) in enumerate(wrap_points):
@@ -5448,10 +5604,7 @@ class Renderer:
 
         # Visual UTF-8 byte index for Pango (cluster-correct)
         def visual_byte_index(text, col):
-            b = 0
-            for ch in text[:col]:
-                b += len(ch.encode("utf-8"))
-            return b
+            return len(text[:col].encode("utf-8"))
 
         # --- THEMED BACKGROUND (uses cached color from update_colors_for_theme) ---
         r, g, b, a = self.editor_background_color
@@ -5464,9 +5617,12 @@ class Renderer:
         layout = PangoCairo.create_layout(cr)
         layout.set_font_description(self.font)
         layout.set_auto_dir(True)
+        if hasattr(self, 'tab_array') and self.tab_array:
+            layout.set_tabs(self.tab_array)
 
         total = buf.total()
         ln_width = self.calculate_line_number_width(cr, total)
+        self.last_ln_width = ln_width # Cache for consistency in hit-testing
 
         # Calculate how many visual lines can fit
         max_vis = (alloc.height // self.line_h) + 1
@@ -5593,6 +5749,16 @@ class Renderer:
                 # --- DRAW SEARCH MATCHES ---
                 if search_matches and ln in search_matches:
                     ranges = search_matches[ln]
+                    
+                    # Optimization: Set layout text ONCE for all matches in this line
+                    final_text = text_segment if text_segment else " "
+                    layout.set_text(final_text, -1)
+                    
+                    # Pre-calculate common metrics
+                    rtl = line_is_rtl(text_segment)
+                    text_w, _ = layout.get_pixel_size()
+                    base_x = self.calculate_text_base_x(rtl, text_w, alloc.width, ln_width, scroll_x)
+
                     for s_col, e_col in ranges:
                         # Intersect with current visual line segment
                         seg_s = max(s_col, col_start)
@@ -5600,27 +5766,6 @@ class Renderer:
                         
                         if seg_s < seg_e:
                             # Draw yellow highlight
-                            # Calculate pixel positions
-                            # Extract segment of text to measure
-                            
-                            # Note: simplistic measurement, assuming ltr for positions relative to base_x
-                            # But we need accurate visualization.
-                            # We can re-use layout but without setting text yet? No.
-                            # We need pixel offsets.
-                            
-                            # Optimized approach:
-                            # We are inside the loop where we process text_segment. 
-                            # But we haven't set text on layout yet for this segment.
-                            
-                            # Let's set the text on the layout now to calculate positions
-                            # (We do it again below, but it's cheap if efficient)
-                            final_text = text_segment if text_segment else " "
-                            layout.set_text(final_text, -1)
-                            
-                            # Convert cols to byte indices relative to text_segment start
-                            # seg_s is relative to line start. 
-                            # text_segment starts at col_start.
-                            # So index in text_segment is (seg_s - col_start)
                             
                             idx1 = visual_byte_index(text_segment, seg_s - col_start)
                             idx2 = visual_byte_index(text_segment, seg_e - col_start)
@@ -5630,11 +5775,6 @@ class Renderer:
                             
                             x1 = r1_strong.x / Pango.SCALE
                             x2 = r2_strong.x / Pango.SCALE
-                            
-                            # RTL check
-                            rtl = line_is_rtl(text_segment)
-                            text_w, _ = layout.get_pixel_size()
-                            base_x = self.calculate_text_base_x(rtl, text_w, alloc.width, ln_width, scroll_x)
                             
                             h_x = base_x + min(x1, x2)
                             h_w = abs(x2 - x1)
@@ -6171,6 +6311,12 @@ class VirtualTextView(Gtk.DrawingArea):
         # NEW: debounce triple click vs drag
         self._pending_triple_click = False
 
+        # Busy Overlay references (set by EditorWindow)
+        self._busy_overlay = None
+        self._busy_spinner = None
+        self._busy_label = None
+        self._pending_click = False
+
         # Search highlights
         self.search_matches = []  # List of (start_ln, start_col, end_ln, end_col, text)
         self.highlight_cache = {} # Dict {ln: [(start_col, end_col), ...]}
@@ -6194,8 +6340,29 @@ class VirtualTextView(Gtk.DrawingArea):
         self.install_im()
 
 
+
+    def create_hit_test_layout(self, text=""):
+        """Create a Pango layout for hit testing.
+        
+        Uses PangoCairo with a dummy surface to mimic Renderer.draw behavior
+        and ensure metrics match as closely as possible.
+        """
+        # Create a dummy surface/context if one isn't passed (we create internal)
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surface)
+        
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(self.renderer.font)
+        
+        if hasattr(self.renderer, 'tab_array') and self.renderer.tab_array:
+            layout.set_tabs(self.renderer.tab_array)
+            
+        layout.set_auto_dir(True)
+        layout.set_text(text, -1)
+        return layout
+
     def create_text_layout(self, cr, text="", auto_dir=True):
-        """Create a Pango layout using renderer's font.
+        """Create a Pango layout with standard settings.
         
         Args:
             cr: Cairo context
@@ -6533,6 +6700,7 @@ class VirtualTextView(Gtk.DrawingArea):
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
         ln_width = self.renderer.calculate_line_number_width(cr, total_logical)
+        self.renderer.last_ln_width = ln_width # Cache for consistency
         viewport_width = self.get_width()
         visible = max(1, self.get_height() // self.renderer.line_h)
         
@@ -6688,6 +6856,7 @@ class VirtualTextView(Gtk.DrawingArea):
             surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
             cr = cairo.Context(surface)
             ln_width = self.renderer.calculate_line_number_width(cr, total_lines)
+            self.renderer.last_ln_width = ln_width # Cache for consistency
             
             # Get total visual lines (uses caching for performance)
             total_visual = self.renderer.get_total_visual_lines(cr, self.buf, ln_width, viewport_width)
@@ -6780,7 +6949,7 @@ class VirtualTextView(Gtk.DrawingArea):
             return min(est, len(text))
         # -----------------------
 
-        layout = self.create_text_layout(cr, text)
+        layout = self.create_hit_test_layout(text)
 
         text_w, _ = layout.get_pixel_size()
         if px >= text_w:
@@ -7480,52 +7649,78 @@ class VirtualTextView(Gtk.DrawingArea):
         return False
 
     def copy_to_clipboard(self):
-        """Copy selected text to clipboard"""
-        text = self.buf.get_selected_text()
-        if text:
-            clipboard = self.get_clipboard()
-            clipboard.set_content(Gdk.ContentProvider.new_for_value(text))
+        """Copy selected text to clipboard with progress indicator"""
+        self.show_busy("Copying...")
+        
+        # Defer execution to allow UI to render the busy overlay
+        def _do_copy():
+            try:
+                text = self.buf.get_selected_text()
+                if text:
+                    clipboard = self.get_clipboard()
+                    clipboard.set_content(Gdk.ContentProvider.new_for_value(text))
+            finally:
+                self.hide_busy()
+            return False
+            
+        GLib.timeout_add(20, _do_copy)
 
     def cut_to_clipboard(self):
-        """Cut selected text to clipboard"""
-        text = self.buf.get_selected_text()
-        if text:
-            clipboard = self.get_clipboard()
-            clipboard.set_content(Gdk.ContentProvider.new_for_value(text))
-            self.buf.delete_selection()
-            self.queue_draw()
+        """Cut selected text to clipboard with progress indicator"""
+        self.show_busy("Cutting...")
+        
+        # Defer execution
+        def _do_cut():
+            try:
+                text = self.buf.get_selected_text()
+                if text:
+                    clipboard = self.get_clipboard()
+                    clipboard.set_content(Gdk.ContentProvider.new_for_value(text))
+                    # Pass the text we just fetched to delete_selection to avoid re-fetching it
+                    self.buf.delete_selection(provided_text=text)
+                    self.queue_draw()
+            finally:
+                self.hide_busy()
+            return False
+            
+        GLib.timeout_add(20, _do_cut)
 
     def paste_from_clipboard(self):
-        """Paste text from clipboard with better error handling"""
+        """Paste text from clipboard with better error handling and progress"""
         clipboard = self.get_clipboard()
         
         def paste_ready(clipboard, result):
             try:
                 text = clipboard.read_text_finish(result)
                 if text:
-                    self.buf.insert_text(text)
+                    self.show_busy("Pasting...")
                     
-                    # After paste, clear wrap cache and recalculate everything
-                    if self.renderer.wrap_enabled:
-                        self.renderer.wrap_cache.clear()
-                        self.renderer.total_visual_lines_cache = None
-                        self.renderer.estimated_total_cache = None
-                        self.renderer.visual_line_map = []
-                        self.renderer.edits_since_cache_invalidation = 0
+                    # Defer insert to allow UI update
+                    def _do_paste():
+                        try:
+                            self.buf.insert_text(text)
+                            
+                            # After paste, clear wrap cache and recalculate everything
+                            if self.renderer.wrap_enabled:
+                                self.renderer.wrap_cache.clear()
+                                self.renderer.total_visual_lines_cache = None
+                                self.renderer.estimated_total_cache = None
+                                self.renderer.visual_line_map = []
+                                self.renderer.edits_since_cache_invalidation = 0
+                        finally:
+                            self.hide_busy()
+                            self.queue_draw()
+                        return False
                     
-                    self.keep_cursor_visible()
-                    self.update_scrollbar()  # Update scrollbar range after paste
-                    self.update_im_cursor_location()
-                    self.queue_draw()
+                    GLib.timeout_add(20, _do_paste)
+                    
             except Exception as e:
+                # Handle finish error
                 error_msg = str(e)
-                # Silently ignore "No compatible transfer format" errors
-                # This happens when clipboard contains non-text data (images, etc.)
                 if "No compatible transfer format" not in error_msg:
                     print(f"Paste error: {e}")
-                # Optionally try to get text in a different way
                 self.try_paste_fallback()
-        
+
         clipboard.read_text_async(None, paste_ready)
 
     def try_paste_fallback(self):
@@ -7804,7 +7999,7 @@ class VirtualTextView(Gtk.DrawingArea):
         print(f"DEBUG: Click Pressed. Count={n_press}")
         self.grab_focus()
 
-        # Always use accurate xy_to_line_col - Pango hit-testing is fast enough
+        # Always use accurate xy_to_line_col
         ln, col = self.xy_to_line_col(x, y)
 
         mods = g.get_current_event_state()
@@ -8063,12 +8258,18 @@ class VirtualTextView(Gtk.DrawingArea):
         modifiers = g.get_current_event_state()
         shift_pressed = (modifiers & Gdk.ModifierType.SHIFT_MASK) != 0
 
-        # Temporary Pango context
+        # Create temporary cr for measurements
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
-
-        ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
-
+        
+        # Use cached line number width if available to ensure consistency with rendering
+        if hasattr(self.renderer, 'last_ln_width') and self.renderer.last_ln_width is not None and self.renderer.last_ln_width > 0:
+            ln_width = self.renderer.last_ln_width
+        else:
+            ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
+            
+        # Adjust for scroll
+        base_x_check = x + self.scroll_x
         ln = self.scroll_line + int(y // self.renderer.line_h)
         ln = max(0, min(ln, self.buf.total() - 1))
 
@@ -8205,10 +8406,19 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def xy_to_line_col(self, x, y):
         """Convert pixel coordinates to logical line and column."""
+        # We need a dummy surface for renderer methods that expect 'cr'
+        # even though we use create_hit_test_layout for metrics.
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
 
-        ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
+        # Use cached line number width if available to ensure consistency with rendering
+        if hasattr(self.renderer, 'last_ln_width') and self.renderer.last_ln_width is not None and self.renderer.last_ln_width > 0:
+            ln_width = self.renderer.last_ln_width
+        else:
+            # Fallback: calculate using widget context (accurate)
+            layout = self.create_hit_test_layout(str(self.buf.total()))
+            w, _ = layout.get_pixel_size()
+            ln_width = w + 15
         viewport_width = self.get_width()
 
         # ------------------------------------------------------------
@@ -8360,9 +8570,19 @@ class VirtualTextView(Gtk.DrawingArea):
             
             if self.renderer.wrap_enabled:
                 # Word wrap mode: scroll by visual lines
+                
+                # Use cached line number width if available
+                if hasattr(self.renderer, 'last_ln_width') and self.renderer.last_ln_width is not None and self.renderer.last_ln_width > 0:
+                    ln_width = self.renderer.last_ln_width
+                else:
+                    # Fallback: calculate using widget context
+                    layout = self.create_hit_test_layout(str(total_lines))
+                    w, _ = layout.get_pixel_size()
+                    ln_width = w + 15
+                
+                # Prepare dummy cr for logical_to_visual_line
                 surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
                 cr = cairo.Context(surface)
-                ln_width = self.renderer.calculate_line_number_width(cr, total_lines)
                 
                 # Calculate current visual line
                 current_visual = self.renderer.logical_to_visual_line(
@@ -8590,6 +8810,23 @@ class VirtualTextView(Gtk.DrawingArea):
         
         self.queue_draw()
 
+
+    # --------------------------------------------------------
+    # Busy Indicator Control
+    # --------------------------------------------------------
+    def show_busy(self, message="Processing..."):
+        """Show the busy overlay with a message."""
+        if self._busy_overlay:
+            self._busy_label.set_text(message)
+            self._busy_spinner.start()
+            self._busy_overlay.set_visible(True)
+            # Force UI update if possible, though usually handled by loop return
+            
+    def hide_busy(self):
+        """Hide the busy overlay."""
+        if self._busy_overlay:
+            self._busy_spinner.stop()
+            self._busy_overlay.set_visible(False)
 
     def on_click_released(self, g, n, x, y):
         print(f"DEBUG: Released. PendingClick={self._pending_click}. PendingTriple={self._pending_triple_click}")
@@ -11557,6 +11794,36 @@ class EditorWindow(Adw.ApplicationWindow):
         hscroll.set_valign(Gtk.Align.END)
         overlay.add_overlay(hscroll)
 
+        # ---------------------------------------------------------
+        # Busy Overlay (Spinner)
+        # ---------------------------------------------------------
+        busy_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        busy_box.add_css_class("busy-overlay") # Add rounding/background in CSS
+        busy_box.set_halign(Gtk.Align.CENTER)
+        busy_box.set_valign(Gtk.Align.CENTER)
+        
+        # Opaque background for visibility
+        # We can implement this via CSS provider, or just use a frame style
+        
+        spinner = Gtk.Spinner()
+        spinner.set_size_request(32, 32)
+        
+        busy_label = Gtk.Label(label="Processing...")
+        busy_label.add_css_class("title-2")
+        
+        busy_box.append(spinner)
+        busy_box.append(busy_label)
+        
+        # Initially hidden
+        busy_box.set_visible(False)
+        
+        overlay.add_overlay(busy_box)
+        
+        # Bind to editor view for control
+        editor.view._busy_overlay = busy_box
+        editor.view._busy_spinner = spinner
+        editor.view._busy_label = busy_label
+
         # Add close button for split views
         if add_close_button:
             close_btn = Gtk.Button()
@@ -11815,11 +12082,7 @@ class EditorWindow(Adw.ApplicationWindow):
         if editor:
             editor.view.grab_focus()
         
-        # Remove the chrome tab
-        for tab in self.tab_bar.tabs:
-            if hasattr(tab, '_page') and tab._page == page:
-                self.tab_bar.remove_tab(tab)
-                break
+
         
         # Update UI state
         self.update_ui_state()
