@@ -4341,7 +4341,7 @@ class Renderer:
         self.visual_line_anchor = (0, 0)  # (visual_line, logical_line) for fast lookup
         
         # OPTIMIZATION: Performance tracking for large files
-        self.use_estimation_threshold = 5000  # Use estimation for files larger than this
+        self.use_estimation_threshold = 500  # Use estimation for files larger than this
         self.estimated_total_cache = None  # Fast estimated total for huge files
         self.edits_since_cache_invalidation = 0  # Track edits to avoid over-invalidating
         
