@@ -4341,7 +4341,7 @@ class Renderer:
         self.visual_line_anchor = (0, 0)  # (visual_line, logical_line) for fast lookup
         
         # OPTIMIZATION: Performance tracking for large files
-        self.use_estimation_threshold = 50000  # Use estimation for files larger than this
+        self.use_estimation_threshold = 5000  # Use estimation for files larger than this
         self.estimated_total_cache = None  # Fast estimated total for huge files
         self.edits_since_cache_invalidation = 0  # Track edits to avoid over-invalidating
         
@@ -4994,8 +4994,16 @@ class Renderer:
                 dist = logical_line - current_ln
                 
                 # Check if we can use optimization (either have cache or file stats)
+                if not (hasattr(self, 'total_visual_lines_cache') and self.total_visual_lines_cache):
+                     if not (hasattr(self, 'estimated_total_cache') and self.estimated_total_cache):
+                         # Force calculation of estimate if missing
+                         self.get_total_visual_lines(cr, buf, ln_width, viewport_width)
+
                 can_optimize = False
                 if hasattr(self, 'total_visual_lines_cache') and self.total_visual_lines_cache:
+                    can_optimize = True
+                elif hasattr(self, 'estimated_total_cache') and self.estimated_total_cache:
+                    # NEW: Use estimated cache
                     can_optimize = True
                 elif hasattr(buf, 'file') and buf.file and hasattr(buf.file, 'mm'):
                     can_optimize = True
@@ -5011,6 +5019,10 @@ class Renderer:
                      if hasattr(self, 'total_visual_lines_cache') and self.total_visual_lines_cache:
                          est_visual_per_line = self.total_visual_lines_cache / max(1, total_logical)
                      
+                     # NEW: Use robust estimated cache
+                     elif hasattr(self, 'estimated_total_cache') and self.estimated_total_cache:
+                         est_visual_per_line = self.estimated_total_cache / max(1, total_logical)
+
                      # FALLBACK: Use byte-based estimation
                      elif hasattr(buf, 'file') and buf.file and hasattr(buf.file, 'mm'):
                          total_bytes = len(buf.file.mm)
@@ -8852,30 +8864,18 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # Handle word wrap mode
         if self.renderer.wrap_enabled:
-            # OPTIMIZATION: Quick check first - is cursor "probably" visible?
-            # This avoids expensive calculations for 90% of normal typing
-            logical_diff = cl - self.scroll_line
-            
-            # If cursor is on visible logical lines and not at far edge
-            # assume it's visible (worst case: slight delay in auto-scroll)
-            if 0 < logical_diff < visible_lines - 1:
-                # Cursor is on a middle logical line that's definitely visible
-                # Skip expensive visual line calculations
-                return
-            
-            # If cursor is on first or last visible logical line, or outside,
-            # we need to do the exact check
+            # Check exact visual position (required because logical lines != visual lines)
             surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
             cr = cairo.Context(surface)
             ln_width = self.renderer.calculate_line_number_width(cr, total_lines)
             viewport_width = alloc_w
-
+            
             # Calculate cursor's visual line
             cursor_visual_line = self.renderer.logical_to_visual_line(
                 cr, self.buf, cl, cc, ln_width, viewport_width
             )
             
-            # Calculate current scroll visual line
+        # Calculate current scroll visual line
             scroll_visual_line = self.renderer.logical_to_visual_line(
                 cr, self.buf, self.scroll_line, 0, ln_width, viewport_width
             )
@@ -8903,6 +8903,12 @@ class VirtualTextView(Gtk.DrawingArea):
                 # Only calculate total_visual if we need to clamp to max_scroll
                 # This is a MAJOR optimization for huge files
                 total_visual = self.renderer.get_total_visual_lines(cr, self.buf, ln_width, viewport_width)
+                
+                # Fix: Ensure vadj upper bound is sufficient to hold the new value
+                # This handles cases where update_scrollbar hasn't run yet (race condition)
+                if self.vadj.get_upper() < total_visual:
+                    self.vadj.set_upper(total_visual)
+
                 max_scroll_visual = max(0, total_visual - visible_lines)
                 
                 # Ensure we don't scroll past the end
@@ -8915,9 +8921,16 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.scroll_line = new_log
                 self.scroll_visual_offset = new_vis_off
                 
+                # Recalculate the EXACT visual line that matches this logical position.
+                # This ensures that when update_scrollbar runs later, it gets the same value,
+                # preventing the scrollbar from jumping back and forth.
+                exact_visual = self.renderer.logical_to_visual_line(
+                    cr, self.buf, self.scroll_line, 0, ln_width, viewport_width
+                )
+                exact_visual += self.scroll_visual_offset
+                
                 # Update vadj directly without calling update_scrollbar
-                # This prevents recalculation and jumping
-                self.vadj.set_value(new_top_visual)
+                self.vadj.set_value(exact_visual)
                 
             # Reset horizontal scroll to 0 when wrapping
             if self.scroll_x != 0:
