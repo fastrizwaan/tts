@@ -5780,27 +5780,31 @@ class Renderer:
                             h_w = abs(x2 - x1)
                             
                             if h_w > 0:
-                                # Normal search match: transparent yellow
-                                cr.set_source_rgba(1.0, 1.0, 0.0, 0.4) 
-                                
                                 # Check if this is the CURRENT match
                                 # current_match is (start_ln, start_col, end_ln, end_col, match_txt)
-                                # We check if this range matches exactly or is contained
+                                
                                 is_current = False
                                 if current_match:
-                                    # Unpack 5 elements, ignore text
                                     c_sl, c_sc, c_el, c_ec, _ = current_match
-                                    # Simple check: if we are solely painting this range?
-                                    # Or just strict equality of the partial range?
-                                    # search_matches gives us ranges for THIS line.
-                                    # If the original match is single line, s_col/e_col matches.
-                                    # If multi-line, it's more complex.
-                                    # For now assume single line match logic mostly.
-                                    # Logic: If the highlight range provided corresponds to the current match range on this line.
-                                    
-                                    # We can pass is_current flag in search_matches dict? 
-                                    # search_matches = {ln: [(start, end, is_current), ...]}
-                                    pass
+                                    # Very basic check: logic line matches and start col matches
+                                    # Handling multi-line current matches precisely is harder here
+                                    # but for single line mostly works.
+                                    if ln == c_sl and s_col == c_sc:
+                                         is_current = True
+                                    # If multi-line, current match includes this segment?
+                                    elif c_sl < ln < c_el:
+                                         is_current = True
+                                    elif ln == c_sl and ln < c_el and s_col >= c_sc:
+                                         is_current = True
+                                    elif ln == c_el and ln > c_sl and e_col <= c_ec:
+                                         is_current = True
+
+                                if is_current:
+                                    # Current match: Orange/Gold
+                                    cr.set_source_rgba(1.0, 0.65, 0.0, 0.5) 
+                                else:
+                                    # Normal search match: transparent yellow
+                                    cr.set_source_rgba(1.0, 1.0, 0.0, 0.4) 
 
                                 cr.rectangle(h_x, y, h_w, self.line_h)
                                 cr.fill()
@@ -9473,7 +9477,8 @@ class VirtualTextView(Gtk.DrawingArea):
         alloc = type("Alloc", (), {"width": w, "height": h})
 
         # Hide cursor if there's an active selection
-        show_cursor = self.cursor_visible and not self.buf.selection.has_selection()
+        # Hide cursor if there's an active selection OR if we don't have focus
+        show_cursor = self.cursor_visible and not self.buf.selection.has_selection() and self.has_focus()
 
 
         render_start = time.time()
@@ -10393,19 +10398,38 @@ class FindReplaceBar(Gtk.Box):
         find_box.set_margin_start(12)
         find_box.set_margin_end(12)
         
-        # Find Entry
+        # Find Entry Overlay logic
+        self.find_overlay = Gtk.Overlay()
         self.find_entry = Gtk.SearchEntry()
         self.find_entry.set_hexpand(True)
         self.find_entry.set_placeholder_text("Find")
         self.find_entry.connect("search-changed", self.on_search_changed)
         self.find_entry.connect("activate", self.on_find_next)
         
+        self.find_overlay.set_child(self.find_entry)
+        
+        # Matches Label (x of y)
+        self.matches_label = Gtk.Label(label="")
+        self.matches_label.add_css_class("dim-label")
+        self.matches_label.add_css_class("caption")
+        self.matches_label.set_margin_end(30) # Increased to avoid overlap with clear icon
+        self.matches_label.set_halign(Gtk.Align.END)
+        self.matches_label.set_valign(Gtk.Align.CENTER)
+        self.matches_label.set_visible(False)
+        
+        # We need to ensure the label doesn't block input. 
+        # GtkOverlay pass-through is default for overlays generally? 
+        # Actually usually controls block. But this is just a label.
+        self.matches_label.set_can_target(False) # Make it click-through
+        
+        self.find_overlay.add_overlay(self.matches_label)
+        
         # Capture Esc to close
         key_ctrl = Gtk.EventControllerKey()
         key_ctrl.connect("key-pressed", self.on_key_pressed)
         self.find_entry.add_controller(key_ctrl)
         
-        find_box.append(self.find_entry)
+        find_box.append(self.find_overlay)
         
         # Navigation Box (linked)
         nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -10477,7 +10501,7 @@ class FindReplaceBar(Gtk.Box):
         # --- Bottom Row: Replace (Hidden by default) ---
         self.replace_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.replace_box.set_margin_bottom(6)
-        self.replace_box.set_margin_start(12 + 30) # Indent to align with entry roughly
+        self.replace_box.set_margin_start(12) # Restored margin to align with Find bar
         self.replace_box.set_margin_end(12)
         self.replace_box.set_visible(False)
         
@@ -10485,6 +10509,7 @@ class FindReplaceBar(Gtk.Box):
         self.replace_entry.set_hexpand(True)
         self.replace_entry.set_placeholder_text("Replace")
         self.replace_entry.connect("activate", self.on_replace)
+        self.replace_entry.set_icon_from_icon_name(Gtk.EntryIconPosition.PRIMARY, "edit-find-replace-symbolic")
         
         # New controller for replace entry
         replace_key_ctrl = Gtk.EventControllerKey()
@@ -10508,8 +10533,9 @@ class FindReplaceBar(Gtk.Box):
     def toggle_replace_mode(self, btn):
         vis = not self.replace_box.get_visible()
         self.replace_box.set_visible(vis)
-        icon = "pan-up-symbolic" if vis else "pan-down-symbolic"
-        self.reveal_replace_btn.set_icon_name(icon)
+        # Always keep the replace icon, just toggle visibility
+        # icon = "pan-up-symbolic" if vis else "pan-down-symbolic"
+        # self.reveal_replace_btn.set_icon_name(icon)
         
         if vis:
             self.replace_entry.grab_focus()
@@ -10519,7 +10545,7 @@ class FindReplaceBar(Gtk.Box):
     def show_search(self):
         self.set_visible(True)
         self.replace_box.set_visible(False)
-        self.reveal_replace_btn.set_icon_name("pan-down-symbolic")
+        # self.reveal_replace_btn.set_icon_name("pan-down-symbolic")
         self.find_entry.grab_focus()
         # Select all text in find entry
         self.find_entry.select_region(0, -1)
@@ -10527,7 +10553,7 @@ class FindReplaceBar(Gtk.Box):
     def show_replace(self):
         self.set_visible(True)
         self.replace_box.set_visible(True)
-        self.reveal_replace_btn.set_icon_name("pan-up-symbolic")
+        # self.reveal_replace_btn.set_icon_name("pan-up-symbolic")
         self.find_entry.grab_focus() # Focus find first usually? Or replace? 
         # Usu. focus find, but show replace options.
         
@@ -10616,8 +10642,9 @@ class FindReplaceBar(Gtk.Box):
         if total_lines < 50000:
             matches = self.editor.buf.search(query, case_sensitive, is_regex, max_matches=5000)
             self.editor.view.set_search_results(matches)
+            self.update_match_label()
             return False
-        
+            
         # For medium files (50k-500k), use async search
         if total_lines < 500000:
             def on_progress(matches, lines_searched, total):
@@ -10682,9 +10709,11 @@ class FindReplaceBar(Gtk.Box):
 
     def on_find_next(self, *args):
         self.editor.view.next_match()
+        self.update_match_label()
         
     def on_find_prev(self, *args):
         self.editor.view.prev_match()
+        self.update_match_label()
         
     def on_replace(self, *args):
         # Get replacement text
@@ -10788,7 +10817,29 @@ class FindReplaceBar(Gtk.Box):
         count = self.editor.buf.replace_all(query, replacement, case_sensitive, is_regex)
         
         # Clear results as they are all replaced (unless replacement contains query)
+        # Clear results as they are all replaced (unless replacement contains query)
         self.on_search_changed()
+
+    def update_match_label(self):
+        matches = self.editor.view.search_matches
+        if not matches:
+             query = self.find_entry.get_text()
+             if query:
+                 self.matches_label.set_text("No results")
+                 self.matches_label.set_visible(True)
+             else:
+                 self.matches_label.set_visible(False)
+             return
+
+        total = len(matches)
+        current_idx = self.editor.view.current_match_idx
+        
+        if 0 <= current_idx < total:
+            self.matches_label.set_text(f"{current_idx + 1} of {total}")
+        else:
+             self.matches_label.set_text(f"{total} found")
+             
+        self.matches_label.set_visible(True)
 
 
 
@@ -11741,13 +11792,14 @@ class EditorWindow(Adw.ApplicationWindow):
         editor.find_bar = FindReplaceBar(editor)
         
         # Create container for FindBar + Editor View
-        # We want the FindBar to be above the editor view
+        # We want the FindBar to be BELOW the editor view
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        main_box.append(editor.find_bar)
         
         overlay = Gtk.Overlay()
         
         main_box.append(overlay)
+        main_box.append(editor.find_bar)
+        
         overlay.set_hexpand(True)
         overlay.set_vexpand(True)
 
@@ -13106,6 +13158,12 @@ class EditorWindow(Adw.ApplicationWindow):
                             self.update_header_title()
                         break
                 break
+        
+        # Live Search Update:
+        # If the editor has an active Find Bar, trigger a re-search to update matches/count
+        if hasattr(editor, 'find_bar') and editor.find_bar and editor.find_bar.get_visible():
+            # Trigger search changed (debounced)
+            editor.find_bar.on_search_changed()
 
         # Invalidate wrap cache when buffer changes
         if editor.view.renderer.wrap_enabled:
