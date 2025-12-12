@@ -1,0 +1,560 @@
+
+import re
+import unicodedata
+
+# ==========================================================
+# SYNTAX PATTERNS
+# ==========================================================
+
+class SyntaxPatterns:
+    """Static regex definitions for all supported languages."""
+
+    PYTHON = {
+        'keywords': r'\b(as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b',
+        'bool_ops': r'\b(and|And|None|True|False)\b',
+        'helpers': r'\b(self|__\w+__)\b',
+        'brackets': r'[(){}\[\]]',
+        'operators': r'[|?:*^=<>!%&~+/-]+',
+        'builtins': r'\b(abs|all|any|ascii|bin|bool|bytearray|bytes|callable|chr|classmethod|compile|complex|delattr|dict|dir|divmod|enumerate|eval|exec|filter|float|format|frozenset|getattr|globals|hasattr|hash|help|hex|id|input|int|isinstance|issubclass|iter|len|list|locals|map|max|memoryview|min|next|object|oct|open|ord|pow|print|property|range|repr|reversed|round|set|setattr|slice|sorted|staticmethod|str|sum|super|tuple|type|vars|zip|__import__|__init__)\b',
+        
+        # String Delimiters (Stateful Triggers)
+        # Order matters! Longest first
+        'f_triple_start': r'(?:f|F)(?:r|R)?(?:"""|\'\'\')',
+        'b_triple_start': r'(?:b|B)(?:r|R)?(?:"""|\'\'\')',
+        'r_triple_start': r'(?:r|R)(?:"""|\'\'\')',
+        'u_triple_start': r'(?:u|U)(?:"""|\'\'\')',
+        'triple_start': r'(?:"""|\'\'\')',
+        
+        'f_string_start': r'(?:f|F)(?:r|R)?(?:"|\')',
+        'b_string_start': r'(?:b|B)(?:r|R)?(?:"|\')',
+        'r_string_start': r'(?:r|R)(?:"|\')',
+        'u_string_start': r'(?:u|U)(?:"|\')',
+        'string_start': r'(?:"|\')',
+
+        # For state scanning (not used in ROOT scanner, but for consistency)
+        'f_str_content': r'[^"{}\\]+', 
+
+        'comment': r'#.*$',
+        'decorator': r'@\w+',
+        'number': r'\b\d+\.?\d*([eE][+-]?\d+)?\b',
+        'function': r'\bdef\s+(\w+)',
+        'class': r'\bclass\s+(\w+)',
+        'personal': r'\b(Adw|Gtk)\b'
+    }
+
+    JAVASCRIPT = {
+        'keywords': r'\b(break|case|catch|class|const|continue|debugger|default|delete|do|else|export|extends|finally|for|function|if|import|in|instanceof|let|new|return|super|switch|this|throw|try|typeof|var|void|while|with|yield)\b',
+        'builtins': r'\b(Array|Boolean|Date|Error|Function|JSON|Math|Number|Object|Promise|RegExp|String|Symbol|console|document|window)\b',
+        'string': r"(`(?:[^`\\]|\\.)*`|\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*')",
+        'comment': r'(//.*$|/\*[\s\S]*?\*/)',
+        'number': r'\b\d+\.?\d*([eE][+-]?\d+)?\b',
+        'function': r'\bfunction\s+(\w+)',
+        'class': r'\bclass\s+(\w+)'
+    }
+
+    C = {
+        'keywords': r'\b(auto|break|case|char|const|continue|default|do|double|else|enum|extern|float|for|goto|if|inline|int|long|register|restrict|return|short|signed|sizeof|static|struct|switch|typedef|union|unsigned|void|volatile|while)\b',
+        'preprocessor': r'#\s*(include|define|undef|ifdef|ifndef|if|else|elif|endif|pragma)',
+        'string': r'"(?:[^"\\]|\\.)*"',
+        'comment': r'(//.*$|/\*[\s\S]*?\*/)',
+        'number': r'\b\d+\.?\d*([eE][+-]?\d+)?[fFuUlL]?\b'
+    }
+
+    RUST = {
+        'keywords': r'\b(as|async|await|break|const|continue|crate|dyn|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|struct|super|trait|true|type|unsafe|use|where|while)\b',
+        'types': r'\b(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64|bool|char|str|String|Vec|Box|Option|Result)\b',
+        'string': r'(r#".*?"#|"(?:[^"\\]|\\.)*")',
+        'comment': r'(//.*$|/\*[\s\S]*?\*/)',
+        'number': r'\b\d+\.?\d*([eE][+-]?\d+)?\b',
+        'macro': r'\b\w+!'
+    }
+
+    HTML = {
+        'tag': r'</?[\w-]+>?',
+        'attribute': r'\b[\w-]+=',
+        'string': r'"[^"]*"|\'[^\']*\'',
+        'comment': r'<!--[\s\S]*?-->',
+        'entity': r'&\w+;'
+    }
+
+    CSS = {
+        'selector': r'[.#]?[\w-]+(?=\s*\{)',
+        'property': r'\b[\w-]+(?=:)',
+        'string': r'"[^"]*"|\'[^\']*\'',
+        'comment': r'/\*[\s\S]*?\*/',
+        'number': r'\b\d+\.?\d*(px|em|rem|%|vh|vw)?\b',
+        'color': r'#[0-9a-fA-F]{3,8}\b'
+    }
+
+    DSL = {
+        # Header directives (must start with #)
+        'header': r'#[A-Z_]+\b',
+        
+        # Comments in double curly braces {{...}}
+        'comment': r'\{\{[^}]*\}\}',
+        
+        # Phonetic transcription - IPA in slashes or brackets
+        'phonetic': r'/[^/]+/|\[[^\[\]]*?\](?=\s|$|[,;.])',
+        
+        # Part of speech and grammar labels - enhanced pattern
+        'pos_label': r'\((?:n|v|adj|adv|prep|conj|pron|interj|num|det|aux|part|abbr|pl|sing|def|indef|sense_t|usage|var|pos)\)',
+        
+        # Tag brackets only (structural markers)
+        'tag_bracket': r'(?:\[(?:/?(?:m[0-9]?|ex|com|trn|p|b|i|u|sub|sup|s)\b|\*)|\]|/\*\])',
+        
+        # Color tag with attribute - [c colorname]
+        'color_tag': r'\[c\s+[^\]]+\]|\[/c\]',
+        
+        # Special linguistic tags with attributes
+        'attr_tag': r'\[(?:ref|url|lang)\s+[^\]]+\]|\[/(?:ref|url|lang)\]',
+        
+        # Special zones and markers
+        'zone': r'\[\*\]|\[/\*\]',
+        'stress': r"\[(?:'|/)\]",
+        
+        # Links - two angle brackets <<...>>
+        'link': r'<<[^>]*>>',
+        
+        # Color names (for use in tags and elsewhere)
+        'color_name': r'\b(?:aliceblue|antiquewhite|aqua|aquamarine|azure|beige|bisque|blanchedalmond|blue|blueviolet|brown|burlywood|cadetblue|chartreuse|chocolate|coral|cornflower|cornsilk|crimson|cyan|darkblue|darkcyan|darkgoldenrod|darkgray|darkgreen|darkkhaki|darkmagenta|darkolivegreen|darkorange|darkorchid|darkred|darksalmon|darkseagreen|darkslateblue|darkslategray|darkturquoise|darkviolet|deeppink|deepskyblue|dimgray|dodgerblue|firebrick|floralwhite|forestgreen|fuchsia|gainsboro|ghostwhite|gold|goldenrod|gray|green|greenyellow|honeydew|hotpink|indianred|indigo|ivory|khaki|lavender|lavenderblush|lawngreen|lemonchiffon|lightblue|lightcoral|lightcyan|lightgoldenrodyellow|lightgreen|lightgray|lightpink|lightsalmon|lightseagreen|lightskyblue|lightslategray|lightsteelblue|lightyellow|lime|limegreen|linen|magenta|maroon|mediumaquamarine|mediumblue|mediumorchid|mediumpurple|mediumseagreen|mediumslateblue|mediumspringgreen|mediumturquoise|mediumvioletred|midnightblue|mintcream|mistyrose|moccasin|navajowhite|navy|oldlace|olive|olivedrab|orange|orangered|orchid|palegoldenrod|palegreen|paleturquoise|palevioletred|papayawhip|peachpuff|peru|pink|plum|powderblue|purple|red|rosybrown|royalblue|saddlebrown|salmon|sandybrown|seagreen|seashell|sienna|silver|skyblue|slateblue|slategray|snow|springgreen|steelblue|tan|teal|thistle|tomato|turquoise|violet|wheat|white|whitesmoke|yellow|yellowgreen)\b',
+        
+        # File references (audio/image files)
+        'file_ref': r'\b[\w-]+\.(?:wav|mp3|ogg|bmp|png|jpg|jpeg|gif)\b',
+        
+        # Special escaped characters
+        'escape': r'\\[~@\[\]{}\\]',
+        
+        # Tilde replacement symbol (non-escaped)
+        'tilde': r'~',
+        
+        # At-sign for sub-entries (non-escaped)
+        'at_sign': r'@',
+    }
+
+    @classmethod
+    def get(cls, lang):
+        """Return dict of patterns for a given language."""
+        if not lang:
+            return {}
+        lang = lang.lower()
+        return {
+            'python': cls.PYTHON,
+            'javascript': cls.JAVASCRIPT,
+            'c': cls.C,
+            'rust': cls.RUST,
+            'html': cls.HTML,
+            'css': cls.CSS,
+            'dsl': cls.DSL
+        }.get(lang, {})
+
+# ==========================================================
+# SYNTAX ENGINE
+# ==========================================================
+
+class SyntaxEngine:
+    """
+    Performs syntax tokenization using regex patterns.
+    Manages syntax cache.
+    """
+
+    TOKEN_ORDER = [
+        'personal', 'comment', 
+        # String Starts (State Triggers)
+        'f_triple_start', 'b_triple_start', 'r_triple_start', 'u_triple_start', 'triple_start',
+        'f_string_start', 'b_string_start', 'r_string_start', 'u_string_start', 'string_start',
+        
+        'decorator', 'preprocessor', 'header',
+        'operators',  # Process operators AFTER strings to allow overlay
+        'bool_ops', 'brackets', 
+        'function', 'class', 'keywords', 'helpers', 'builtins', 'types',
+        'number', 'attribute', 'property', 'selector',
+        'color', 'entity', 'macro',
+        # DSL-specific tokens (order matters!)
+        'phonetic',        # IPA notation first
+        'color_tag',       # Color tags before generic tags
+        'attr_tag',        # Attribute tags before tag_bracket
+        'tag_bracket',     # Generic tag brackets
+        'zone', 'stress', 'link', 'pos_label', 'file_ref',
+        'escape', 'color_name', 'tilde', 'at_sign'
+    ]
+
+    # Tokens that allow overlay
+    # Only RAW strings allow overlay now (as per request "docstring or ' or " should not show colors for operators")
+    # But wait, user said " """ or " or ' should not show". Maybe r"" should?
+    # I will assume ONLY PROPER RAW STRINGS allow overlay.
+    # We will tag content tokens as 'raw_string_content' etc.
+    OVERLAYABLE_TOKENS = {'raw_string_content', 'raw_doc_content'} 
+    
+    # Tokens that are allowed to paint over the specific tokens above
+    OVERLAY_TOKENS = {'operators'}
+
+    # States
+    STATE_ROOT = 0
+    STATE_STRING = 1
+    STATE_F_EXPR = 2
+    STATE_DEF_ARGS = 3
+
+    # String Types
+    STR_TYPE_NORMAL = 'n'
+    STR_TYPE_RAW = 'r'
+    STR_TYPE_BYTE = 'b'
+    STR_TYPE_F = 'f'
+    STR_TYPE_U = 'u'
+
+    def __init__(self):
+        self.language = None
+        self.patterns = {}
+        self.cache = {}
+        self.line_states = {} # {line_num: (state, delimiter, context_stack)}
+        self.master_regex = None
+        self.text_provider = None
+
+    def set_text_provider(self, provider):
+        """Set function(line_num) -> text to allow gap filling"""
+        self.text_provider = provider
+
+    def set_theme(self, theme):
+        """Set the current theme (light/dark)."""
+        # Currently the renderer handles color mapping, but this hook allows
+        # syntax engine to adjust patterns if needed (e.g. strict vs loose)
+        self.theme = theme
+
+    # -----------------------------
+    # Language / pattern management
+
+    # -----------------------------
+    def set_language(self, lang):
+        self.language = lang
+        self.patterns = SyntaxPatterns.get(lang)
+        self.cache.clear()
+        self.line_states.clear()
+        self._compile_master_regex()
+
+    def _compile_master_regex(self):
+        if not self.patterns:
+            self.master_regex = None
+            self.overlay_regex = None
+            return
+
+        # Base tokens: Mutually exclusive, earliest match wins
+        base_tokens = [t for t in self.TOKEN_ORDER if t not in self.OVERLAY_TOKENS]
+        pattern_parts = []
+        for name in base_tokens:
+            pat = self.patterns.get(name)
+            if pat:
+                # Use named groups: (?P<name>pattern)
+                # Ensure pattern doesn't capture group numbers that interfere, 
+                # but named groups in master are fine.
+                pattern_parts.append(f'(?P<{name}>{pat})')
+        
+        if pattern_parts:
+            try:
+                self.master_regex = re.compile('|'.join(pattern_parts), re.MULTILINE)
+            except re.error as e:
+                print(f"Error compiling syntax regex: {e}")
+                self.master_regex = None
+        else:
+            self.master_regex = None
+
+        # Overlay tokens: Processed separatey
+        pass
+
+    # -----------------------------
+    # Cache invalidation
+    # -----------------------------
+    def invalidate_from(self, start_line):
+        if start_line == 0:
+            # Optimization for "Select All" -> Delete/Cut
+            self.cache.clear()
+            self.line_states.clear()
+            return
+
+        keys_to_del = [k for k in self.cache if k >= start_line]
+        for k in keys_to_del:
+            del self.cache[k]
+        
+        # Also invalidate states
+        state_keys = [k for k in self.line_states if k >= start_line]
+        for k in state_keys:
+            del self.line_states[k]
+
+    # -----------------------------
+    # State Management
+    # -----------------------------
+    def get_start_state(self, line_num):
+        if line_num <= 0:
+            return [(self.STATE_ROOT, None, None)]
+        
+        # Look back for nearest known state
+        nearest_line = -1
+        nearest_state = [(self.STATE_ROOT, None, None)]
+        
+        # Check explicit previous line first (common case)
+        if (line_num - 1) in self.line_states:
+             return list(self.line_states[line_num - 1])
+
+        # Find nearest
+        sorted_lines = sorted([k for k in self.line_states.keys() if k < line_num])
+        if sorted_lines:
+            nearest_line = sorted_lines[-1]
+            nearest_state = self.line_states[nearest_line]
+        
+        # If nearest line is too far back, and we don't have text provider, we fallback
+        if not self.text_provider:
+             # Fallback to ROOT if gap exists and we can't fill it
+             if nearest_line == line_num - 1:
+                 return list(nearest_state)
+             return [(self.STATE_ROOT, None, None)]
+             
+        # Fill the gap (synchronously for now)
+        # Limit to 2000 lines to prevent freeze on huge jumps
+        GAP_LIMIT = 2000
+        if line_num - nearest_line > GAP_LIMIT:
+             return [(self.STATE_ROOT, None, None)]
+
+        # Scan forward from nearest_line + 1 to line_num - 1
+        curr = nearest_line + 1
+        while curr < line_num:
+            text = self.text_provider(curr)
+            # Tokenize side-effect: updates line_states[curr] and cache[curr]
+            self.tokenize(curr, text)
+            curr += 1
+            
+        # Refetch state of line_num - 1 (which was just computed)
+        if (line_num - 1) in self.line_states:
+            return list(self.line_states[line_num - 1])
+            
+        return [(self.STATE_ROOT, None, None)]
+
+    # -----------------------------
+    # Core tokenization
+    # -----------------------------
+    def tokenize(self, line_num, text):
+        if not self.patterns:
+            return []
+
+        if line_num in self.cache:
+            return self.cache[line_num]
+
+        # Initialize stack from previous line
+        stack = self.get_start_state(line_num)
+        tokens = []
+        pos = 0
+        length = len(text)
+        
+        while pos < length:
+            current_mode, delim, s_type = stack[-1]
+            
+            if current_mode == self.STATE_ROOT or current_mode == self.STATE_F_EXPR:
+                # Use Master Regex
+                if not self.master_regex:
+                    break
+                    
+                match = self.master_regex.search(text, pos)
+                
+                if match and match.start() == pos:
+                    token_type = match.lastgroup
+                    m_str = match.group(token_type)
+                    end_pos = match.end()
+
+                    if token_type in ('function', 'class'):
+                        pat = self.patterns.get(token_type)
+                        if pat:
+                             sub_m = re.match(pat, m_str)
+                             if sub_m and sub_m.lastindex:
+                                 # Found an inner capture group (the name)
+                                 span_start, span_end = sub_m.span(sub_m.lastindex)
+                                 
+                                 # Calculate absolute positions
+                                 abs_name_start = match.start() + span_start
+                                 abs_name_end = match.start() + span_end
+                                 
+                                 # Handle Prefix (e.g. "def ")
+                                 prefix_text = m_str[:span_start]
+                                 prefix_stripped = prefix_text.strip()
+                                 
+                                 if prefix_stripped:
+                                     # Check if prefix is a keyword
+                                     kw_pat = self.patterns.get('keywords')
+                                     if kw_pat and re.fullmatch(kw_pat, prefix_stripped):
+                                         # Add keyword token for the prefix
+                                         p_start = prefix_text.find(prefix_stripped)
+                                         if p_start >= 0:
+                                             kw_start = match.start() + p_start
+                                             kw_end = kw_start + len(prefix_stripped)
+                                             tokens.append((kw_start, kw_end, 'keywords'))
+                                 
+                                 # Add the main token (the name)
+                                 tokens.append((abs_name_start, abs_name_end, token_type))
+                                 
+                                 # Advance pos and continue
+                                 pos = end_pos
+                                 continue
+                    
+                    # Handle String Starts (State Transition)
+                    if 'string_start' in token_type or 'triple_start' in token_type: # e.g. f_string_start, triple_start
+                         # Determine delimiter and type
+                         new_delim = m_str
+                         new_type = self.STR_TYPE_NORMAL
+                         
+                         if token_type.startswith('f') or token_type.startswith('F'): new_type = self.STR_TYPE_F
+                         elif token_type.startswith('b') or token_type.startswith('B'): new_type = self.STR_TYPE_BYTE
+                         elif token_type.startswith('r') or token_type.startswith('R'): new_type = self.STR_TYPE_RAW
+                         elif token_type.startswith('u') or token_type.startswith('U'): new_type = self.STR_TYPE_U
+                         
+                         quote_part = m_str
+                         if quote_part.lower().startswith('f') or quote_part.lower().startswith('b') or quote_part.lower().startswith('u') or quote_part.lower().startswith('r'):
+                             # Iterate until we find quote char
+                             for i, c in enumerate(quote_part):
+                                 if c in ('"', "'"):
+                                     quote_part = quote_part[i:]
+                                     break
+                                     
+                         tokens.append((pos, end_pos, token_type))
+                         stack.append((self.STATE_STRING, quote_part, new_type))
+                         pos = end_pos
+                         continue
+
+                    # Handle Brackets in F_EXPR (Recursion/Nesting)
+                    if token_type == 'brackets':
+                        if m_str == '{':
+                             stack.append((self.STATE_F_EXPR, None, None))
+                        elif m_str == '}':
+                             if len(stack) > 1 and stack[-1][0] == self.STATE_F_EXPR:
+                                 stack.pop()
+                             else:
+                                 # Unbalanced } or just root }
+                                 pass
+
+                    tokens.append((pos, end_pos, token_type))
+                    pos = end_pos
+                
+                else:
+                    # No match at pos. Skip logic?
+                    # Just advance by 1 (unknown char usually space)
+                    pos += 1
+
+            elif current_mode == self.STATE_STRING:
+                # Scan for delimiter or '{' (if f-string)
+                esc_delim = re.escape(delim)
+                
+                pattern_str = f'({esc_delim})'
+                if s_type == self.STR_TYPE_F:
+                    pattern_str += r'|(\{\{)|(\}\})|(\{)' # Match {{, }}, or {
+                
+                # Add backslash handling
+                pattern_str = r'(\\.)|' + pattern_str
+                
+                pat = re.compile(pattern_str, re.DOTALL)
+                match = pat.search(text, pos)
+                
+                end_token_type = 'string_content' # Default
+                content_type = 'string_content'
+                if s_type == self.STR_TYPE_BYTE:
+                    content_type = 'byte_string_content'
+                    end_token_type = 'byte_string' # Reuse
+                elif s_type == self.STR_TYPE_RAW:
+                    content_type = 'raw_string_content'
+                    end_token_type = 'raw_string'
+                elif s_type == self.STR_TYPE_F:
+                    content_type = 'f_string_content'
+                    end_token_type = 'f_string'
+                
+                if match:
+                    start, end = match.span()
+                    
+                    # Emit content before match
+                    if start > pos:
+                        tokens.append((pos, start, content_type))
+                    
+                    # Analyze match
+                    groups = match.groups()
+                    g_esc = groups[0]
+                    g_delim = groups[1]
+                    g_double_open = groups[2] if len(groups) > 2 else None
+                    g_double_close = groups[3] if len(groups) > 3 else None
+                    g_open = groups[4] if len(groups) > 4 else None
+                    
+                    if g_esc:
+                        # Escaped char, just content
+                        tokens.append((start, end, content_type))
+                        pos = end
+                    elif g_delim:
+                        # Closing delimiter
+                        tokens.append((start, end, end_token_type))
+                        stack.pop()
+                        pos = end
+                    elif g_double_open or g_double_close:
+                        # {{ or }} in f-string (masked brace)
+                        tokens.append((start, end, content_type))
+                        pos = end
+                    elif g_open:
+                        # { start of expr
+                        tokens.append((start, end, 'brackets')) # Color {
+                        stack.append((self.STATE_F_EXPR, None, None))
+                        pos = end
+                else:
+                    # No match (rest of line is content)
+                    tokens.append((pos, length, content_type))
+                    pos = length
+        
+        # End of line
+        self.line_states[line_num] = list(stack)
+        self.cache[line_num] = self._apply_overlays(text, tokens)
+        return self.cache[line_num]
+
+    def _apply_overlays(self, text, tokens):
+        """
+        Applies overlay tokens (like operators) on top of overlayable tokens (like raw strings).
+        """
+        if not self.OVERLAY_TOKENS: return tokens
+        
+        # Collect segments that are overlayable
+        overlayable_segments = []
+        for i, (start, end, t_type) in enumerate(tokens):
+            if t_type in self.OVERLAYABLE_TOKENS:
+                overlayable_segments.append((start, end))
+        
+        if not overlayable_segments:
+            return tokens
+
+        final_tokens = list(tokens) # Copy
+        
+        # Scan for operators in the entire line (simpler than segment scanning)
+        for name in self.OVERLAY_TOKENS:
+            pat = self.patterns.get(name)
+            if not pat: continue
+            
+            for match in re.finditer(pat, text):
+                m_start, m_end = match.span()
+                if m_start == m_end: continue
+                
+                # Check if this match sits specifically inside an overlayable segment
+                is_valid_overlay = False
+                for (seg_start, seg_end) in overlayable_segments:
+                    if m_start >= seg_start and m_end <= seg_end:
+                        is_valid_overlay = True
+                        break
+                
+                if is_valid_overlay:
+                    final_tokens.append((m_start, m_end, name))
+        
+        # Sort tokens by start pos
+        final_tokens.sort(key=lambda x: (x[0], x[1])) 
+        
+        return final_tokens
+
+def detect_rtl_line(text):
+    """Detect if a line is RTL using Unicode bidirectional properties.
+    
+    Returns True  if the first strong directional character is RTL,
+    False if LTR, or False if no strong directional characters found.
+    """
+    for ch in text:
+        t = unicodedata.bidirectional(ch)
+        if t in ("L", "LRE", "LRO"):
+            return False
+        if t in ("R", "AL", "RLE", "RLO"):
+            return True
+    return False
+
