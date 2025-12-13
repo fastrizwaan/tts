@@ -1,7 +1,4 @@
 
-import re
-import unicodedata
-
 # ==========================================================
 # SYNTAX PATTERNS
 # ==========================================================
@@ -212,10 +209,6 @@ class SyntaxEngine:
     def set_text_provider(self, provider):
         """Set function(line_num) -> text to allow gap filling"""
         self.text_provider = provider
-
-    def set_theme(self, theme):
-        """Set the current theme (light/dark)."""
-        self.theme = theme
 
     # -----------------------------
     # Language / pattern management
@@ -603,19 +596,4 @@ class SyntaxEngine:
     def _tokenize_root(self, text):
          # Legacy helper not used in new flow
          return []
-
-
-def detect_rtl_line(text):
-    """Detect if a line is RTL using Unicode bidirectional properties.
-    
-    Returns True  if the first strong directional character is RTL,
-    False if LTR, or False if no strong directional characters found.
-    """
-    for ch in text:
-        t = unicodedata.bidirectional(ch)
-        if t in ("L", "LRE", "LRO"):
-            return False
-        if t in ("R", "AL", "RLE", "RLO"):
-            return True
-    return False
 

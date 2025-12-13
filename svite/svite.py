@@ -1230,6 +1230,7 @@ class VirtualTextView(Gtk.DrawingArea):
         
         # Initial Metrics Update
         self.update_metrics()
+        self.update_colors_for_theme()
         
     def update_metrics(self):
         """Update font metrics and notify mapper."""
@@ -3271,9 +3272,169 @@ class VirtualTextView(Gtk.DrawingArea):
         self.update_metrics()
         self.queue_draw()
         
-    def update_colors_for_theme(self, is_dark):
+    def hex_to_rgba_floats(self, hex_str, alpha=1.0):
+        hex_str = hex_str.lstrip('#')
+        r = int(hex_str[0:2], 16) / 255.0
+        g = int(hex_str[2:4], 16) / 255.0
+        b = int(hex_str[4:6], 16) / 255.0
+        return r, g, b, alpha
+
+    def update_colors_for_theme(self, is_dark=None):
+        """Update colors based on current theme (GTK4)."""
+        
+        # Determine theme mode unless explicitly given
+        if is_dark is None:
+            style_manager = Adw.StyleManager.get_default()
+            is_dark = style_manager.get_dark()
+            
         self.is_dark = is_dark
         self.syntax.set_theme("dark" if is_dark else "light")
+        
+        # Use theme-appropriate background colors
+        if is_dark:
+            r, g, b, a = self.hex_to_rgba_floats("#191919")
+            self.editor_background_color = (r, g, b, a)
+        else:
+            r, g, b, a = self.hex_to_rgba_floats("#fafafa")
+            self.editor_background_color = (r, g, b, a)
+
+        # Helper for Pango colors
+        def hex_to_pango(hex_str):
+            r, g, b, a = self.hex_to_rgba_floats(hex_str)
+            return (r, g, b)
+
+        if is_dark:
+            self.text_foreground_color = (0.90, 0.90, 0.90)
+            self.linenumber_foreground_color = (0.60, 0.60, 0.60)
+            self.selection_background_color = (0.2, 0.4, 0.6)
+            self.selection_foreground_color = (1.0, 1.0, 1.0)
+            
+            # Syntax Colors (Atom One Dark)
+            self.syntax_colors = {
+                'keywords': hex_to_pango("#c678dd"),     # Purple
+                'builtins': hex_to_pango("#56b6c2"),     # Cyan
+                'string': hex_to_pango("#98c379"),       # Green
+                'comment': hex_to_pango("#5c6370"),      # Grey
+                'number': hex_to_pango("#d19a66"),       # Orange
+                'function': hex_to_pango("#61afef"),     # Blue
+                'class': hex_to_pango("#e5c07b"),        # Yellow/Gold
+                'decorator': hex_to_pango("#56b6c2"),    # Cyan
+                'personal': hex_to_pango("#e06c75"),     # Red
+                'tag': hex_to_pango("#e06c75"),          # Red
+                'attribute': hex_to_pango("#d19a66"),    # Orange
+                'property': hex_to_pango("#56b6c2"),     # Cyan
+                'selector': hex_to_pango("#c678dd"),     # Purple
+                'macro': hex_to_pango("#e5c07b"),        # Yellow
+                'preprocessor': hex_to_pango("#c678dd"), # Purple
+                'types': hex_to_pango("#56b6c2"),        # Cyan
+                'entity': hex_to_pango("#d19a66"),       # Orange
+                'bool_ops': hex_to_pango("#d19a66"),     # Orange
+                'brackets': hex_to_pango("#c678dd"),     # Pink (Changed from Orange)
+                'raw_prefix': hex_to_pango("#c678dd"),   # Pink/Purple
+                'operators': hex_to_pango("#c678dd"),    # Pink/Purple
+                'docstring': hex_to_pango("#98c379"),    # Green
+                'helpers': hex_to_pango("#e06c75"),     # Red
+                'argument': hex_to_pango("#d19a66"),     # Orange (New)
+                'byte_string': hex_to_pango("#56b6c2"),  # Cyan
+                'raw_string': hex_to_pango("#98c379"),   # Green
+                'f_string': hex_to_pango("#98c379"),     # Green
+                'string': hex_to_pango("#98c379"),       # Green
+
+                # String Delimiters
+                'triple_start': hex_to_pango("#98c379"),
+                'string_start': hex_to_pango("#98c379"),
+                'f_triple_start': hex_to_pango("#98c379"),
+                'f_string_start': hex_to_pango("#98c379"),
+                'b_triple_start': hex_to_pango("#56b6c2"),
+                'b_string_start': hex_to_pango("#56b6c2"),
+                'r_triple_start': hex_to_pango("#98c379"),
+                'r_string_start': hex_to_pango("#98c379"),
+                'u_triple_start': hex_to_pango("#98c379"),
+                'u_string_start': hex_to_pango("#98c379"),
+
+                'byte_string_content': hex_to_pango("#56b6c2"), 
+                'raw_string_content': hex_to_pango("#98c379"),
+                'f_string_content': hex_to_pango("#98c379"),
+                'string_content': hex_to_pango("#98c379"),
+                
+                # DSL-specific colors (minimal - just muted tags)
+                'header': hex_to_pango("#c678dd"),          # Purple for header directives
+                'tag_bracket': hex_to_pango("#5c6370"),     # Muted grey
+                'color_tag': hex_to_pango("#5c6370"),       # Muted grey
+                'attr_tag': hex_to_pango("#5c6370"),        # Muted grey
+                'phonetic': hex_to_pango("#5c6370"),        # Muted grey
+                'pos_label': hex_to_pango("#5c6370"),       # Muted grey
+                'zone': hex_to_pango("#5c6370"),            # Muted grey
+                'stress': hex_to_pango("#5c6370"),          # Muted grey
+                'link': hex_to_pango("#5c6370"),            # Muted grey
+                'color_name': hex_to_pango("#5c6370"),      # Muted grey
+                'file_ref': hex_to_pango("#5c6370"),        # Muted grey
+                'escape': hex_to_pango("#5c6370"),          # Muted grey
+                'tilde': hex_to_pango("#5c6370"),           # Muted grey
+                'at_sign': hex_to_pango("#5c6370"),         # Muted grey
+            }
+        else:
+            self.text_foreground_color = (0.2, 0.2, 0.2)
+            self.linenumber_foreground_color = (0.6, 0.6, 0.6)
+            self.selection_background_color = (0.8, 0.9, 1.0)
+            self.selection_foreground_color = (0.0, 0.0, 0.0)
+            
+            # Syntax Colors (Atom One Light)
+            self.syntax_colors = {
+                'keywords': hex_to_pango("#a626a4"),
+                'builtins': hex_to_pango("#0184bc"),
+                'string': hex_to_pango("#50a14f"),
+                'comment': hex_to_pango("#a0a1a7"),
+                'number': hex_to_pango("#986801"),
+                'function': hex_to_pango("#4078f2"),
+                'class': hex_to_pango("#c18401"),
+                'decorator': hex_to_pango("#a626a4"),
+                'personal': hex_to_pango("#e45649"),
+                'tag': hex_to_pango("#e45649"),
+                'attribute': hex_to_pango("#986801"),
+                'property': hex_to_pango("#0184bc"),
+                'selector': hex_to_pango("#a626a4"),
+                'macro': hex_to_pango("#c18401"),
+                'preprocessor': hex_to_pango("#a626a4"),
+                'types': hex_to_pango("#0184bc"),
+                'entity': hex_to_pango("#986801"),
+                'bool_ops': hex_to_pango("#986801"),
+                'brackets': hex_to_pango("#986801"),
+                'operators': hex_to_pango("#0184bc"),
+                'regex': hex_to_pango("#50a14f"),
+                'namespace': hex_to_pango("#c18401"),
+                'special': hex_to_pango("#0184bc"),
+                'file_ref': hex_to_pango("#a0a1a7"),        # Muted grey
+                'escape': hex_to_pango("#a0a1a7"),          # Muted grey
+                'tilde': hex_to_pango("#a0a1a7"),           # Muted grey
+                'at_sign': hex_to_pango("#a0a1a7"),         # Muted grey
+                'docstring': hex_to_pango("#50a14f"),    # Green
+                'helpers': hex_to_pango("#e45649"),     # Red
+                'argument': hex_to_pango("#986801"),     # Orange (New)
+                'byte_string': hex_to_pango("#0184bc"),  # Cyan
+                'raw_string': hex_to_pango("#50a14f"),   # Green
+                'f_string': hex_to_pango("#50a14f"),     # Green
+                'string': hex_to_pango("#50a14f"),       # Green
+                'raw_prefix': hex_to_pango("#a626a4"),   # Pink
+
+                # String Delimiters
+                'triple_start': hex_to_pango("#50a14f"),
+                'string_start': hex_to_pango("#50a14f"),
+                'f_triple_start': hex_to_pango("#50a14f"),
+                'f_string_start': hex_to_pango("#50a14f"),
+                'b_triple_start': hex_to_pango("#0184bc"),
+                'b_string_start': hex_to_pango("#0184bc"),
+                'r_triple_start': hex_to_pango("#50a14f"),
+                'r_string_start': hex_to_pango("#50a14f"),
+                'u_triple_start': hex_to_pango("#50a14f"),
+                'u_string_start': hex_to_pango("#50a14f"),
+
+                'byte_string_content': hex_to_pango("#0184bc"), 
+                'raw_string_content': hex_to_pango("#50a14f"),
+                'f_string_content': hex_to_pango("#50a14f"),
+                'string_content': hex_to_pango("#50a14f"),
+            }
+        
         self.queue_draw()
 
 
@@ -3298,6 +3459,7 @@ class VirtualTextView(Gtk.DrawingArea):
             if cl < self.scroll_line:
                 self.scroll_line = cl
                 self.scroll_visual_offset = vis_off
+                self.scroll_line_frac = 0.0 # Reset fractional scroll
                 self.queue_draw()
                 self.update_scrollbar()
                 return
@@ -3312,14 +3474,15 @@ class VirtualTextView(Gtk.DrawingArea):
             # Check bottom visibility logic (approximation for speed)
             # If current line is far below scroll line (> visible_lines), definitely scroll
             if cl > self.scroll_line + visible_lines + 5:
-                 diff = cl - (self.scroll_line + visible_lines) + 5
-                 self.scroll_line += diff
-                 self.scroll_visual_offset = 0 # reset offset
-                 self.queue_draw()
-                 self.update_scrollbar()
-                 # Refine
-                 self.keep_cursor_visible() 
-                 return
+                diff = cl - (self.scroll_line + visible_lines) + 5
+                self.scroll_line += diff
+                self.scroll_visual_offset = 0 # reset offset
+                self.scroll_line_frac = 0.0 # Reset fractional scroll
+                self.queue_draw()
+                self.update_scrollbar()
+                # Refine
+                self.keep_cursor_visible() 
+                return
 
             # Precise check by iterating visual lines
             ln = self.scroll_line
@@ -3373,6 +3536,7 @@ class VirtualTextView(Gtk.DrawingArea):
                              self.scroll_line += 1
                              curr_vis -= rem
                              
+                     self.scroll_line_frac = 0.0 # Reset fractional scroll
                      self.queue_draw()
                      self.update_scrollbar()
 
@@ -3381,9 +3545,11 @@ class VirtualTextView(Gtk.DrawingArea):
             if cl < self.scroll_line:
                 self.scroll_line = cl
                 self.scroll_visual_offset = 0
+                self.scroll_line_frac = 0.0
             elif cl >= self.scroll_line + visible_lines:
                 self.scroll_line = max(0, cl - visible_lines + 1)
                 self.scroll_visual_offset = 0
+                self.scroll_line_frac = 0.0
                 
             # Horizontal scrolling
             ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
@@ -3496,74 +3662,17 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def get_color_for_token(self, token_type):
         """Get color for syntax token type."""
-        is_dark = getattr(self, 'is_dark', True)
-        
-        if is_dark:
-            # Dark Theme Colors
-            colors = {
-                'keywords': (0.8, 0.4, 0.6), # Purple
-                'bool_ops': (0.8, 0.4, 0.6),
-                'builtins': (0.4, 0.6, 0.8), # Blue
-                'helpers': (0.4, 0.6, 0.8),
-                
-                'string': (0.4, 0.8, 0.4),  # Green
-                'string_start': (0.4, 0.8, 0.4),
-                'string_content': (0.4, 0.8, 0.4),
-                'triple_start': (0.4, 0.8, 0.4),
-                'f_string_start': (0.4, 0.8, 0.4),
-                'f_string_content': (0.4, 0.8, 0.4),
-                'f_triple_start': (0.4, 0.8, 0.4),
-                
-                'comment': (0.5, 0.5, 0.5), # Grey
-                
-                'function': (0.9, 0.9, 0.4), # Yellow
-                'class': (0.4, 0.8, 0.8), # Cyan
-                'number': (0.8, 0.6, 0.4), # Orange
-                'operators': (0.8, 0.8, 0.8), # White
-                'decorator': (0.8, 0.8, 0.2), # Gold
-                'docstring': (0.4, 0.7, 0.4), # Greenish
-                
-                # DSL
-                'header': (1.0, 0.5, 0.5), # Pink/Red
-                'tag_bracket': (0.5, 0.5, 1.0), # Light Blue
-                'phonetic': (0.6, 0.8, 0.6), # Light Green
-            }
-        else:
-            # Light Theme Colors
-            colors = {
-                'keywords': (0.5, 0.0, 0.5), # Dark Purple
-                'bool_ops': (0.5, 0.0, 0.5),
-                'builtins': (0.0, 0.0, 0.8), # Dark Blue
-                'helpers': (0.0, 0.0, 0.8),
-                
-                'string': (0.0, 0.5, 0.0),  # Dark Green
-                'string_start': (0.0, 0.5, 0.0),
-                'string_content': (0.0, 0.5, 0.0),
-                'triple_start': (0.0, 0.5, 0.0),
-                'f_string_start': (0.0, 0.5, 0.0),
-                'f_string_content': (0.0, 0.5, 0.0),
-                'f_triple_start': (0.0, 0.5, 0.0),
-                
-                'comment': (0.5, 0.5, 0.5), # Grey
-                
-                'function': (0.6, 0.6, 0.0), # Dark Yellow/Gold
-                'class': (0.0, 0.6, 0.6), # Teal
-                'number': (0.8, 0.4, 0.0), # Dark Orange
-                'operators': (0.2, 0.2, 0.2), # Dark Grey
-                'decorator': (0.6, 0.6, 0.0), # Gold
-                'docstring': (0.0, 0.4, 0.0), # Dark Green
-                
-                # DSL
-                'header': (0.8, 0.0, 0.0), # Red
-                'tag_bracket': (0.0, 0.0, 0.8), # Blue
-                'phonetic': (0.0, 0.5, 0.0), # Green
-            }
-    
-        # Fallback for string variants
-        if token_type and 'string' in token_type:
-            return colors.get('string')
+        # Use pre-calculated syntax colors map
+        if hasattr(self, 'syntax_colors'):
+            # Check direct match
+            if token_type in self.syntax_colors:
+                return self.syntax_colors[token_type]
             
-        return colors.get(token_type, None)
+            # Fallback for string variants
+            if 'string' in token_type:
+                return self.syntax_colors.get('string')
+                
+        return None
 
 
     def draw_view(self, area, cr, w, h):
