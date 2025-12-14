@@ -301,7 +301,7 @@ class VisualLineMapper:
             count = 0
             for i in range(total):
                 count += self.get_visual_line_count(i)
-            return int(count * 1.05) # Small buffer just in case
+            return count
         else:
             # Structural Sampling for large files
             # Sample N lines distributed across the file

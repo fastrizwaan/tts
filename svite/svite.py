@@ -1485,7 +1485,50 @@ class VirtualTextView(Gtk.DrawingArea):
             # Linear scanning of visual segments is O(N) and freezes for large files (e.g. 1M+ lines).
             # We use a threshold: for small files, be precise. For large files, approximate.
             if total_lines > 1000:
-                # O(1) Approximation
+                # O(1) Approximation for Large Files
+                
+                # Check if we are at the bottom (ratio near 1.0)
+                if ratio > 0.99:
+                    # Align end of file to bottom of viewport
+                    last_line = max(0, total_lines - 1)
+                    
+                    # Backtrack algorithm to fill viewport from bottom
+                    visible_rows = max(1, self.get_height() // self.line_h)
+                    needed = visible_rows
+                    
+                    # Assume last line height is 1 for speed in large files, or check cache?
+                    # Checking cache is safe enough for just one line.
+                    segments_last = self.mapper.get_line_segments(last_line)
+                    vis_height_last = len(segments_last) if segments_last else 1
+                    
+                    needed -= vis_height_last
+                    
+                    if needed < 0:
+                        # Last line is huge
+                        self.scroll_line = last_line
+                        self.scroll_visual_offset = max(0, vis_height_last - visible_rows)
+                    else:
+                        self.scroll_line = last_line
+                        self.scroll_visual_offset = 0
+                        
+                        # Accurate backtracking loop
+                        # Even for large files, we only scan the last ~50 lines, which is cheap.
+                        prev = last_line - 1
+                        while prev >= 0 and needed > 0:
+                             h_p = self.mapper.get_visual_line_count(prev)
+                             needed -= h_p
+                             self.scroll_line = prev
+                             prev -= 1
+                        
+                        if needed < 0:
+                             # Overshot. We are showing the bottom part of 'self.scroll_line'.
+                             self.scroll_visual_offset = abs(needed)
+                        
+                    self.scroll_line_frac = 0.0
+                    self.queue_draw()
+                    return
+
+                # Normal Scroll Position
                 # We map ratio directly to logical line index.
                 # This assumes uniform distribution of wrapping, which is standard for huge files.
                 self.scroll_line = int(ratio * (total_lines - 1))
@@ -1499,6 +1542,12 @@ class VirtualTextView(Gtk.DrawingArea):
             # --- Precise Calculation for Small Files ---
             # Binary search logic could be used here if we had an Interval Tree, 
             # but we don't. Linear scan is fast enough for < 1000 lines.
+            
+            # Use actual scroll value directly. 
+            # Adjustment value 0..X means "start showing from visual line X".
+            # Max value is (Total - PageSize), so at max scroll, we start at Total-PageSize,
+            # which naturally aligns the last line to the bottom of the viewport.
+            target_visual_line = actual_val
             
             current_visual = 0.0
             
@@ -1529,16 +1578,69 @@ class VirtualTextView(Gtk.DrawingArea):
                 current_visual += num_segments
             
             # Fallback - if we ran out of lines but haven't reached target
-            # This happens because get_total_visual_lines returns 1.05x estimate
-            # So we are likely at the very end of the document.
-            self.scroll_line = max(0, total_lines - 1)
-            self.scroll_visual_offset = 0  # To ensure we see the last line content
-            # Improve fallback: try to set visual offset to last segment of last line?
-            # For simplicity, just showing the last line is good enough validation.
-            # Ideally:
-            segments = self.mapper.get_line_segments(self.scroll_line)
-            if segments:
-                 self.scroll_visual_offset = max(0, len(segments) - 1)
+            # This happens because get_total_visual_lines returns 1.05x estimate or due to slight miscalculation
+            
+            # IMPROVED FALLBACK: Instead of snapping to the very last line at the top,
+            # we want to align the end of the file with the BOTTOM of the viewport.
+            
+            # Find the last logical line
+            last_line = max(0, total_lines - 1)
+            
+            # Get visual height of the last line
+            segments_last = self.mapper.get_line_segments(last_line)
+            vis_height_last = len(segments_last) if segments_last else 1
+            
+            # We want to fill the viewport upwards from the bottom.
+            # Start at last line, backtrack until viewport is full.
+            
+            self.scroll_line = last_line
+            # Show the TOP of the last visual chunk of the last line? No, show the start of the last line if possible,
+            # but if it's huge, show the end.
+            # Actually simpler: Set scroll_line to last_line, and scroll_visual_offset such that the END is at viewport bottom.
+            
+            height_lines = visible_rows
+            
+            # Backtrack algorithm
+            curr = last_line
+            needed = height_lines
+            
+            # We already occupy 'vis_height_last' with the last line
+            needed -= vis_height_last
+            
+            # If the last line is TALLER than viewport, we scroll to show its end
+            if needed < 0:
+                 self.scroll_line = last_line
+                 # Visual offset should be such that end is at bottom
+                 # total_vis_lines_in_last = vis_height_last
+                 # We want to see the last 'visible_rows' of it
+                 self.scroll_visual_offset = max(0, vis_height_last - visible_rows)
+            else:
+                 # Last line fits, with space to spare. Backtrack to fill space.
+                 self.scroll_line = last_line
+                 self.scroll_visual_offset = 0 # Show start of last line
+                 
+                 # Now backtrack previous lines
+                 prev = curr - 1
+                 while prev >= 0 and needed > 0:
+                     seg_p = self.mapper.get_line_segments(prev)
+                     h_p = len(seg_p) if seg_p else 1
+                     needed -= h_p
+                     self.scroll_line = prev
+                     prev -= 1
+                 
+                 # if needed < 0, it means we went back one too many lines fully.
+                 # The 'scroll_line' is now the top line.
+                 # If needed < 0, it means the top line is only partially visible at top.
+                 # But we display integer lines at top (scroll_visual_offset).
+                 
+                 # The 'prev' loop moves scroll_line to the top-most fully or partially visible line.
+                 # If we overshot (needed < 0), it means 'self.scroll_line' (which is prev + 1 at this point)
+                 # has height 'h_current'. 'needed' is negative amount of that height that is CUT OFF at top.
+                 # So we need to show the BOTTOM part of that line.
+                 
+                 if needed < 0:
+                     # We need to skip the first 'abs(needed)' visual lines of self.scroll_line
+                     self.scroll_visual_offset = abs(needed)
             
             self.scroll_line_frac = 0.0
             self.queue_draw()
