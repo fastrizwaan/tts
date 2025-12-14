@@ -175,9 +175,39 @@ class VisualLineMapper:
         if total == 0:
             return 1
         
-        # Estimate: assume average of ~1.5 visual lines per logical line for wrapped text
-        # This is a reasonable heuristic that works for most files
-        return int(total * 1.5)
+        if total < 1000:
+            # Exact calculation for small/medium files
+            count = 0
+            for i in range(total):
+                count += self.get_visual_line_count(i)
+            return int(count * 1.05) # Small buffer just in case
+        else:
+            # Structural Sampling for large files
+            # Sample N lines distributed across the file
+            # Calculate EXACT visual lines for each sample
+            # This captures the true distribution of line lengths (sparse vs dense)
+            
+            samples = 100
+            step = max(1, total // samples)
+            
+            sampled_vis_lines = 0
+            sampled_count = 0
+            
+            for i in range(0, total, step):
+                # This computes the exact wrapping for the sampled line using current viewport
+                # It is far more accurate than average line length because it accounts for
+                # specific wrapping thresholds.
+                lines = self.get_visual_line_count(i)
+                sampled_vis_lines += lines
+                sampled_count += 1
+            
+            if sampled_count > 0:
+                avg_vis_per_logical = sampled_vis_lines / sampled_count
+                
+                # Apply safety margin (5%) and return
+                return int(total * avg_vis_per_logical * 1.05)
+            
+            return int(total * 1.05)
     
     def get_line_segments(self, line_num: int) -> List[Tuple[int, int]]:
         """Get the column ranges for each visual segment of a line."""

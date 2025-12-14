@@ -1459,27 +1459,62 @@ class VirtualTextView(Gtk.DrawingArea):
         val = adj.get_value()
         
         # Scrollbar uses 10x resolution for smoothness
-        scroll_resolution = 10.0
+        scroll_resolution = 1.0 # Should match update_scrollbar
         
         if self.mapper.enabled:
-            # Map visual scroll value to logical line approximation
+            # Map visual scroll value to logical line + visual offset
             total_vis = self.mapper.get_total_visual_lines()
             if total_vis <= 0: return
             
-            # Divide by resolution to get actual position
+            total_bytes = 1
+            if hasattr(self.buf, 'total_size'):
+                 total_bytes = max(1, self.buf.total_size)
+            
+            # 1. Determine Target Byte
             actual_val = val / scroll_resolution
-            ratio = actual_val / float(total_vis)
-            target_log = ratio * self.buf.total()
             
-            # Use fractional position for smooth thumb dragging
+            # Use upper - page_size for full range mapping
+            upper = adj.get_upper() / scroll_resolution
+            page_size = adj.get_page_size() / scroll_resolution
+            max_scroll = max(1.0, upper - page_size)
+            
+            # Ratio of scrollable area
+            ratio = min(1.0, actual_val / max_scroll)
+            target_byte = int(ratio * total_bytes)
+            
+            # Find logical line containing this byte
+            target_log, byte_offset_in_line = self.buf.get_line_at_offset(target_byte)
             self.scroll_line = int(target_log)
-            # Store fractional part for sub-pixel scrolling
-            if not hasattr(self, 'scroll_line_frac'):
-                self.scroll_line_frac = 0.0
-            self.scroll_line_frac = target_log - self.scroll_line
-            
             self.scroll_line = max(0, min(self.scroll_line, self.buf.total() - 1))
-            self.scroll_visual_offset = 0 
+            
+            # 2. Estimate Visual Offset from remaining bytes
+            # vis_lines = byte_offset_in_line / bytes_per_row
+            
+            width = self.get_width()
+            ln_width = 30 # default gutter
+            if self.show_line_numbers:
+                ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+            
+            viewport_w = max(1, width - ln_width - 20)
+            width_chars = max(1, int(viewport_w / max(0.1, self.char_width)))
+            
+            # Assuming 1 byte/char approx for scroll position
+            # Use floating point for smooth pixel scroll
+            vis_lines_float = byte_offset_in_line / width_chars
+            
+            # Extract integral and fractional parts
+            self.scroll_visual_offset = int(vis_lines_float)
+            self.scroll_line_frac = vis_lines_float - self.scroll_visual_offset
+            
+            # Clamp visual offset to actual segments if possible?
+            # get_line_segments is efficient enough for single line call
+            segments = self.mapper.get_line_segments(self.scroll_line)
+            if segments:
+                self.scroll_visual_offset = max(0, min(self.scroll_visual_offset, len(segments) - 1))
+            
+            # Avoid negative frac
+            if self.scroll_line_frac < 0: self.scroll_line_frac = 0.0
+            
             self.queue_draw()
         else:
             # Logical line scrolling - use fractional position
@@ -1487,7 +1522,10 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.scroll_line_frac = 0.0
             
             # Divide by resolution to get actual position
+            # Use same resolution!
+            scroll_resolution = 1.0 
             actual_val = val / scroll_resolution
+            
             self.scroll_line = int(actual_val)
             self.scroll_line_frac = actual_val - self.scroll_line
             self.scroll_line = max(0, min(self.scroll_line, self.buf.total() - 1))
@@ -1502,10 +1540,59 @@ class VirtualTextView(Gtk.DrawingArea):
                 
     def on_resize(self, widget, width, height):
         """Resize handler."""
+        # 0. Capture current read position (approx chars into the line)
+        old_char_offset = 0
+        if hasattr(self, 'mapper') and self.mapper.enabled:
+            ln_width = 30
+            if self.show_line_numbers:
+                ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+            
+            old_viewport_chars = max(1, int((self.get_width() - ln_width - 20) / max(0.1, self.char_width)))
+            frac = getattr(self, 'scroll_line_frac', 0.0)
+            old_char_offset = (self.scroll_visual_offset + frac) * old_viewport_chars
+
+        # Update metrics first to ensure char_width is up to date
+        if hasattr(self, 'update_metrics'):
+             self.update_metrics()
+             
+        # Update mapper with new width
+        if hasattr(self, 'mapper'):
+            # subtract gutter width if needed
+            ln_width = 0
+            if self.show_line_numbers:
+                ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+            
+            # Match draw_view logic (-20)
+            viewport_w = width - ln_width - 20
+            self.mapper.set_viewport_width(viewport_w, self.char_width)
+
+            # Restore scroll position with new width
+            if self.mapper.enabled and old_char_offset > 0:
+                new_viewport_w_chars = self.mapper._viewport_width
+                if new_viewport_w_chars < 1: new_viewport_w_chars = 1
+                
+                self.scroll_visual_offset = int(old_char_offset / new_viewport_w_chars)
+                # Remainder to frac?
+                rem = old_char_offset - (self.scroll_visual_offset * new_viewport_w_chars)
+                self.scroll_line_frac = rem / new_viewport_w_chars
+
         # Invalidate layout
         self.mapper.invalidate_all()
         
-        # Update scrollbar page size
+        # Debounce scrollbar update to ensure it settles correctly after resize
+        self.update_scrollbar() # Immediate update for responsiveness
+        
+        if hasattr(self, '_resize_timer') and self._resize_timer:
+            GLib.source_remove(self._resize_timer)
+            
+        self._resize_timer = GLib.timeout_add(100, self._delayed_resize_update)
+        
+        self.queue_draw()
+        return False
+        
+    def _delayed_resize_update(self):
+        """Final update after resize settles."""
+        self._resize_timer = None
         self.update_scrollbar()
         self.queue_draw()
         return False
@@ -1541,20 +1628,63 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.vadj.set_step_increment(scroll_resolution)
                 self.vadj.set_page_increment(visible_rows * scroll_resolution)
                 
-                # Estimate current visual position
-                curr_ratio = self.scroll_line / max(1, total_lines)
-                curr_val = curr_ratio * total_vis * scroll_resolution
+                # Estimate current visual position based on BYTES for potential variable line heights
+                # val = (current_byte_offset / total_bytes) * total_vis
+                
+                total_bytes = 1
+                if hasattr(self.buf, 'total_size'):
+                     total_bytes = max(1, self.buf.total_size)
+                
+                # Get start byte of current line
+                start_byte = 0
+                line_info = self.buf.get_line_info(self.scroll_line)
+                if line_info:
+                    start_byte = line_info.offset
+                else:
+                    # Fallback for unindexed lines (e.g. newly inserted at end)
+                    # We estimate the byte offset linearly based on line number
+                    if self.buf.total() > 0:
+                         start_byte = int((self.scroll_line / self.buf.total()) * total_bytes)
+                
+                # Add offset from visual rows (approximate bytes)
+                # We assume 1 byte/char for smoothness calculation to allow sub-line granularity
+                # viewport_char_width * visual_offset
+                # viewport_char_width * visual_offset
+                # Use value from mapper which ensures consistency with total_vis
+                # (especially during resize where get_width() might be stale)
+                width_chars = self.mapper._viewport_width
+                if width_chars < 1: width_chars = 1
+                
+                # width = self.get_width()
+                # ln_width = 30 
+                # if self.show_line_numbers:
+                #    ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+                # viewport_w = max(1, width - ln_width - 20)
+                # width_chars = max(1, int(viewport_w / max(0.1, self.char_width)))
+                
+                frac = getattr(self, 'scroll_line_frac', 0.0)
+                bytes_in_view = (self.scroll_visual_offset + frac) * width_chars
+                
+                curr_byte = start_byte + bytes_in_view
+                
+                # Ratio of TOTAL file
+                ratio = curr_byte / total_bytes
+                
+                # Use max realizable scroll value (upper - page_size) to match on_vadj_changed
+                upper = total_vis * scroll_resolution
+                page_sz = visible_rows * scroll_resolution
+                max_scroll = max(1.0, upper - page_sz)
+                
+                curr_val = ratio * max_scroll
                 
                 self.vadj.set_value(curr_val)
                 self.vscroll.set_visible(total_vis > visible_rows)
                 
                 # Horizontal scrollbar disabled/hidden in wrap mode usually
-                # But here we might want it if viewport width < content width?
-                # Actually if wrapped, we fit to width.
                 self.hscroll.set_visible(False)
             else:
-                # No wrap - use 10x resolution for ultra-smooth thumb dragging
-                scroll_resolution = 10.0
+                # No wrap - use 1.0 resolution (float) matches on_vadj_changed
+                scroll_resolution = 1.0
                 
                 self.vadj.set_lower(0)
                 self.vadj.set_upper(total_lines * scroll_resolution)
@@ -1774,12 +1904,13 @@ class VirtualTextView(Gtk.DrawingArea):
              if curr_y + height_px > target_y:
                  # Found it
                  seg_idx = int((target_y - curr_y) // self.line_h) + start_seg
-                 if seg_idx >= num_segs: seg_idx = num_segs - 1
                  
                  found_ln = curr_ln
                  
                  # Map text_x to column
                  if segments:
+                     # Clamp seg_idx to valid range to prevent IndexError
+                     seg_idx = max(0, min(seg_idx, len(segments) - 1))
                      s_start, s_end = segments[seg_idx]
                      text = get_line(curr_ln)[s_start:s_end]
                      
@@ -1864,13 +1995,49 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # Alt+Z - Toggle word wrap
         if alt_pressed and (name == "z" or name == "Z"):
-            self.mapper.enabled = not self.mapper.enabled
-            self.scroll_visual_offset = 0
-            self.scroll_x = 0
-            self.update_metrics()
+            # Calculate current byte/char position within the line before switching
+            current_char_offset = 0
+            width = self.get_width()
+            ln_width = 30
+            if self.show_line_numbers:
+                ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+            viewport_w_chars = max(1, int((width - ln_width - 20) / max(0.1, self.char_width)))
+
+            if self.mapper.enabled:
+                # Switching Wrap -> No Wrap
+                # Convert visual offset to horizontal scroll
+                frac = getattr(self, 'scroll_line_frac', 0.0)
+                current_char_offset = (self.scroll_visual_offset + frac) * viewport_w_chars
+                
+                self.mapper.enabled = False
+                self.scroll_visual_offset = 0
+                self.scroll_x = int(current_char_offset * self.char_width)
+            else:
+                # Switching No Wrap -> Wrap
+                # Convert horizontal scroll to visual offset
+                current_char_offset = self.scroll_x / max(0.1, self.char_width)
+                
+                # Ensure mapper has correct viewport width for accurate estimation!
+                self.mapper.set_viewport_width(width - ln_width - 20, self.char_width)
+                
+                self.mapper.enabled = True
+                self.scroll_x = 0
+                
+                # New visual offset
+                self.scroll_visual_offset = int(current_char_offset / viewport_w_chars)
+                # Remainder could be added to frac, but visual lines are integers for now in mapper
+                # We can update frac to include the horizontal position remainder? 
+                # Ideally, we start at the beginning of that visual line.
+                
+                # Update metrics will update viewport width in mapper
+                self.update_metrics() 
+                # Re-calculate with exact mapper width if changed
+                
+            self.update_metrics() # Ensure metrics up to date
             self.queue_draw()
             GLib.idle_add(self.update_scrollbar)
-            self.keep_cursor_visible()
+            # self.keep_cursor_visible() # Don't force cursor visible, keep scroll pos?
+            # Actually user wants to see what they were looking at.
             return True
 
         # Alt+Arrow keys for text movement
@@ -2319,12 +2486,22 @@ class VirtualTextView(Gtk.DrawingArea):
             self.queue_draw()
 
     def on_undo_action(self):
-        """Placeholder for undo - to be implemented"""
-        print("Undo - to be implemented")
+        """Undo action handler"""
+        pos = self.undo_manager.undo(self.buf)
+        if pos:
+            self.buf.set_cursor(pos.line, pos.col)
+        self.update_scrollbar()
+        self.keep_cursor_visible()
+        self.queue_draw()
 
     def on_redo_action(self):
-        """Placeholder for redo - to be implemented"""
-        print("Redo - to be implemented")
+        """Redo action handler"""
+        pos = self.undo_manager.redo(self.buf)
+        if pos:
+            self.buf.set_cursor(pos.line, pos.col)
+        self.update_scrollbar()
+        self.keep_cursor_visible()
+        self.queue_draw()
 
     def find_word_boundaries(self, line, col):
         """Find word boundaries at the given position. Words include alphanumeric and underscore."""
@@ -2777,7 +2954,10 @@ class VirtualTextView(Gtk.DrawingArea):
     def stop_autoscroll(self):
         """Stop the auto-scroll timer"""
         if self.autoscroll_timer_id is not None:
-            GLib.source_remove(self.autoscroll_timer_id)
+            try:
+                GLib.source_remove(self.autoscroll_timer_id)
+            except Exception:
+                pass
             self.autoscroll_timer_id = None
             
     def autoscroll_tick(self):
@@ -3585,67 +3765,58 @@ class VirtualTextView(Gtk.DrawingArea):
         self.add_controller(sc)
 
     def on_scroll(self, c, dx, dy):
-        """Handle mouse wheel scroll."""
+        """Handle mouse wheel scroll with pixel-wise precision."""
         if dy:
-             steps = int(dy * 3)
-             total_lines = self.buf.total()
-             if total_lines == 0:
-                 return True
-
-             # Visual line movement
-             current_log = self.scroll_line
-             current_vis_off = self.scroll_visual_offset
+             # dy is typically 1.0 per click, or smaller for touchpads
+             # We want smooth scrolling, so we map dy to a fraction of a line
+             # Sensitivity: 1.0 dy = 3 lines roughly in old code
+             # Let's try 1.0 dy = 1.0 lines (or adjustable)
+             # For pixel-wise, we want direct mapping if possible, but dy is unit-less steps usually.
              
-             rows_moved = 0
-             direction = 1 if steps > 0 else -1
-             target_steps = abs(steps)
+             scroll_speed = 1.0  # lines per scroll unit
              
-             # Loop to move by visual lines
-             while rows_moved < target_steps:
-                 if direction > 0:
-                      # Next visual line
-                      segments = self.mapper.get_line_segments(current_log)
-                      # If we are at last segment, go to next logical
-                      if current_vis_off < len(segments) - 1:
-                           current_vis_off += 1
-                      else:
-                           if current_log < total_lines - 1:
-                                current_log += 1
-                                current_vis_off = 0
-                           else:
-                                break # End of file
-                 else:
-                      # Prev visual line
-                      if current_vis_off > 0:
-                           current_vis_off -= 1
-                      else:
-                           if current_log > 0:
-                                current_log -= 1
-                                # Go to last segment of prev line
-                                segments = self.mapper.get_line_segments(current_log)
-                                current_vis_off = max(0, len(segments) - 1)
-                           else:
-                                break # Start of file
-                 rows_moved += 1
+             if not hasattr(self, 'scroll_line_frac'):
+                 self.scroll_line_frac = 0.0
                  
-             self.scroll_line = current_log
-             self.scroll_visual_offset = current_vis_off
+             self.scroll_line_frac += dy * scroll_speed
              
-             # Update Scrollbar
-             # Just use logical approximation for scrollbar position if wrap is enabled
-             # It's imprecise but sufficient for scrollbar thumb
-             total_vis_est = self.mapper.get_total_visual_lines()
-             adj_val = (current_log / max(1, total_lines)) * total_vis_est
+             total_lines = self.buf.total()
              
-             # Block handler to avoid recursive loop
-             if self.vadj:
-                 self.vadj.handler_block_by_func(self.on_vadj_changed)
-                 try:
-                    self.vadj.set_upper(total_vis_est)
-                    self.vadj.set_value(adj_val)
-                 finally:
-                    self.vadj.handler_unblock_by_func(self.on_vadj_changed)
-                
+             # Normalize fraction to keep it between 0.0 and 1.0 by moving visual lines
+             while self.scroll_line_frac >= 1.0:
+                 # Move down 1 visual line
+                 segments = self.mapper.get_line_segments(self.scroll_line)
+                 if self.scroll_visual_offset < len(segments) - 1:
+                     self.scroll_visual_offset += 1
+                     self.scroll_line_frac -= 1.0
+                 else:
+                     if self.scroll_line < total_lines - 1:
+                         self.scroll_line += 1
+                         self.scroll_visual_offset = 0
+                         self.scroll_line_frac -= 1.0
+                     else:
+                         # End of file, clamp
+                         self.scroll_line_frac = min(1.0, self.scroll_line_frac) # Allow some bounce? No.
+                         self.scroll_line_frac = 0.99 
+                         break
+                         
+             while self.scroll_line_frac < 0.0:
+                 # Move up 1 visual line
+                 if self.scroll_visual_offset > 0:
+                     self.scroll_visual_offset -= 1
+                     self.scroll_line_frac += 1.0
+                 else:
+                     if self.scroll_line > 0:
+                         self.scroll_line -= 1
+                         segments = self.mapper.get_line_segments(self.scroll_line)
+                         self.scroll_visual_offset = max(0, len(segments) - 1)
+                         self.scroll_line_frac += 1.0
+                     else:
+                         # Start of file, clamp
+                         self.scroll_line_frac = 0.0
+                         break
+             
+             self.update_scrollbar()
              self.queue_draw()
              
         if dx and not self.mapper.enabled:
@@ -3706,7 +3877,7 @@ class VirtualTextView(Gtk.DrawingArea):
         else:
             ln_width = 0
             
-        viewport_w = w - ln_width
+        viewport_w = w - ln_width - 20 # Match on_resize/update_scrollbar logic
         self.mapper.set_viewport_width(viewport_w, self.char_width)
         
         visible_lines = int(h / self.line_h) + 2
@@ -3738,7 +3909,15 @@ class VirtualTextView(Gtk.DrawingArea):
             
             # Syntax Tokens
             tokens = self.syntax.tokenize(current_log_line, line_text)
-            
+        
+            # Safeguard: If we are on first line and offset is invalid (too big), clamp it
+            if current_log_line == self.scroll_line:
+                 if start_vis_offset >= len(segments):
+                      start_vis_offset = max(0, len(segments) - 1)
+                      # Auto-correct persistent state if it's wildly wrong
+                      if self.scroll_visual_offset >= len(segments):
+                           self.scroll_visual_offset = start_vis_offset
+
             # Iterate visual segments (wrapped lines)
             for i, (seg_start, seg_end) in enumerate(segments):
                 # Skip segments before the scroll offset if we are on the first line

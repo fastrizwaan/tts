@@ -150,6 +150,21 @@ class LineIndexer:
             )
         return None
     
+    
+    def get_line_at_offset(self, byte_offset: int) -> Tuple[int, int]:
+        """Get (line_num, byte_offset_in_line) for a global byte offset."""
+        if not self._offsets:
+            return 0, 0
+            
+        import bisect
+        # Find index where byte_offset fits
+        # _offsets is start offset of each line.
+        idx = bisect.bisect_right(self._offsets, byte_offset) - 1
+        idx = max(0, min(idx, len(self._offsets) - 1))
+        
+        start_off = self._offsets[idx]
+        return idx, byte_offset - start_off
+
     def invalidate_from(self, line_num: int) -> None:
         """Invalidate index from a specific line (for incremental updates)."""
         if line_num < len(self._offsets):
@@ -328,6 +343,7 @@ class VirtualBuffer:
         self._observers = []
         self.selection = Selection()
         self._suppress_notifications = 0
+        self._size_delta: int = 0 # Track size changes relative to indexer
 
     @contextmanager
     def batch_notifications(self):
@@ -339,6 +355,52 @@ class VirtualBuffer:
             self._suppress_notifications -= 1
             if self._suppress_notifications == 0:
                 self._notify_observers()
+
+    def get_line_info(self, line: int):
+        """Delegate to indexer."""
+        return self._indexer.get_line_info(line)
+
+    def get_line_at_offset(self, offset: int):
+        """
+        Map global byte offset to (line, col).
+        Handles appended text that is not yet in the static indexer.
+        """
+        # 1. Try static indexer
+        idx, off_in_line = self._indexer.get_line_at_offset(offset)
+        
+        # 2. Check if we need to scan forward (appended text)
+        # If indexer returned the last known line, check if we overflowed it
+        indexer_count = self._indexer.line_count
+        if idx >= indexer_count - 1 and self.total_lines > indexer_count:
+             current_ln_len = 0
+             line_text = self.get_line(idx)
+             if line_text is not None:
+                 current_ln_len = len(line_text.encode('utf-8')) # Bytes
+                 
+             # Check if offset is beyond this line (plus newline)
+             # Indexer offsets usually include newline, but off_in_line is pure delta.
+             # We assume 1 byte newline for simplicity in this fallback logic
+             if off_in_line > current_ln_len:
+                 # Scan forward through new lines
+                 consumed = current_ln_len + 1 # +1 for newline
+                 curr_idx = idx
+                 current_rem = off_in_line
+                 
+                 while curr_idx < self.total_lines - 1 and current_rem > (len(self.get_line(curr_idx).encode('utf-8')) + 1):
+                     ln_bytes = len(self.get_line(curr_idx).encode('utf-8')) + 1
+                     current_rem -= ln_bytes
+                     curr_idx += 1
+                     
+                 return curr_idx, max(0, current_rem)
+                 
+        return idx, off_in_line
+        
+    @property
+    def total_size(self) -> int:
+        """Get total size of buffer in bytes."""
+        return max(0, self._indexer._total_size + self._size_delta)
+        
+
         
     def add_observer(self, callback):
         """Add an observer to be notified of changes."""
@@ -369,6 +431,7 @@ class VirtualBuffer:
         
         if file_size == 0:
             self._lines = [""]
+            self._size_delta = 0
             self._is_modified = False # Ensure this is reset for empty files
             self._notify_observers() # Notify even for empty files
             return
@@ -389,6 +452,7 @@ class VirtualBuffer:
         # Initialize lines as lazy indices
         # This is fast: essentially a list of integers [0, 1, 2, ... N]
         self._lines = list(range(self._indexer.line_count))
+        self._size_delta = 0
         self._is_modified = False
         self._notify_observers()
     
@@ -396,6 +460,7 @@ class VirtualBuffer:
         """Load text directly into buffer."""
         self.close()
         self._lines = text.split('\n')
+        self._size_delta = len(text.encode('utf-8')) # Entire text is delta from empty/null
         self._is_modified = True
         self.syntax_engine.invalidate_from(0)
         self._notify_observers()
@@ -670,16 +735,31 @@ class VirtualBuffer:
         start_ln, start_col, end_ln, end_col = self.selection.get_bounds()
         return self.get_text_range(start_ln, start_col, end_ln, end_col)
 
-    def delete_selection(self):
+    def delete_selection(self, provided_text: Optional[str] = None):
         """Delete the currently selected text."""
         if not self.selection.has_selection():
             return
             
         start_ln, start_col, end_ln, end_col = self.selection.get_bounds()
-        self.delete(start_ln, start_col, end_ln, end_col)
+        self.delete(start_ln, start_col, end_ln, end_col, provided_text=provided_text)
         self.selection.clear()
         self.cursor_line = start_ln
         self.cursor_col = start_col
+
+    def select_all(self):
+        """Select all text in the buffer."""
+        total_lines = self.total_lines
+        if total_lines == 0:
+            return
+            
+        last_line_idx = total_lines - 1
+        last_line_len = self.get_line_length(last_line_idx)
+        
+        self.selection.set_start(0, 0)
+        self.selection.set_end(last_line_idx, last_line_len)
+        self.cursor_line = last_line_idx
+        self.cursor_col = last_line_len
+        self._notify_observers()
 
     def insert(self, line: int, col: int, text: str, _record_undo: bool = True) -> Tuple[int, int]:
         """Insert text at position."""
@@ -689,6 +769,7 @@ class VirtualBuffer:
         col = min(col, len(current_line))
         
         self.syntax_engine.invalidate_from(line)
+        self._size_delta += len(text.encode('utf-8')) # Approximate using utf-8
         
         before = current_line[:col]
         after = current_line[col:]
@@ -725,7 +806,8 @@ class VirtualBuffer:
         self.insert_text("\n")
         
     def delete(self, start_line: int, start_col: int, 
-               end_line: int, end_col: int, _record_undo: bool = True) -> str:
+               end_line: int, end_col: int, _record_undo: bool = True,
+               provided_text: Optional[str] = None) -> str:
         """Delete text in range."""
         if not self._lines: self._lines = [""]
         start_line = min(start_line, len(self._lines) - 1)
@@ -733,7 +815,12 @@ class VirtualBuffer:
         
         self.syntax_engine.invalidate_from(start_line)
         
-        deleted = self.get_text_range(start_line, start_col, end_line, end_col)
+        if provided_text is not None:
+            deleted = provided_text
+        else:
+            deleted = self.get_text_range(start_line, start_col, end_line, end_col)
+            
+        self._size_delta -= len(deleted.encode('utf-8'))
         
         if start_line == end_line:
             line = self._resolve_line(start_line)
