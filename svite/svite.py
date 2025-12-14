@@ -7,6 +7,7 @@ import datetime
 import bisect
 import re
 import json
+from enum import Enum, auto
 from virtual_buffer import VirtualBuffer
 from word_wrap import VisualLineMapper
 from syntax import SyntaxEngine, SyntaxPatterns
@@ -3826,10 +3827,8 @@ class VirtualTextView(Gtk.DrawingArea):
         return True
     def visual_byte_index(self, text, col):
         """Convert character index to byte index."""
-        b = 0
-        for ch in text[:col]:
-            b += len(ch.encode("utf-8"))
-        return b
+        # Optimization: Slicing + len(encode) is faster in Python than looping char by char
+        return len(text[:col].encode("utf-8"))
 
     def get_color_for_token(self, token_type):
         """Get color for syntax token type."""
@@ -3929,13 +3928,17 @@ class VirtualTextView(Gtk.DrawingArea):
                 
                 # Setup Segment Text and Layout
                 seg_text = line_text[seg_start:seg_end]
+                # Set text ONCE for reused layout to avoid expensive re-analysis (triples performance)
+                layout.set_text(seg_text, -1)
                 
                 # Draw Line Number (only on first segment)
                 if i == 0 and self.show_line_numbers:
                     cr.set_source_rgb(0.5, 0.5, 0.5)
                     txt = str(current_log_line + 1)
-                    ext = cr.text_extents(txt)
-                    cr.move_to(ln_width - ext.width - 5, current_y + self.line_h - 5)
+                    # Optimization: Since Font is Monospace, width is predictable
+                    # ext = cr.text_extents(txt) 
+                    width = len(txt) * self.char_width
+                    cr.move_to(ln_width - width - 5, current_y + self.line_h - 5)
                     cr.show_text(txt)
                 
                 # Calculate Selection for this segment
@@ -3987,7 +3990,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 if seg_sel_start != -1:
                     # Need precise X coordinates
                     # Create layout to measure
-                    layout.set_text(seg_text, -1)
+                    # layout.set_text(seg_text, -1) # Already set above
 
                     
                     # Pango is complex for partial measurement without attributes.
@@ -4002,7 +4005,7 @@ class VirtualTextView(Gtk.DrawingArea):
                     
                     # layout is already set with text? No set it now
                     # But we want to reuse layout for text drawing with attributes
-                    layout.set_text(seg_text, -1)
+                    # layout.set_text(seg_text, -1) # Already set above
                     line0 = layout.get_line(0)
                     if line0:
                         x1 = line0.index_to_x(idx_start, False) / Pango.SCALE
@@ -4015,7 +4018,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 # Highlight Search Matches
                 # Use bisect for efficient O(log N) lookup instead of O(N) cache
                 if self.search_matches:
-                    import bisect
+                    # Use bisect for efficient O(log N) lookup instead of O(N) cache
                     # Find matches that intersect with current_log_line
                     # search_matches is sorted by (start_line, start_col, end_line, end_col)
                     # We need to find all matches where start_line <= current_log_line <= end_line
@@ -4070,7 +4073,7 @@ class VirtualTextView(Gtk.DrawingArea):
                             e = min(match_e_col, seg_end)
                             
                             if s < e:
-                                layout.set_text(seg_text, -1)
+                                # layout.set_text(seg_text, -1) # Already set
                                 idx_start = self.visual_byte_index(seg_text, s - seg_start)
                                 idx_end = self.visual_byte_index(seg_text, e - seg_start)
                                 
@@ -4121,7 +4124,7 @@ class VirtualTextView(Gtk.DrawingArea):
 
                 
                 layout.set_attributes(attr_list)
-                layout.set_text(seg_text, -1)
+                # layout.set_text(seg_text, -1) # Already set
                 
                 # Draw Text
                 cr.move_to(base_x, current_y)
