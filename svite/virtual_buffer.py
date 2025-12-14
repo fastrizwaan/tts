@@ -1213,13 +1213,13 @@ class VirtualBuffer:
     # ==================== Search & Replace ====================
 
     def search(self, query: str, case_sensitive: bool = False, 
-               is_regex: bool = False, max_matches: int = -1) -> List[Tuple[int, int, int, int]]:
+               is_regex: bool = False, max_matches: int = -1) -> Tuple[List[Tuple[int, int, int, int]], int]:
         """
         Search for query in the entire buffer.
-        Returns list of (start_line, start_col, end_line, end_col).
+        Returns (list of (start_line, start_col, end_line, end_col), max_match_length).
         """
         if not query:
-            return []
+            return [], 0
             
         pattern = None
         if is_regex:
@@ -1227,12 +1227,13 @@ class VirtualBuffer:
                 flags = 0 if case_sensitive else re.IGNORECASE
                 pattern = re.compile(query, flags)
             except re.error:
-                return []
+                return [], 0
         else:
             if not case_sensitive:
                 query = query.lower()
         
         matches = []
+        max_len = 0
         
         # Iterate all lines (lazy)
         # Note: This forces loading of lines. For huge files, use search_viewport or async logic.
@@ -1241,22 +1242,27 @@ class VirtualBuffer:
             
             if is_regex:
                 for m in pattern.finditer(line):
+                    match_len = m.end() - m.start()
+                    if match_len > max_len: max_len = match_len
                     matches.append((ln, m.start(), ln, m.end()))
                     if max_matches > 0 and len(matches) >= max_matches:
-                        return matches
+                        return matches, max_len
             else:
                 search_line = line if case_sensitive else line.lower()
+                query_len = len(query)
+                if query_len > max_len: max_len = query_len
+                
                 start = 0
                 while True:
                     idx = search_line.find(query, start)
                     if idx == -1:
                         break
-                    matches.append((ln, idx, ln, idx + len(query)))
+                    matches.append((ln, idx, ln, idx + query_len))
                     if max_matches > 0 and len(matches) >= max_matches:
-                        return matches
+                        return matches, max_len
                     start = idx + 1
                     
-        return matches
+        return matches, max_len
 
     def begin_action(self):
         """Start a batch of undoable actions."""
@@ -1289,7 +1295,7 @@ class VirtualBuffer:
                      on_progress=None, on_complete=None, chunk_size=5000) -> Any:
         """Async search using GLib idle loop."""
         if not query:
-            if on_complete: on_complete([])
+            if on_complete: on_complete([], 0)
             return lambda: None
             
         pattern = None
@@ -1298,19 +1304,19 @@ class VirtualBuffer:
                 flags = 0 if case_sensitive else re.IGNORECASE
                 pattern = re.compile(query, flags)
             except re.error:
-                if on_complete: on_complete([])
+                if on_complete: on_complete([], 0)
                 return lambda: None
         else:
             if not case_sensitive:
                 query = query.lower()
-
         
         matches = []
+        max_len = 0
         current_ln = 0
         is_cancelled = False
         
         def process_chunk():
-            nonlocal current_ln
+            nonlocal current_ln, max_len
             if is_cancelled: return False
             
             start_time = time.time()
@@ -1331,29 +1337,33 @@ class VirtualBuffer:
                 
                 if is_regex:
                     for m in pattern.finditer(line):
+                        ml = m.end() - m.start()
+                        if ml > max_len: max_len = ml
                         matches.append((ln, m.start(), ln, m.end()))
                         if max_matches > 0 and len(matches) >= max_matches:
-                            if on_complete: on_complete(matches)
+                            if on_complete: on_complete(matches, max_len)
                             return False
                 else:
                     search_line = line if case_sensitive else line.lower()
+                    ql = len(query)
+                    if ql > max_len: max_len = ql
                     start = 0
                     while True:
                         idx = search_line.find(query, start)
                         if idx == -1: break
-                        matches.append((ln, idx, ln, idx + len(query)))
+                        matches.append((ln, idx, ln, idx + ql))
                         if max_matches > 0 and len(matches) >= max_matches:
-                            if on_complete: on_complete(matches)
+                            if on_complete: on_complete(matches, max_len)
                             return False
                         start = idx + 1
             
             current_ln += processed_count
             
             if on_progress:
-                on_progress(matches, current_ln, len(self._lines))
+                on_progress(matches, current_ln, len(self._lines), max_len)
                 
             if current_ln >= len(self._lines):
-                if on_complete: on_complete(matches)
+                if on_complete: on_complete(matches, max_len)
                 return False
                 
             return True
@@ -1372,7 +1382,7 @@ class VirtualBuffer:
                          on_complete=None, chunk_size=5000) -> Any:
         """Async search starting from specific line for progressive loading."""
         if not query:
-            if on_complete: on_complete([])
+            if on_complete: on_complete([], 0)
             return lambda: None
             
         pattern = None
@@ -1381,18 +1391,19 @@ class VirtualBuffer:
                 flags = 0 if case_sensitive else re.IGNORECASE
                 pattern = re.compile(query, flags)
             except re.error:
-                if on_complete: on_complete([])
+                if on_complete: on_complete([], 0)
                 return lambda: None
         else:
             if not case_sensitive:
                 query = query.lower()
         
         matches = []
+        max_len = 0
         current_ln = max(0, start_line)  # Start from specified line
         is_cancelled = False
         
         def process_chunk():
-            nonlocal current_ln
+            nonlocal current_ln, max_len
             if is_cancelled: return False
             
             start_time = time.time()
@@ -1411,29 +1422,33 @@ class VirtualBuffer:
                 
                 if is_regex:
                     for m in pattern.finditer(line):
+                        ml = m.end() - m.start()
+                        if ml > max_len: max_len = ml
                         matches.append((ln, m.start(), ln, m.end()))
                         if max_matches > 0 and len(matches) >= max_matches:
-                            if on_complete: on_complete(matches)
+                            if on_complete: on_complete(matches, max_len)
                             return False
                 else:
                     search_line = line if case_sensitive else line.lower()
+                    ql = len(query)
+                    if ql > max_len: max_len = ql
                     start = 0
                     while True:
                         idx = search_line.find(query, start)
                         if idx == -1: break
-                        matches.append((ln, idx, ln, idx + len(query)))
+                        matches.append((ln, idx, ln, idx + ql))
                         if max_matches > 0 and len(matches) >= max_matches:
-                            if on_complete: on_complete(matches)
+                            if on_complete: on_complete(matches, max_len)
                             return False
                         start = idx + 1
             
             current_ln += processed_count
             
             if on_progress:
-                on_progress(matches, current_ln, len(self._lines))
+                on_progress(matches, current_ln, len(self._lines), max_len)
                 
             if current_ln >= len(self._lines):
-                if on_complete: on_complete(matches)
+                if on_complete: on_complete(matches, max_len)
                 return False
                 
             return True
@@ -1447,10 +1462,10 @@ class VirtualBuffer:
         return cancel
 
     def search_viewport(self, query: str, case_sensitive: bool, is_regex: bool,
-                        start_line: int, end_line: int, max_matches: int = -1) -> List[Tuple[int, int, int, int]]:
-        """Search only within a specific range of lines."""
+                        start_line: int, end_line: int, max_matches: int = -1) -> Tuple[List[Tuple[int, int, int, int]], int]:
+        """Search only within a specific range of lines. Returns (matches, max_len)."""
         if not query:
-            return []
+            return [], 0
             
         pattern = None
         if is_regex:
@@ -1458,12 +1473,13 @@ class VirtualBuffer:
                 flags = 0 if case_sensitive else re.IGNORECASE
                 pattern = re.compile(query, flags)
             except re.error:
-                return []
+                return [], 0
         else:
             if not case_sensitive:
                 query = query.lower()
         
         matches = []
+        max_len = 0
         start_line = max(0, start_line)
         end_line = min(len(self._lines), end_line)
         
@@ -1472,22 +1488,28 @@ class VirtualBuffer:
             
             if is_regex:
                 for m in pattern.finditer(line):
+                    ml = m.end() - m.start()
+                    if ml > max_len: max_len = ml
                     matches.append((ln, m.start(), ln, m.end()))
                     if max_matches > 0 and len(matches) >= max_matches:
-                        return matches
+                        return matches, max_len
             else:
                 search_line = line if case_sensitive else line.lower()
+                ql = len(query)
+                if ql > max_len: max_len = ql
                 start = 0
                 while True:
                     idx = search_line.find(query, start)
                     if idx == -1:
                         break
-                    matches.append((ln, idx, ln, idx + len(query)))
+                    matches.append((ln, idx, ln, idx + ql))
                     if max_matches > 0 and len(matches) >= max_matches:
-                        return matches
+                        return matches, max_len
                     start = idx + 1
                     
-        return matches
+        return matches, max_len
+
+
 
     def replace_all(self, query: str, replacement: str, 
                     case_sensitive: bool = False, is_regex: bool = False) -> int:

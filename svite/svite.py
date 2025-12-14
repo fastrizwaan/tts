@@ -1352,9 +1352,13 @@ class VirtualTextView(Gtk.DrawingArea):
         # Connect to size changes to update scrollbars
         self.connect('resize', self.on_resize)
 
-    def set_search_results(self, matches):
+    def set_search_results(self, matches, max_match_length=0, preserve_current=False):
         """Update search results."""
+        old_idx = self.current_match_idx
+        old_match = self.current_match
+        
         self.search_matches = matches
+        self.max_match_length = max_match_length
         self.current_match_idx = -1
         self.current_match = None
         
@@ -1367,6 +1371,16 @@ class VirtualTextView(Gtk.DrawingArea):
         if not matches:
             self.queue_draw()
             return
+
+        # Try to preserve current match if requested
+        if preserve_current and old_match is not None:
+            # Check if old index is valid in new list and matches old match
+            if 0 <= old_idx < len(matches):
+                if matches[old_idx] == old_match:
+                    self.current_match_idx = old_idx
+                    self.current_match = old_match
+                    self.queue_draw()
+                    return
 
         # Note: We skip the O(N) cache build loop here.
         # This prevents locking the UI when 'Find' completes on a massive file.
@@ -1432,7 +1446,29 @@ class VirtualTextView(Gtk.DrawingArea):
                 else:
                     rows_left = rows_above - self.scroll_visual_offset
                     self.scroll_visual_offset = 0
-                    self.scroll_line = max(0, self.scroll_line - (rows_left // 1)) # Assume 1 visual line per logical line for backtrack
+                    
+                    # Accurate backtracking loop to center the match
+                    # We need to backtrack 'rows_left' visual lines from the start of 's_ln'
+                    prev = s_ln - 1
+                    while prev >= 0 and rows_left > 0:
+                        # Get visual height of previous line
+                        h_p = self.mapper.get_visual_line_count(prev)
+                        
+                        if h_p > rows_left:
+                            # Previous line is taller than needed. 
+                            # We can stop here and show the bottom part of 'prev'
+                            self.scroll_line = prev
+                            self.scroll_visual_offset = max(0, h_p - rows_left)
+                            rows_left = 0
+                        else:
+                            # Previous line fits fully/partially within the space we need to fill
+                            rows_left -= h_p
+                            self.scroll_line = prev
+                            prev -= 1
+                    
+                    # If we ran out of lines (prev < 0) but still have rows_left, 
+                    # we are at the top of the file, so just stay at 0,0 (already set by loop logic effectively)
+
         else:
             # Logical lines
             visible_lines = max(1, self.get_height() // self.line_h)
@@ -1525,6 +1561,8 @@ class VirtualTextView(Gtk.DrawingArea):
                              self.scroll_visual_offset = abs(needed)
                         
                     self.scroll_line_frac = 0.0
+                    if self.on_scroll_callback:
+                        self.on_scroll_callback()
                     self.queue_draw()
                     return
 
@@ -1536,6 +1574,8 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.scroll_visual_offset = 0
                 self.scroll_line_frac = 0.0
                 
+                if self.on_scroll_callback:
+                    self.on_scroll_callback()
                 self.queue_draw()
                 return
 
@@ -1572,6 +1612,8 @@ class VirtualTextView(Gtk.DrawingArea):
                     if self.scroll_line_frac < 0: self.scroll_line_frac = 0.0
                     if self.scroll_line_frac >= 1.0: self.scroll_line_frac = 0.99
                     
+                    if self.on_scroll_callback:
+                        self.on_scroll_callback()
                     self.queue_draw()
                     return
                 
@@ -1643,6 +1685,8 @@ class VirtualTextView(Gtk.DrawingArea):
                      self.scroll_visual_offset = abs(needed)
             
             self.scroll_line_frac = 0.0
+            if self.on_scroll_callback:
+                self.on_scroll_callback()
             self.queue_draw()
         else:
             # No word wrap: Direct line scrolling with fractional position for smoothness
@@ -1662,6 +1706,8 @@ class VirtualTextView(Gtk.DrawingArea):
             if self.scroll_line_frac >= 1.0:
                 self.scroll_line_frac = 0.99
                 
+            if self.on_scroll_callback:
+                self.on_scroll_callback()
             self.queue_draw()
     
     def on_hadj_changed(self, adj):
@@ -4147,80 +4193,79 @@ class VirtualTextView(Gtk.DrawingArea):
                         cr.rectangle(base_x + min(x1,x2), current_y, abs(x2-x1), self.line_h)
                         cr.fill()
 
-                # Highlight Search Matches
-                # Use bisect for efficient O(log N) lookup instead of O(N) cache
-                if self.search_matches:
-                    # Use bisect for efficient O(log N) lookup instead of O(N) cache
-                    # Find matches that intersect with current_log_line
-                    # search_matches is sorted by (start_line, start_col, end_line, end_col)
-                    # We need to find all matches where start_line <= current_log_line <= end_line
+                # --- Draw Search Highlights ---
+                # OPTIMIZED for performance with huge number of matches (10M+)
+                # We use bisect to find the starting match that might overlap this segment
+                # and stop as soon as we pass the segment.
+                if self.search_matches and self.max_match_length > 0:
+                    # Find potentially relevant matches using bisect on start position
+                    # We need to look back 'max_match_length' characters to catch matches 
+                    # that start before this chunk but extend into it.
                     
-                    # Binary search for first match that could intersect
-                    # A match (s_ln, s_col, e_ln, e_col) intersects if s_ln <= current_log_line <= e_ln
+                    # Search key: (line, col, 0, 0)
+                    # We query for (current_log_line, max(0, seg_start - max_len), ...)
+                    search_start_col = max(0, seg_start - self.max_match_length)
+                    idx = bisect.bisect_left(self.search_matches, (current_log_line, search_start_col, 0, 0))
                     
-                    # Find first match where start_line <= current_log_line
-                    # Since we can't easily bisect on end_line, we'll use a simple approach:
-                    # Find first match with start_line == current_log_line, then scan backwards/forwards
-                    
-                    # For performance, we use a key function for bisect
-                    # bisect_left with key=(start_line,) to find matches starting at or before current_log_line
-                    
-                    # Actually, for simplicity and correctness, iterate matches near current line
-                    # Most efficient: binary search to find start index, then linear scan until no longer relevant
-                    idx = bisect.bisect_left(self.search_matches, (current_log_line, 0, 0, 0))
-                    
-                    # Scan backwards to catch multi-line matches that started earlier
-                    start_idx = max(0, idx - 50)  # Look back up to 50 matches for multi-line
-                    
-                    # Scan forward from start_idx while matches could intersect current_log_line
-                    for i in range(start_idx, len(self.search_matches)):
+                    # Iterate from found index
+                    for i in range(idx, len(self.search_matches)):
                         match = self.search_matches[i]
-                        if len(match) == 5:
-                            s_ln, s_col, e_ln, e_col, text = match
+                        if len(match) == 6: # regex group support (ln, s, ln, e, group, text)
+                             s_ln, s_col, e_ln, e_col, _, _ = match
+                        elif len(match) == 5:
+                             s_ln, s_col, e_ln, e_col, _ = match
                         else:
-                            s_ln, s_col, e_ln, e_col = match
+                             s_ln, s_col, e_ln, e_col = match
                         
-                        # If match starts after current line, we're done
+                        # Stop if we went past the current line
                         if s_ln > current_log_line:
                             break
                         
-                        # Check if match intersects current_log_line
+                        # Stop if match starts after this segment ends (since sorted by start)
+                        # Note: We need to check line equality first (handled by break above)
+                        if s_ln == current_log_line and s_col >= seg_end:
+                             break
+
+                        # Check intersection
+                        # Only single-line matches supported for highlighting in this view logic for now
                         if s_ln <= current_log_line <= e_ln:
-                            # Determine column range for this line
-                            if s_ln == e_ln:
-                                # Single-line match
-                                match_s_col, match_e_col = s_col, e_col
-                            elif current_log_line == s_ln:
-                                # First line of multi-line match
-                                match_s_col, match_e_col = s_col, 1000000
-                            elif current_log_line == e_ln:
-                                # Last line of multi-line match
-                                match_s_col, match_e_col = 0, e_col
-                            else:
-                                # Middle line of multi-line match
-                                match_s_col, match_e_col = 0, 1000000
+                            # Determine intersection with current segment [seg_start, seg_end)
+                            # Match range on this line: [match_s, match_e)
                             
-                            # Intersect with segment
-                            s = max(match_s_col, seg_start)
-                            e = min(match_e_col, seg_end)
+                            match_s_col = s_col if s_ln == current_log_line else 0
+                            match_e_col = e_col if e_ln == current_log_line else len(seg_text) + seg_start # approx end of line
                             
-                            if s < e:
-                                # layout.set_text(seg_text, -1) # Already set
-                                idx_start = self.visual_byte_index(seg_text, s - seg_start)
-                                idx_end = self.visual_byte_index(seg_text, e - seg_start)
+                            # Intersect [match_s_col, match_e_col) with [seg_start, seg_end)
+                            inter_s = max(match_s_col, seg_start)
+                            inter_e = min(match_e_col, seg_end)
+                            
+                            if inter_s < inter_e:
+                                # Draw Highlight
+                                rel_s = inter_s - seg_start
+                                rel_e = inter_e - seg_start
                                 
-                                line0 = layout.get_line(0)
-                                if line0:
-                                    x1 = line0.index_to_x(idx_start, False) / Pango.SCALE
-                                    x2 = line0.index_to_x(idx_end, False) / Pango.SCALE
+                                # Convert to pixel coordinates
+                                try:
+                                    # We need pixel positions for start and end of highlight
+                                    b_start = self.visual_byte_index(seg_text, rel_s)
+                                    b_end = self.visual_byte_index(seg_text, rel_e)
                                     
-                                    # Yellow Highlight
-                                    cr.set_source_rgba(1.0, 1.0, 0.0, 0.4) 
-                                    cr.rectangle(base_x + min(x1,x2), current_y, abs(x2-x1), self.line_h)
-                                    cr.fill()
-
-
-                # Highlight Current Line Background
+                                    pos_s = layout.get_cursor_pos(b_start)[0]
+                                    pos_e = layout.get_cursor_pos(b_end)[0]
+                                    
+                                    x1 = base_x + pos_s.x / Pango.SCALE
+                                    x2 = base_x + pos_e.x / Pango.SCALE
+                                    
+                                    # If width is 0 (e.g. empty match?), skip
+                                    if x2 > x1:
+                                        cr.set_source_rgba(1.0, 1.0, 0.0, 0.4) # Yellow semi-transparent
+                                        if self.current_match_idx == i:
+                                            cr.set_source_rgba(1.0, 0.5, 0.0, 0.6) # Orange for current
+                                            
+                                        cr.rectangle(x1, current_y, x2 - x1, self.line_h)
+                                        cr.fill()
+                                except Exception:
+                                    pass
                 if self.highlight_current_line and current_log_line == self.buf.cursor_line and not self.buf.selection.has_selection():
                     cr.set_source_rgba(1.0, 1.0, 1.0, 0.05)
                     cr.rectangle(ln_width, current_y, viewport_w, self.line_h)
@@ -5464,23 +5509,25 @@ class FindReplaceBar(Gtk.Box):
         
         # For small files (<50k lines), use synchronous search
         if total_lines < 50000:
-            matches = self.editor.buf.search(query, case_sensitive, is_regex, max_matches=5000)
-            self.editor.view.set_search_results(matches)
+            matches, max_len = self.editor.buf.search(query, case_sensitive, is_regex, max_matches=-1)
+            self.editor.view.set_search_results(matches, max_len)
             self.update_match_label()
             return False
             
-        # For medium files (50k-500k), use async search
-        if total_lines < 500000:
-            def on_progress(matches, lines_searched, total):
-                self.editor.view.set_search_results(matches)
+        # For medium files (50k-100M), use async search
+        if total_lines < 100000000:
+            def on_progress(matches, lines_searched, total, max_len):
+                self.editor.view.set_search_results(matches, max_len, preserve_current=True)
+                self.update_match_label()
             
-            def on_complete(matches):
+            def on_complete(matches, max_len):
                 self._cancel_search = None
-                self.editor.view.set_search_results(matches)
+                self.editor.view.set_search_results(matches, max_len, preserve_current=True)
+                self.update_match_label()
             
             self._cancel_search = self.editor.buf.search_async(
                 query, case_sensitive, is_regex, 
-                max_matches=5000,
+                max_matches=-1,
                 on_progress=on_progress,
                 on_complete=on_complete,
                 chunk_size=20000
@@ -5495,8 +5542,8 @@ class FindReplaceBar(Gtk.Box):
     
     def _on_editor_scrolled(self):
         """Called when editor scrolls - refresh viewport matches for huge files."""
-        # Only refresh for huge files (>500k lines)
-        if self.editor.buf.total() < 500000:
+        # Only refresh for huge files (>100M lines)
+        if self.editor.buf.total() < 100000000:
             return
             
         # Debounce scroll refresh
@@ -5521,14 +5568,14 @@ class FindReplaceBar(Gtk.Box):
         end_line = min(self.editor.buf.total() - 1, 
                        self.editor.view.scroll_line + visible_lines * 2)
         
-        matches = self.editor.buf.search_viewport(
+        matches, max_len = self.editor.buf.search_viewport(
             self._current_search_query,
             self._current_search_case,
             self._current_search_regex,
             start_line, end_line,
-            max_matches=500  # Limit for viewport
+            max_matches=-1  # Limit for viewport
         )
-        self.editor.view.set_search_results(matches)
+        self.editor.view.set_search_results(matches, max_len)
 
 
     def on_find_next(self, *args):
@@ -5689,18 +5736,20 @@ class FindReplaceBar(Gtk.Box):
             return
         
         # Continue search from last position
-        def on_progress(new_matches, lines_searched, total):
+        def on_progress(new_matches, lines_searched, total, new_max_len):
             # Append new matches to existing
             current_matches = self.editor.view.search_matches or []
             combined = current_matches + new_matches
-            self.editor.view.set_search_results(combined)
+            combined_max_len = max(self.editor.view.max_match_length, new_max_len)
+            self.editor.view.set_search_results(combined, combined_max_len, preserve_current=True)
             self._search_last_line = lines_searched
             self.update_match_label()
         
-        def on_complete(new_matches):
+        def on_complete(new_matches, new_max_len):
             current_matches = self.editor.view.search_matches or []
             combined = current_matches + new_matches
-            self.editor.view.set_search_results(combined)
+            combined_max_len = max(self.editor.view.max_match_length, new_max_len)
+            self.editor.view.set_search_results(combined, combined_max_len, preserve_current=True)
             
             # Check if we reached end of file
             if self._search_last_line >= total_lines:
@@ -5714,7 +5763,7 @@ class FindReplaceBar(Gtk.Box):
         self._cancel_search = self.editor.buf.search_async_from(
             query, case_sensitive, is_regex,
             start_line=self._search_last_line,
-            max_matches=5000,
+            max_matches=-1,
             on_progress=on_progress,
             on_complete=on_complete,
             chunk_size=20000
