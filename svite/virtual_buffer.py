@@ -8,6 +8,7 @@ This module provides:
 
 import mmap
 import os
+from array import array
 from functools import lru_cache
 from dataclasses import dataclass
 from typing import Any, List, Tuple, Optional
@@ -34,16 +35,35 @@ class LineIndexer:
     """
     
     def __init__(self):
-        self._offsets: List[int] = [0]  # Start of each line
-        self._lengths: List[int] = []   # Length of each line (without newline)
+        # Use array.array for memory efficiency:
+        # - Python list: ~28 bytes per int
+        # - array.array('Q'): 8 bytes per unsigned long long
+        # For 127M lines: saves ~5GB of RAM!
+        self._offsets = array('Q', [0])  # Start of each line
+        self._lengths = array('Q')        # Length of each line (without newline)
         self._total_size: int = 0
+        self._implicit_lengths: bool = False
+        self._newline_len: int = 1
     
+    def use_implicit_lengths(self, newline_len: int = 1):
+        """Enable memory saving mode: calculate lengths from offsets on fly."""
+        self._implicit_lengths = True
+        self._newline_len = newline_len
+        self._lengths = array('Q') # Clear lengths
+        
+    def build_from_arrays(self, offsets: array, total_size: int, newline_len: int = 1):
+        """Fast load from existing offets array (avoids re-scanning)."""
+        self._offsets = offsets
+        self._total_size = total_size
+        self.use_implicit_lengths(newline_len)
+
     def build_from_file(self, filepath: str, encoding: str = 'utf-8') -> None:
         """Build line index from a file using mmap for efficiency."""
         file_size = os.path.getsize(filepath)
         self._total_size = file_size
-        self._offsets = [0]
-        self._lengths = []
+        self._offsets = array('Q', [0])
+        self._lengths = array('Q')
+        self._implicit_lengths = False # Reset
         
         if file_size == 0:
             self._lengths.append(0)
@@ -76,6 +96,9 @@ class LineIndexer:
                     elif enc_lower == 'utf-16be':
                         newline_seq = b'\x00\n'
                     # else 'utf-16le' or 'utf-16' default -> LE (most common on Windows/Linux for this)
+        
+        # Save newline len for implicit mode later if needed
+        newline_len = len(newline_seq)
 
         with open(filepath, 'rb') as f:
             with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
@@ -112,8 +135,9 @@ class LineIndexer:
         """Build line index from in-memory text."""
         encoded = text.encode('utf-8')
         self._total_size = len(encoded)
-        self._offsets = [0]
-        self._lengths = []
+        self._offsets = array('Q', [0])
+        self._lengths = array('Q')
+        self._implicit_lengths = False
         
         if len(encoded) == 0:
             self._lengths.append(0)
@@ -139,15 +163,24 @@ class LineIndexer:
     @property
     def line_count(self) -> int:
         """Total number of lines."""
-        return len(self._lengths)
+        return len(self._offsets)
     
     def get_line_info(self, line_num: int) -> Optional[LineInfo]:
         """Get offset and length for a line (0-indexed)."""
         if 0 <= line_num < len(self._offsets):
-            return LineInfo(
-                offset=self._offsets[line_num],
-                length=self._lengths[line_num] if line_num < len(self._lengths) else 0
-            )
+            offset = self._offsets[line_num]
+            
+            if self._implicit_lengths:
+                # Calculate length on the fly
+                if line_num < len(self._offsets) - 1:
+                    next_off = self._offsets[line_num + 1]
+                    length = max(0, next_off - offset - self._newline_len)
+                else:
+                    length = max(0, self._total_size - offset)
+            else:
+                length = self._lengths[line_num] if line_num < len(self._lengths) else 0
+                
+            return LineInfo(offset=offset, length=length)
         return None
     
     
@@ -196,8 +229,9 @@ class LineIndexer:
                 remaining = old_length - col
                 
                 self._lengths[line_num] = new_lengths[0] if new_lengths else col
-                self._offsets = self._offsets[:line_num + 1] + new_offsets + self._offsets[line_num + 1:]
-                self._lengths = self._lengths[:line_num + 1] + new_lengths[1:-1] + [new_lengths[-1] + remaining] + self._lengths[line_num + 1:]
+                # Convert to array for concatenation
+                self._offsets = self._offsets[:line_num + 1] + array('Q', new_offsets) + self._offsets[line_num + 1:]
+                self._lengths = self._lengths[:line_num + 1] + array('Q', new_lengths[1:-1]) + array('Q', [new_lengths[-1] + remaining]) + self._lengths[line_num + 1:]
         else:
             # Single line insert - just update length
             if line_num < len(self._lengths):
@@ -338,7 +372,15 @@ class VirtualBuffer:
         self._indexer = LineIndexer()
         self.syntax_engine = SyntaxEngine()
         self.syntax_engine.set_text_provider(self.get_line)
-        self._lines: List[Any] = [""]  # List of str or int
+        
+        # Memory optimized line mapping:
+        # _lines is array('q') (signed 8-byte int)
+        # - Values >= 0: Index into original file (via indexer)
+        # - Values < 0: Index into _modified_cache (bitwise NOT, so -1 -> 0, -2 -> 1)
+        self._lines = array('q', [0]) 
+        self._modified_cache: Dict[int, str] = {}
+        self._next_mod_id = 1
+        
         self._is_modified: bool = False
         self._observers = []
         self.selection = Selection()
@@ -356,9 +398,30 @@ class VirtualBuffer:
             if self._suppress_notifications == 0:
                 self._notify_observers()
 
+    @property
+    def total_size(self) -> int:
+        """Total estimate size in bytes."""
+        base = 0
+        if self._mmap: base = self._mmap.size()
+        return base + self._size_delta
+
     def get_line_info(self, line: int):
-        """Delegate to indexer."""
-        return self._indexer.get_line_info(line)
+        """Get line info, respecting the virtual map."""
+        # 1. Resolve logical line to item
+        if self._lines is None:
+            # Identity map
+            item = line
+        else:
+            if line < 0 or line >= len(self._lines):
+                return None
+            item = self._lines[line]
+            
+        # 2. If item is index into file, get info
+        if item >= 0:
+            return self._indexer.get_line_info(item)
+            
+        # 3. If modified (negative), we don't have file offset
+        return None
 
     def get_line_at_offset(self, offset: int):
         """
@@ -422,6 +485,49 @@ class VirtualBuffer:
             except Exception as e:
                 print(f"Error in observer callback: {e}")
     
+    def load_from_indexed_file(self, idx_file) -> None:
+        """Load optimized from pre-indexed file object (avoids double indexing)."""
+        self.close()
+        
+        filepath = idx_file.path
+        self._filepath = filepath
+        
+        if idx_file.is_empty:
+             self.load_file(filepath)
+             return
+             
+        # Steal index data
+        # Note: idx_file.index is array('Q') of offsets
+        self._indexer.build_from_arrays(
+            offsets=idx_file.index, 
+            total_size=os.path.getsize(filepath),
+            newline_len=1 # Assume 1 for now, or detect
+        )
+        
+        self.current_encoding = idx_file.encoding
+        self._file = open(filepath, 'rb')
+        self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
+        
+        # Initialize identity mapping
+        # Create array 0..N-1
+        cnt = self._indexer.line_count
+        self._lines = array('q')
+        
+        # Fast initialization using extend for range
+        # Note: range(127M) -> list -> extend is slow/heavy
+        # array('q', range(N)) is better but still iterates
+        # We can do this in blocks if N is huge?
+        # Or just array('q', range(cnt)) is standard python valid way
+        cnt = len(idx_file.index)
+        # Optimization: Don't create the huge _lines array yet!
+        # use Lazy Identity Map. _lines = None implies map[i] == i.
+        self._lines = None
+        
+        self._modified_cache = {}
+        self._size_delta = 0
+        self._is_modified = False
+        self._notify_observers()
+
     def load_file(self, filepath: str, encoding: Optional[str] = None) -> None:
         """Load a file using lazy index."""
         self.close()
@@ -430,16 +536,16 @@ class VirtualBuffer:
         file_size = os.path.getsize(filepath)
         
         if file_size == 0:
-            self._lines = [""]
+            self._lines = array('q', [-1]) # Use modified cache for empty?
+            self._modified_cache = {0: ""}
             self._size_delta = 0
-            self._is_modified = False # Ensure this is reset for empty files
-            self._notify_observers() # Notify even for empty files
+            self._is_modified = False 
+            self._notify_observers()
             return
         
         # Build line index (fast scan)
         self._indexer.build_from_file(filepath, encoding=encoding)
-        self._lines = [] # Clear cached lines
-        self.syntax_engine.invalidate_from(0)
+        # self._lines = [] # Clear cached lines - handled by init
         
         # Open mmap for random access with detected encoding
         if encoding:
@@ -450,8 +556,13 @@ class VirtualBuffer:
         self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
         
         # Initialize lines as lazy indices
-        # This is fast: essentially a list of integers [0, 1, 2, ... N]
-        self._lines = list(range(self._indexer.line_count))
+        cnt = self._indexer.line_count
+        self._lines = None # Lazy identity map
+        
+        # Don't create array here - wait for insert/delete
+        # if cnt > 1000000: ... loop removed ...
+
+        self._modified_cache = {}
         self._size_delta = 0
         self._is_modified = False
         self._notify_observers()
@@ -459,8 +570,22 @@ class VirtualBuffer:
     def load_text(self, text: str) -> None:
         """Load text directly into buffer."""
         self.close()
-        self._lines = text.split('\n')
-        self._size_delta = len(text.encode('utf-8')) # Entire text is delta from empty/null
+        lines = text.split('\n')
+        self._size_delta = len(text.encode('utf-8'))
+        
+        # All lines are "modified" (memory residents)
+        self._lines = array('q') # This should be populated with negative indices
+        self._modified_cache = {}
+        self._next_mod_id = 1      # Populate cache and negative indices
+        mod_ids = []
+        for i, line in enumerate(lines):
+            mod_id = - (i + 1)
+            self._modified_cache[~mod_id] = line # Bitwise not to map -1 -> 0
+            mod_ids.append(mod_id)
+            
+        self._lines.extend(mod_ids)
+        self._next_mod_id = len(lines) + 1
+        
         self._is_modified = True
         self.syntax_engine.invalidate_from(0)
         self._notify_observers()
@@ -482,12 +607,16 @@ class VirtualBuffer:
     @property
     def total_lines(self) -> int:
         """Total number of lines in the buffer."""
+        if self._lines is None:
+             if self._indexer and self._indexer._offsets:
+                 return len(self._indexer._offsets)
+             return 0
         return len(self._lines)
         
     # Compatibility shim for legacy code
     def total(self) -> int:
         """Alias for total_lines (legacy compatibility)."""
-        return len(self._lines)
+        return self.total_lines
         
     # Cursor state management (simple implementation directly on buffer for now)
     @property
@@ -522,6 +651,11 @@ class VirtualBuffer:
         
     def load(self, source, emit_changed=True):
         """Compatibility shim for load."""
+        # Detect if source is an IndexedFile (has index array)
+        if hasattr(source, 'index') and hasattr(source, 'encoding') and hasattr(source, 'path'):
+            self.load_from_indexed_file(source)
+            return
+
         path = source
         encoding = None
         if hasattr(source, 'path'):
@@ -569,40 +703,58 @@ class VirtualBuffer:
     def _resolve_line(self, line_idx: int) -> str:
         """
         Internal: Resolve a line content.
-        If it's an int, load from mmap and cache it as str.
+        If _lines is None (identity map), item = line_idx.
         """
-        item = self._lines[line_idx]
-        if isinstance(item, int):
-            # It's a lazy index
-            if self._mmap:
-                info = self._indexer.get_line_info(item)
-                if info:
-                    self._mmap.seek(info.offset)
-                    data = self._mmap.read(info.length)
-                    encoding = getattr(self, 'current_encoding', 'utf-8')
-                    try:
-                        text = data.decode(encoding)
-                    except UnicodeDecodeError:
-                        text = data.decode(encoding, errors='replace')
-                    
-                    # Cache it (replace int with str in list)
-                    self._lines[line_idx] = text
-                    return text
-            return "" # Error fallback
-        return item
-    
+        if self._lines is None:
+             item = line_idx
+        else:
+             item = self._lines[line_idx]
+             
+        if item >= 0:
+             # It's a lazy index into file
+             if self._mmap:
+                 info = self._indexer.get_line_info(item)
+                 if info:
+                     self._mmap.seek(info.offset)
+                     data = self._mmap.read(info.length)
+                     encoding = getattr(self, 'current_encoding', 'utf-8')
+                     try:
+                         text = data.decode(encoding)
+                     except UnicodeDecodeError:
+                         text = data.decode(encoding, errors='replace')
+                     return text
+             return "" 
+        else:
+             cache_idx = ~item
+             return self._modified_cache.get(cache_idx, "")
+             
     def get_line(self, line_num: int) -> str:
         """Get content of a specific line (0-indexed)."""
-        if line_num < 0 or line_num >= len(self._lines):
-            return ""
+        if self._lines is None:
+             cnt = 0
+             if self._indexer and self._indexer._offsets:
+                 cnt = len(self._indexer._offsets)
+             if line_num < 0 or line_num >= cnt:
+                 return ""
+        else:
+             if line_num < 0 or line_num >= len(self._lines):
+                 return ""
         return self._resolve_line(line_num)
-    
+        
     def get_lines(self, start_line: int, count: int) -> List[str]:
         """Get multiple consecutive lines efficiently."""
         result = []
-        end_line = min(start_line + count, len(self._lines))
+        # Calculate limit
+        if self._lines is None:
+             limit = 0
+             if self._indexer and self._indexer._offsets:
+                 limit = len(self._indexer._offsets)
+        else:
+             limit = len(self._lines)
+             
+        end_line = min(start_line + count, limit)
         for i in range(start_line, end_line):
-            result.append(self.get_line(i))
+           result.append(self.get_line(i))
         return result
     
     def get_line_length(self, line_num: int) -> int:
@@ -706,7 +858,7 @@ class VirtualBuffer:
     def get_text(self) -> str:
         """Get full text content."""
         # Force resolve all
-        return '\n'.join([self.get_line(i) for i in range(len(self._lines))])
+        return '\n'.join([self.get_line(i) for i in range(self.total_lines)])
     
     def get_text_range(self, start_line: int, start_col: int, 
                        end_line: int, end_col: int) -> str:
@@ -761,9 +913,25 @@ class VirtualBuffer:
         self.cursor_col = last_line_len
         self._notify_observers()
 
+    def _register_modified_line(self, content: str) -> int:
+        """Helper to register a new modified line content and get its ID."""
+        mod_id = - (self._next_mod_id)
+        self._next_mod_id += 1
+        # Map -1 to 0, -2 to 1, etc using bitwise NOT (~)
+        # -1 = ~0, -2 = ~1
+        cache_idx = ~mod_id
+        self._modified_cache[cache_idx] = content
+        return mod_id
+
     def insert(self, line: int, col: int, text: str, _record_undo: bool = True) -> Tuple[int, int]:
         """Insert text at position."""
-        if not self._lines: self._lines = [""]
+        if self._lines is None:
+            # Lazy materialization on first edit!
+            cnt = 0
+            if self._indexer and self._indexer._offsets:
+                 cnt = len(self._indexer._offsets)
+            self._lines = array('q', range(cnt))
+            
         line = min(line, len(self._lines) - 1)
         current_line = self._resolve_line(line)
         col = min(col, len(current_line))
@@ -777,15 +945,33 @@ class VirtualBuffer:
         insert_lines = text.split('\n')
         
         if len(insert_lines) == 1:
-            self._lines[line] = before + text + after
+            # Single line modification
+            new_content = before + text + after
+            mod_id = self._register_modified_line(new_content)
+            self._lines[line] = mod_id
+            
             end_line = line
             end_col = col + len(text)
         else:
+            # Multi-line insertion
             first_part = before + insert_lines[0]
             last_part = insert_lines[-1] + after
             
-            replacement = [first_part] + insert_lines[1:-1] + [last_part]
-            self._lines[line:line+1] = replacement
+            # Create new line IDs
+            new_ids = array('q')
+            
+            # First line (replacement)
+            new_ids.append(self._register_modified_line(first_part))
+            
+            # Middle lines
+            for mid_line in insert_lines[1:-1]:
+                new_ids.append(self._register_modified_line(mid_line))
+                
+            # Last line
+            new_ids.append(self._register_modified_line(last_part))
+            
+            # Splice into array
+            self._lines[line:line+1] = new_ids
             
             end_line = line + len(insert_lines) - 1
             end_col = len(insert_lines[-1])
@@ -799,20 +985,27 @@ class VirtualBuffer:
             cmd.end_position = Position(end_line, end_col)
             self._view.undo_manager.push(cmd)
             
-        return (end_line, end_col)
-
+        # Update cursor position to end of insertion
+        self.cursor_line = end_line
+        self.cursor_col = end_col
+            
+        return end_line, end_col
+        
     def insert_newline(self):
-        """Compatibility shim for insert_newline."""
-        self.insert_text("\n")
+        """Insert a newline at cursor position."""
+        self.insert(self.cursor_line, self.cursor_col, "\n")
         
-    def delete(self, start_line: int, start_col: int, 
-               end_line: int, end_col: int, _record_undo: bool = True,
-               provided_text: Optional[str] = None) -> str:
+    def delete(self, start_line: int, start_col: int, end_line: int, end_col: int, provided_text: Optional[str] = None, _record_undo: bool = True):
         """Delete text in range."""
-        if not self._lines: self._lines = [""]
-        start_line = min(start_line, len(self._lines) - 1)
-        end_line = min(end_line, len(self._lines) - 1)
-        
+        if self._lines is None:
+            # Lazy materialization
+            cnt = 0
+            if self._indexer and self._indexer._offsets:
+                 cnt = len(self._indexer._offsets)
+            self._lines = array('q', range(cnt))
+            
+        if start_line > end_line or (start_line == end_line and start_col >= end_col):
+            return
         self.syntax_engine.invalidate_from(start_line)
         
         if provided_text is not None:
@@ -824,7 +1017,9 @@ class VirtualBuffer:
         
         if start_line == end_line:
             line = self._resolve_line(start_line)
-            self._lines[start_line] = line[:start_col] + line[end_col:]
+            new_content = line[:start_col] + line[end_col:]
+            mod_id = self._register_modified_line(new_content)
+            self._lines[start_line] = mod_id
         else:
             first_line = self._resolve_line(start_line)
             last_line = self._resolve_line(end_line)
@@ -832,7 +1027,11 @@ class VirtualBuffer:
             first_kept = first_line[:start_col]
             last_kept = last_line[end_col:]
             
-            self._lines[start_line] = first_kept + last_kept
+            new_content = first_kept + last_kept
+            mod_id = self._register_modified_line(new_content)
+            
+            # Replace start_line with fused content, remove intermediate lines
+            self._lines[start_line] = mod_id
             del self._lines[start_line + 1:end_line + 1]
             
         self._is_modified = True

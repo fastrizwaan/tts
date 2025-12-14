@@ -1452,84 +1452,114 @@ class VirtualTextView(Gtk.DrawingArea):
         GLib.idle_add(self.update_scrollbar)
 
     def on_vadj_changed(self, adj):
-        """Handle scrollbar value change."""
+        """Handle scrollbar value change with smooth fractional scrolling."""
         # Avoid recursive updates during scrollbar update
         if self.scroll_update_pending:
             return
 
         val = adj.get_value()
         
-        # Scrollbar uses 10x resolution for smoothness
+        # Scrollbar resolution for smoothness
         scroll_resolution = 1.0 # Should match update_scrollbar
         
         if self.mapper.enabled:
-            # Map visual scroll value to logical line + visual offset
+            # Word wrap mode: Map scrollbar position to visual lines with smooth fractional offsets
             total_vis = self.mapper.get_total_visual_lines()
-            if total_vis <= 0: return
+            if total_vis <= 0: 
+                return
             
-            total_bytes = 1
-            if hasattr(self.buf, 'total_size'):
-                 total_bytes = max(1, self.buf.total_size)
-            
-            # 1. Determine Target Byte
+            # Get scrollbar parameters
             actual_val = val / scroll_resolution
-            
-            # Use upper - page_size for full range mapping
             upper = adj.get_upper() / scroll_resolution
             page_size = adj.get_page_size() / scroll_resolution
             max_scroll = max(1.0, upper - page_size)
             
-            # Ratio of scrollable area
-            ratio = min(1.0, actual_val / max_scroll)
-            target_byte = int(ratio * total_bytes)
+            # Calculate target visual line position (with fractional part for smoothness)
+            # This gives us a continuous float value representing visual line position
+            ratio = min(1.0, actual_val / max_scroll) if max_scroll > 0 else 0.0
+            target_visual_line = ratio * max(0, total_vis - 1)
             
-            # Find logical line containing this byte
-            target_log, byte_offset_in_line = self.buf.get_line_at_offset(target_byte)
-            self.scroll_line = int(target_log)
-            self.scroll_line = max(0, min(self.scroll_line, self.buf.total() - 1))
+            total_lines = self.buf.total()
             
-            # 2. Estimate Visual Offset from remaining bytes
-            # vis_lines = byte_offset_in_line / bytes_per_row
+            # --- Optimization for Large Files ---
+            # Linear scanning of visual segments is O(N) and freezes for large files (e.g. 1M+ lines).
+            # We use a threshold: for small files, be precise. For large files, approximate.
+            if total_lines > 1000:
+                # O(1) Approximation
+                # We map ratio directly to logical line index.
+                # This assumes uniform distribution of wrapping, which is standard for huge files.
+                self.scroll_line = int(ratio * (total_lines - 1))
+                self.scroll_line = max(0, min(self.scroll_line, total_lines - 1))
+                self.scroll_visual_offset = 0
+                self.scroll_line_frac = 0.0
+                
+                self.queue_draw()
+                return
+
+            # --- Precise Calculation for Small Files ---
+            # Binary search logic could be used here if we had an Interval Tree, 
+            # but we don't. Linear scan is fast enough for < 1000 lines.
             
-            width = self.get_width()
-            ln_width = 30 # default gutter
-            if self.show_line_numbers:
-                ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+            current_visual = 0.0
             
-            viewport_w = max(1, width - ln_width - 20)
-            width_chars = max(1, int(viewport_w / max(0.1, self.char_width)))
+            # Iterate through logical lines to find which one contains our target visual line
+            for i in range(total_lines):
+                segments = self.mapper.get_line_segments(i)
+                num_segments = len(segments) if segments else 1
+                
+                # Check if target is within this logical line's visual range
+                if current_visual <= target_visual_line < current_visual + num_segments:
+                    # Found the logical line
+                    self.scroll_line = i
+                    
+                    # Calculate visual offset within this line
+                    remaining = target_visual_line - current_visual
+                    self.scroll_visual_offset = int(remaining)
+                    self.scroll_line_frac = remaining - self.scroll_visual_offset
+                    
+                    # Clamp to valid range
+                    self.scroll_visual_offset = max(0, min(self.scroll_visual_offset, num_segments - 1))
+                    
+                    if self.scroll_line_frac < 0: self.scroll_line_frac = 0.0
+                    if self.scroll_line_frac >= 1.0: self.scroll_line_frac = 0.99
+                    
+                    self.queue_draw()
+                    return
+                
+                current_visual += num_segments
             
-            # Assuming 1 byte/char approx for scroll position
-            # Use floating point for smooth pixel scroll
-            vis_lines_float = byte_offset_in_line / width_chars
-            
-            # Extract integral and fractional parts
-            self.scroll_visual_offset = int(vis_lines_float)
-            self.scroll_line_frac = vis_lines_float - self.scroll_visual_offset
-            
-            # Clamp visual offset to actual segments if possible?
-            # get_line_segments is efficient enough for single line call
+            # Fallback - if we ran out of lines but haven't reached target
+            # This happens because get_total_visual_lines returns 1.05x estimate
+            # So we are likely at the very end of the document.
+            self.scroll_line = max(0, total_lines - 1)
+            self.scroll_visual_offset = 0  # To ensure we see the last line content
+            # Improve fallback: try to set visual offset to last segment of last line?
+            # For simplicity, just showing the last line is good enough validation.
+            # Ideally:
             segments = self.mapper.get_line_segments(self.scroll_line)
             if segments:
-                self.scroll_visual_offset = max(0, min(self.scroll_visual_offset, len(segments) - 1))
+                 self.scroll_visual_offset = max(0, len(segments) - 1)
             
-            # Avoid negative frac
-            if self.scroll_line_frac < 0: self.scroll_line_frac = 0.0
-            
+            self.scroll_line_frac = 0.0
             self.queue_draw()
         else:
-            # Logical line scrolling - use fractional position
+            # No word wrap: Direct line scrolling with fractional position for smoothness
             if not hasattr(self, 'scroll_line_frac'):
                 self.scroll_line_frac = 0.0
             
-            # Divide by resolution to get actual position
-            # Use same resolution!
-            scroll_resolution = 1.0 
+            # Convert scrollbar value to line position (with fraction)
             actual_val = val / scroll_resolution
             
             self.scroll_line = int(actual_val)
             self.scroll_line_frac = actual_val - self.scroll_line
             self.scroll_line = max(0, min(self.scroll_line, self.buf.total() - 1))
+            
+            # Clamp fraction
+            if self.scroll_line_frac < 0:
+                self.scroll_line_frac = 0.0
+            if self.scroll_line_frac >= 1.0:
+                self.scroll_line_frac = 0.99
+                
             self.queue_draw()
     
     def on_hadj_changed(self, adj):
