@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, os, mmap, gi, cairo, time, unicodedata
+import sys, os, mmap, gi, cairo, time, unicodedata, signal
 from threading import Thread
 from array import array
 import math 
@@ -8322,4 +8322,5 @@ class VirtualTextEditor(Adw.Application):
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     VirtualTextEditor().run(sys.argv)

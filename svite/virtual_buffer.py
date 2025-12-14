@@ -353,6 +353,157 @@ def detect_encoding(path):
     return "utf-8"
 
 
+class SegmentedLineMap:
+    """
+    Performance-optimized map for virtual buffer lines.
+    Allows O(1) initialization (via range) and O(segments) updates.
+    Solves the initialization freeze and edit freeze of large arrays.
+    """
+    def __init__(self, total_count):
+        # Segments are lists or range objects or arrays
+        # We start with one big range representing 0..N-1
+        self.segments = [range(total_count)]
+        self._total_len = total_count
+
+    def __len__(self):
+        return self._total_len
+
+    def __getitem__(self, idx):
+        if idx < 0: idx += self._total_len
+        # Handle slice access (basic support for read-only view)
+        if isinstance(idx, slice):
+            start, stop, step = idx.indices(self._total_len)
+            result = []
+            # Naive optimization for slices: iterating
+            for i in range(start, stop, step):
+                result.append(self[i])
+            return result
+            
+        if idx < 0 or idx >= self._total_len: 
+             return -1 # Fallback
+        
+        current = 0
+        for seg in self.segments:
+            slen = len(seg)
+            if idx < current + slen:
+                return seg[idx - current]
+            current += slen
+        return -1
+
+    def replace(self, idx, value):
+        """Set item at idx to value (splits segments if needed)."""
+        if idx < 0: idx += self._total_len
+        if idx < 0 or idx >= self._total_len: return
+
+        current = 0
+        for i, seg in enumerate(self.segments):
+            slen = len(seg)
+            if idx < current + slen:
+                offset = idx - current
+                
+                # If segment is mutable list/array and we can set in place?
+                if isinstance(seg, (list, array)):
+                    seg[offset] = value
+                    return
+
+                # Otherwise splits range: [before, val, after]
+                new_segs = []
+                if offset > 0:
+                    new_segs.append(seg[:offset])
+                
+                new_segs.append(array('q', [value]))
+                
+                if offset < slen - 1:
+                    new_segs.append(seg[offset+1:])
+                
+                self.segments[i:i+1] = new_segs
+                return
+            current += slen
+
+    def insert_map(self, idx, vals):
+        """Insert a sequence/list val at idx."""
+        # vals should be a list or array
+        if idx < 0: idx += self._total_len
+        if idx > self._total_len: idx = self._total_len
+        
+        self._total_len += len(vals)
+        
+        # Optimization: if vals is small list, make it array
+        if isinstance(vals, list):
+            vals = array('q', vals)
+        
+        if idx == 0:
+            self.segments.insert(0, vals)
+            return
+            
+        current = 0
+        for i, seg in enumerate(self.segments):
+            slen = len(seg)
+            # Insert point is within this segment or immediately after
+            if idx <= current + slen:
+                offset = idx - current
+                
+                if offset == 0:
+                     self.segments.insert(i, vals)
+                     return
+                if offset == slen:
+                     self.segments.insert(i + 1, vals)
+                     return
+
+                # Split
+                left = seg[:offset]
+                right = seg[offset:]
+                self.segments[i:i+1] = [left, vals, right]
+                return
+            current += slen
+        
+        # Append at very end
+        self.segments.append(vals)
+
+    def delete_range(self, start, end):
+        """Delete [start, end)"""
+        if start < 0: start = 0
+        if end > self._total_len: end = self._total_len
+        if start >= end: return
+
+        count = end - start
+        self._total_len -= count
+        
+        new_segments = []
+        current = 0
+        
+        for seg in self.segments:
+            slen = len(seg)
+            seg_start = current
+            seg_end = current + slen
+            
+            # Check overlap
+            overlap_start = max(seg_start, start)
+            overlap_end = min(seg_end, end)
+            
+            if overlap_start < overlap_end:
+                # There is overlap, we need to clip
+                
+                # Keep part before overlap
+                if seg_start < overlap_start:
+                    keep_len = overlap_start - seg_start
+                    new_segments.append(seg[:keep_len])
+                
+                # Part overlapping is deleted
+                
+                # Keep part after overlap
+                if overlap_end < seg_end:
+                    skip_len = overlap_end - seg_start
+                    new_segments.append(seg[skip_len:])
+            else:
+                # No overlap, keep entire segment
+                new_segments.append(seg)
+                
+            current += slen
+            
+        self.segments = new_segments
+
+
 class VirtualBuffer:
     """
     High-performance text buffer supporting millions of lines.
@@ -374,10 +525,10 @@ class VirtualBuffer:
         self.syntax_engine.set_text_provider(self.get_line)
         
         # Memory optimized line mapping:
-        # _lines is array('q') (signed 8-byte int)
+        # _lines is SegmentedLineMap (Piece Table)
         # - Values >= 0: Index into original file (via indexer)
         # - Values < 0: Index into _modified_cache (bitwise NOT, so -1 -> 0, -2 -> 1)
-        self._lines = array('q', [0]) 
+        self._lines = SegmentedLineMap(0) 
         self._modified_cache: Dict[int, str] = {}
         self._next_mod_id = 1
         
@@ -484,8 +635,8 @@ class VirtualBuffer:
                 callback(self)
             except Exception as e:
                 print(f"Error in observer callback: {e}")
-    
-    def load_from_indexed_file(self, idx_file) -> None:
+
+    def load_from_indexed_file(self, idx_file, emit_changed=True, progress_callback=None) -> None:
         """Load optimized from pre-indexed file object (avoids double indexing)."""
         self.close()
         
@@ -509,25 +660,20 @@ class VirtualBuffer:
         self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
         
         # Initialize identity mapping
-        # Create array 0..N-1
         cnt = self._indexer.line_count
-        self._lines = array('q')
         
-        # Fast initialization using extend for range
-        # Note: range(127M) -> list -> extend is slow/heavy
-        # array('q', range(N)) is better but still iterates
-        # We can do this in blocks if N is huge?
-        # Or just array('q', range(cnt)) is standard python valid way
-        cnt = len(idx_file.index)
-        # Optimization: Don't create the huge _lines array yet!
-        # use Lazy Identity Map. _lines = None implies map[i] == i.
-        # Eagerly create the identity map
-        self._lines = array('q', range(cnt))
+        # Use SegmentedLineMap for O(1) initialization!
+        self._lines = SegmentedLineMap(cnt)
+
+        if progress_callback:
+            progress_callback(1.0)
         
         self._modified_cache = {}
         self._size_delta = 0
         self._is_modified = False
-        self._notify_observers()
+        
+        if emit_changed:
+            self._notify_observers()
 
     def load_file(self, filepath: str, encoding: Optional[str] = None, progress_callback: Optional[callable] = None) -> None:
         """Load a file using lazy index."""
@@ -556,16 +702,10 @@ class VirtualBuffer:
         self._file = open(filepath, 'rb')
         self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
         
-        # Initialize lines as an eager identity map in batches to avoid UI freeze
+        # Initialize lines as lazy identity map
         cnt = self._indexer.line_count
-        self._lines = array('q')
-        batch = 100_000  # adjust as needed
-        for start in range(0, cnt, batch):
-            end = min(start + batch, cnt)
-            # extend with range of indices
-            self._lines.extend(range(start, end))
-            if progress_callback:
-                progress_callback(end / cnt)
+        self._lines = SegmentedLineMap(cnt)
+        
         # Ensure final progress reported
         if progress_callback:
             progress_callback(1.0)
@@ -583,16 +723,15 @@ class VirtualBuffer:
         self._size_delta = len(text.encode('utf-8'))
         
         # All lines are "modified" (memory residents)
-        self._lines = array('q') # This should be populated with negative indices
-        self._modified_cache = {}
-        self._next_mod_id = 1      # Populate cache and negative indices
         mod_ids = []
         for i, line in enumerate(lines):
             mod_id = - (i + 1)
             self._modified_cache[~mod_id] = line # Bitwise not to map -1 -> 0
             mod_ids.append(mod_id)
             
-        self._lines.extend(mod_ids)
+        self._lines = SegmentedLineMap(0)
+        self._lines.segments = [array('q', mod_ids)]
+        self._lines._total_len = len(mod_ids)
         self._next_mod_id = len(lines) + 1
         
         self._is_modified = True
@@ -662,7 +801,7 @@ class VirtualBuffer:
         """Compatibility shim for load."""
         # Detect if source is an IndexedFile (has index array)
         if hasattr(source, 'index') and hasattr(source, 'encoding') and hasattr(source, 'path'):
-            self.load_from_indexed_file(source)
+            self.load_from_indexed_file(source, emit_changed=emit_changed)
             return
 
         path = source
@@ -935,11 +1074,8 @@ class VirtualBuffer:
     def insert(self, line: int, col: int, text: str, _record_undo: bool = True) -> Tuple[int, int]:
         """Insert text at position."""
         if self._lines is None:
-            # Lazy materialization on first edit!
-            cnt = 0
-            if self._indexer and self._indexer._offsets:
-                 cnt = len(self._indexer._offsets)
-            self._lines = array('q', range(cnt))
+            # Fallback if somehow still None (should be initialized as map now)
+            self._lines = SegmentedLineMap(0)
             
         line = min(line, len(self._lines) - 1)
         current_line = self._resolve_line(line)
@@ -957,7 +1093,7 @@ class VirtualBuffer:
             # Single line modification
             new_content = before + text + after
             mod_id = self._register_modified_line(new_content)
-            self._lines[line] = mod_id
+            self._lines.replace(line, mod_id)
             
             end_line = line
             end_col = col + len(text)
@@ -979,8 +1115,10 @@ class VirtualBuffer:
             # Last line
             new_ids.append(self._register_modified_line(last_part))
             
-            # Splice into array
-            self._lines[line:line+1] = new_ids
+            # Use map insert: first replaces original line, rest inserts after
+            self._lines.replace(line, new_ids[0])
+            if len(new_ids) > 1:
+                self._lines.insert_map(line + 1, new_ids[1:])
             
             end_line = line + len(insert_lines) - 1
             end_col = len(insert_lines[-1])
@@ -1004,15 +1142,15 @@ class VirtualBuffer:
         """Insert a newline at cursor position."""
         self.insert(self.cursor_line, self.cursor_col, "\n")
         
-    def delete(self, start_line: int, start_col: int, end_line: int, end_col: int, provided_text: Optional[str] = None, _record_undo: bool = True):
+    def delete(self, start_line: int, start_col: int, end_line: int, end_col: int, 
+               _record_undo: bool = True, provided_text: Optional[str] = None) -> None:
         """Delete text in range."""
         if self._lines is None:
-            # Lazy materialization
-            cnt = 0
-            if self._indexer and self._indexer._offsets:
-                 cnt = len(self._indexer._offsets)
-            self._lines = array('q', range(cnt))
-            
+             self._lines = SegmentedLineMap(0)
+             
+        start_line = max(0, min(start_line, len(self._lines) - 1))
+        end_line = max(0, min(end_line, len(self._lines) - 1))
+        
         if start_line > end_line or (start_line == end_line and start_col >= end_col):
             return
         self.syntax_engine.invalidate_from(start_line)
@@ -1025,23 +1163,31 @@ class VirtualBuffer:
         self._size_delta -= len(deleted.encode('utf-8'))
         
         if start_line == end_line:
+            # Single line delete
             line = self._resolve_line(start_line)
-            new_content = line[:start_col] + line[end_col:]
+            before = line[:start_col]
+            after = line[end_col:]
+            new_content = before + after
             mod_id = self._register_modified_line(new_content)
-            self._lines[start_line] = mod_id
+            self._lines.replace(start_line, mod_id)
         else:
+            # Multi-line delete
             first_line = self._resolve_line(start_line)
             last_line = self._resolve_line(end_line)
             
-            first_kept = first_line[:start_col]
-            last_kept = last_line[end_col:]
+            before = first_line[:start_col]
+            after = last_line[end_col:]
             
-            new_content = first_kept + last_kept
+            # Combine first and last line parts
+            new_content = before + after
             mod_id = self._register_modified_line(new_content)
             
-            # Replace start_line with fused content, remove intermediate lines
-            self._lines[start_line] = mod_id
-            del self._lines[start_line + 1:end_line + 1]
+            # Replace start_line with merged line
+            self._lines.replace(start_line, mod_id)
+            
+            # Delete intermediate lines (start_line+1 ... end_line)
+            # We delete [start_line+1, end_line+1)
+            self._lines.delete_range(start_line + 1, end_line + 1)
             
         self._is_modified = True
         self._notify_observers()
