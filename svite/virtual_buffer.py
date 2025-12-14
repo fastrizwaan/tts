@@ -521,14 +521,15 @@ class VirtualBuffer:
         cnt = len(idx_file.index)
         # Optimization: Don't create the huge _lines array yet!
         # use Lazy Identity Map. _lines = None implies map[i] == i.
-        self._lines = None
+        # Eagerly create the identity map
+        self._lines = array('q', range(cnt))
         
         self._modified_cache = {}
         self._size_delta = 0
         self._is_modified = False
         self._notify_observers()
 
-    def load_file(self, filepath: str, encoding: Optional[str] = None) -> None:
+    def load_file(self, filepath: str, encoding: Optional[str] = None, progress_callback: Optional[callable] = None) -> None:
         """Load a file using lazy index."""
         self.close()
         
@@ -555,13 +556,21 @@ class VirtualBuffer:
         self._file = open(filepath, 'rb')
         self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
         
-        # Initialize lines as lazy indices
+        # Initialize lines as an eager identity map in batches to avoid UI freeze
         cnt = self._indexer.line_count
-        self._lines = None # Lazy identity map
-        
-        # Don't create array here - wait for insert/delete
-        # if cnt > 1000000: ... loop removed ...
+        self._lines = array('q')
+        batch = 100_000  # adjust as needed
+        for start in range(0, cnt, batch):
+            end = min(start + batch, cnt)
+            # extend with range of indices
+            self._lines.extend(range(start, end))
+            if progress_callback:
+                progress_callback(end / cnt)
+        # Ensure final progress reported
+        if progress_callback:
+            progress_callback(1.0)
 
+        # Reset modification tracking structures
         self._modified_cache = {}
         self._size_delta = 0
         self._is_modified = False
