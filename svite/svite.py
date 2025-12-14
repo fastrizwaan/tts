@@ -8028,6 +8028,21 @@ class EditorWindow(Adw.ApplicationWindow):
     
     def load_file_into_editor(self, editor, path):
         """Load a file into an existing editor"""
+        if not os.path.exists(path):
+            # File doesn't exist - treat as new file creation
+            editor.buf.load_text("")
+            editor.current_file_path = path
+            editor.current_encoding = "utf-8"
+            editor.view.scroll_line = 0
+            editor.view.scroll_x = 0
+            
+            # Enable Syntax Highlighting
+            lang = detect_language(path)
+            editor.view.syntax.set_language(lang)
+            editor.buf.syntax_engine.set_language(lang)
+            
+            return
+
         loading_dialog = LoadingDialog(self)
         loading_dialog.present()
         
