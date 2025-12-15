@@ -627,7 +627,7 @@ class VirtualBuffer:
         # _lines is SegmentedLineMap (Piece Table)
         # - Values >= 0: Index into original file (via indexer)
         # - Values < 0: Index into _modified_cache (bitwise NOT, so -1 -> 0, -2 -> 1)
-        self._lines = SegmentedLineMap(0) 
+        self._lines = SegmentedLineMap(1) 
         self._modified_cache: Dict[int, str] = {}
         self._next_mod_id = 1
         
