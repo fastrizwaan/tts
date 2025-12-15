@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Virtual Text Editor
+Type=Application
+Comment=Rich text editor using WebKit
+Exec=/var/home/rizvan/tts/svite/svite.py %F
+MimeType=text/html;text/plain;application/xhtml+xml;application/x-mhtml;
+Icon=/var/home/rizvan/.local/share/icons/hicolor/scalable/apps/io.github.fastrizwaan.vite.svg
+StartupNotify=true
+Terminal=false
+Categories=GTK;TextEditor;
+Keywords=text;editor;word;processor;html;rich;document;svite;writer;markdown;md;mhtml;

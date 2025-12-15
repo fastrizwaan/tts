@@ -5240,6 +5240,10 @@ class FindReplaceBar(Gtk.Box):
     def __init__(self, editor_page):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.editor = editor_page
+        self._cancel_search = None
+        self._cancel_replace = None
+        self._pending_replace = None # Queue replace args if search is busy
+        self._suppress_auto_search = False # Flag to prevent auto-search on buffer change (e.g. during replace all)
         self.add_css_class("find-bar")
         self.set_visible(False)
         self._search_timeout_id = None
@@ -5383,6 +5387,14 @@ class FindReplaceBar(Gtk.Box):
         
         self.replace_box.append(self.replace_entry)
         
+        # Replace Status Label (Percent/Count)
+        self.replace_status_label = Gtk.Label(label="")
+        self.replace_status_label.add_css_class("dim-label")
+        self.replace_status_label.add_css_class("caption")
+        self.replace_status_label.set_margin_end(6) 
+        self.replace_status_label.set_visible(False)
+        self.replace_box.append(self.replace_status_label)
+        
         # Action Buttons
         self.replace_btn = Gtk.Button(label="Replace")
         self.replace_btn.connect("clicked", self.on_replace)
@@ -5514,17 +5526,34 @@ class FindReplaceBar(Gtk.Box):
             self.update_match_label()
             return False
             
-        # For medium files (50k-100M), use async search
         if total_lines < 100000000:
             def on_progress(matches, lines_searched, total, max_len):
                 self.editor.view.set_search_results(matches, max_len, preserve_current=True)
-                self.update_match_label()
+                # Show progress in label
+                percent = int((lines_searched / total) * 100)
+                count = len(matches)
+                self.matches_label.set_text(f"Finding... {percent}% ({count})")
+                self.matches_label.set_visible(True)
             
             def on_complete(matches, max_len):
                 self._cancel_search = None
                 self.editor.view.set_search_results(matches, max_len, preserve_current=True)
                 self.update_match_label()
-            
+                # self.find_entry.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, None) # Not supported on SearchEntry
+                
+                # Check for pending replace
+                if self._pending_replace:
+                    self._pending_replace = None
+                    print("Executing pending replace...")
+                    self.replace_all_btn.set_sensitive(True)
+                    self.on_replace_all(self.replace_all_btn)
+
+            # Cancel previous
+            if self._cancel_search:
+                self._cancel_search()
+                self._cancel_search = None
+                self._pending_replace = None # Cancel pending if we restart search
+                
             self._cancel_search = self.editor.buf.search_async(
                 query, case_sensitive, is_regex, 
                 max_matches=-1,
@@ -5532,6 +5561,10 @@ class FindReplaceBar(Gtk.Box):
                 on_complete=on_complete,
                 chunk_size=20000
             )
+            # Show stop icon? GtkEntry doesn't easily support clickable internal icon handling for custom logic 
+            # unless we connect 'icon-press'. 
+            # But standard search entry usually has clear icon.
+            # We can use set_progress_fraction to show activity.
             return False
         
         # For huge files (>500k lines), use viewport-only search
@@ -5663,34 +5696,85 @@ class FindReplaceBar(Gtk.Box):
         
         # Use Async Replace for "Replace All" to ensure UI responsiveness and support huge files
         # The threshold can be lower now that we have a good async implementation
-        if total_lines > 10000:
-            # Check if busy overlay exists and show it
-            if hasattr(self.editor.view, '_busy_overlay'):
-                self.editor.view._busy_overlay.set_visible(True)
-                if hasattr(self.editor.view, '_busy_label'):
-                    self.editor.view._busy_label.set_text("Replacing...")
-                if hasattr(self.editor.view, '_busy_spinner'):
-                    self.editor.view._busy_spinner.start()
+        # Use Async Replace for "Replace All" to ensure UI responsiveness and support huge files
+        # The threshold can be lower now that we have a good async implementation
+        if total_lines > 1000:
+            # Check if already replacing
+            if hasattr(self, '_cancel_replace') and self._cancel_replace:
+                # User wants to cancel
+                self._cancel_replace()
+                self._cancel_replace = None
+                self.replace_all_btn.set_label("Replace All")
+                self.replace_entry.set_progress_fraction(0.0)
+                self.replace_entry.set_placeholder_text("Replace")
+                # Restore interactivity? 
+                return
+
+            # Cancel any ongoing search? 
+            # If search is ongoing, we should wait for it to complete so we can use the results for targeted replace.
+            if self._cancel_search:
+                # Queue this replace operation
+                print("Queueing replace command until search completes...")
+                self._pending_replace = (self.replace_all_btn,) # Args for on_replace_all? on_replace_all only takes widget.
+                # Actually on_replace_all(*args) just ignores args.
+                self._pending_replace = True
+                
+                self.replace_all_btn.set_label("Waiting...")
+                self.replace_all_btn.set_sensitive(False)
+                return
+
+                # OLD LOGIC: Cancel search
+                # self._cancel_search()
+                # self._cancel_search = None
+                # self.find_entry.set_progress_fraction(0.0) # SearchEntry doesn't support this
+
+
+            # Update UI for busy state
+            self.replace_all_btn.set_label("Stop")
+            self.replace_status_label.set_visible(True)
+            self.replace_status_label.set_text("Replacing...")
+            self._suppress_auto_search = True # Suppress live search updates during replace
             
             def on_progress(count, lines_processed, total):
-                if hasattr(self.editor.view, '_busy_label'):
-                    percent = int((lines_processed / total) * 100) if total > 0 else 0
-                    self.editor.view._busy_label.set_text(f"Replacing... {percent}% ({count} changes)")
-            
+                percent = (lines_processed / total) if total > 0 else 0
+                self.replace_entry.set_progress_fraction(percent)
+                
+                # Show status in label
+                msg = f"{int(percent*100)}% ({count})"
+                self.replace_status_label.set_text(msg)
+                
             def on_complete(count):
-                if hasattr(self.editor.view, '_busy_overlay'):
-                    self.editor.view._busy_spinner.stop()
-                    self.editor.view._busy_overlay.set_visible(False)
-                    
-                self._cancel_search = None
+                self._cancel_replace = None
+                self._suppress_auto_search = False
+                self.replace_all_btn.set_label("Replace All")
+                self.replace_entry.set_progress_fraction(0.0)
+                
+                self.replace_status_label.set_text(f"Done ({count})")
+                
+                # self.replace_status_label.set_visible(False) # Maybe keep result for a moment?
+                # Let's keep it until next action or close?
+                
                 print(f"Replaced {count} occurrences.")
-                self.on_search_changed()
+                # self.on_search_changed() # Force re-search? NO, user says it's redundant.
+                # Since we replaced everything, matches for original query should be 0.
+                self.editor.view.set_search_results([], 0)
+                self.matches_label.set_text("")
+                self.matches_label.set_visible(False)
             
-            self._cancel_search = self.editor.buf.replace_all_async(
+            # Determine if we can use cached matches (Targeted Replacement)
+            target_lines = None
+            if self.editor.view.search_matches and ('\n' not in replacement) and ('\r' not in replacement):
+                 # Matches are tuples (start_ln, ...). We need unique lines sorted.
+                 target_lines = sorted(list(set(m[0] for m in self.editor.view.search_matches)))
+                 # Ensure matches are for current query? 
+                 # Usually they are auto-updated. We assume sync.
+                 
+            self._cancel_replace = self.editor.buf.replace_all_async(
                 query, replacement, case_sensitive, is_regex,
                 on_progress=on_progress, 
                 on_complete=on_complete,
-                chunk_size=1000
+                chunk_size=2000,
+                target_lines=target_lines
             )
             return
 
@@ -8135,8 +8219,9 @@ class EditorWindow(Adw.ApplicationWindow):
         # Live Search Update:
         # If the editor has an active Find Bar, trigger a re-search to update matches/count
         if hasattr(editor, 'find_bar') and editor.find_bar and editor.find_bar.get_visible():
-            # Trigger search changed (debounced)
-            editor.find_bar.on_search_changed()
+            if not getattr(editor.find_bar, '_suppress_auto_search', False):
+                # Trigger search changed (debounced)
+                editor.find_bar.on_search_changed()
 
         # Invalidate wrap cache when buffer changes
         if editor.view.renderer.wrap_enabled:

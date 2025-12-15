@@ -360,148 +360,251 @@ class SegmentedLineMap:
     Solves the initialization freeze and edit freeze of large arrays.
     """
     def __init__(self, total_count):
-        # Segments are lists or range objects or arrays
-        # We start with one big range representing 0..N-1
         self.segments = [range(total_count)]
         self._total_len = total_count
+        # Cache start offsets for O(log N) access
+        self.offsets = array('Q', [0])
+        self.overrides = {} # Sparse updates {line_idx: new_val}
+        
+    def _rebuild_offsets(self):
+        """Rebuild offsets array from segments."""
+        offs = [0]
+        curr = 0
+        for seg in self.segments:
+            curr += len(seg)
+            offs.append(curr)
+        # We only need start offsets, but keeping (start) is enough if we know last end via total_len
+        # Actually bisect works on starts.
+        # Removing the last element which is total_len?
+        # bisect_right on [0, 10, 20] for index 5 returns 1. index 1-1 = 0. Segment 0.
+        # bisect_right for index 10 returns 2. index 2-1 = 1. Segment 1.
+        # So we just need starts.
+        self.offsets = array('Q', offs[:-1])
 
     def __len__(self):
         return self._total_len
 
     def __getitem__(self, idx):
         if idx < 0: idx += self._total_len
-        # Handle slice access (basic support for read-only view)
         if isinstance(idx, slice):
             start, stop, step = idx.indices(self._total_len)
             result = []
-            # Naive optimization for slices: iterating
             for i in range(start, stop, step):
                 result.append(self[i])
             return result
             
         if idx < 0 or idx >= self._total_len: 
-             return -1 # Fallback
+             return -1
         
-        current = 0
-        for seg in self.segments:
-            slen = len(seg)
-            if idx < current + slen:
-                return seg[idx - current]
-            current += slen
-        return -1
+        if idx in self.overrides:
+             return self.overrides[idx]
+        
+        # O(log S) lookup
+        import bisect
+        seg_idx = bisect.bisect_right(self.offsets, idx) - 1
+        seg_start = self.offsets[seg_idx]
+        offset = idx - seg_start
+        return self.segments[seg_idx][offset]
 
-    def replace(self, idx, value):
-        """Set item at idx to value (splits segments if needed)."""
+    def _try_merge(self, idx):
+        """Try to merge segment at idx with idx+1 if compliant."""
+        if idx < 0 or idx >= len(self.segments) - 1:
+            return False
+            
+        bs = self.segments[idx]
+        nex = self.segments[idx+1]
+        
+        # Only merge mutable arrays/lists
+        if isinstance(bs, (array, list)) and isinstance(nex, (array, list)):
+            if isinstance(bs, list) and not isinstance(nex, list): return False
+            if isinstance(bs, array) and not isinstance(nex, array): return False
+            # If array, types must match? usually 'q'
+            
+            # Extend in place if possible?
+            self.segments[idx] = bs + nex
+            del self.segments[idx+1]
+            return True
+        return False
+
+    def _flush_overrides(self):
+        """Flatten sparse overrides into segments (expensive, O(K log S + K*S))."""
+        if not self.overrides: return
+        
+        # Sort keys to batch updates?
+        # Applying one by one for now using splitting logic.
+        # But we must be careful: if we split for first override, offsets change? 
+        # No, offsets change only if we INSERT/DELETE.
+        # replace() splits ranges into [before, val, after]. Length constant.
+        # So we can iterate. 
+        # BUT: modifying segments invalidates indices for subsequent operations?
+        # replace(idx) works on absolute index.
+        # If we split segment 0 (0-100) at 10. becomes [0-10, 10, 11-100].
+        # next override at 20. index 20 is now in segment 2.
+        # Our replace() logic does lookup via offsets.
+        # As long as we rebuild offsets or update offsets incrementally, it works.
+        # For efficiency, we can rebuild offsets once at end? 
+        # But lookups need valid offsets.
+        # For safety/simplicity, we reuse the old 'replace' logic but applied in loop.
+        
+        # Sort keys
+        keys = sorted(self.overrides.keys())
+        for idx in keys:
+            val = self.overrides[idx]
+            self._real_replace(idx, val)
+        
+        self.overrides.clear()
+        
+    def _real_replace(self, idx, value):
+        """Original replace implementation that modifies segments."""
         if idx < 0: idx += self._total_len
         if idx < 0 or idx >= self._total_len: return
 
-        current = 0
-        for i, seg in enumerate(self.segments):
-            slen = len(seg)
-            if idx < current + slen:
-                offset = idx - current
-                
-                # If segment is mutable list/array and we can set in place?
-                if isinstance(seg, (list, array)):
-                    seg[offset] = value
-                    return
+        import bisect
+        seg_idx = bisect.bisect_right(self.offsets, idx) - 1
+        seg_start = self.offsets[seg_idx]
+        offset = idx - seg_start
+        seg = self.segments[seg_idx]
+        
+        if isinstance(seg, (list, array)):
+            seg[offset] = value
+            return
 
-                # Otherwise splits range: [before, val, after]
-                new_segs = []
-                if offset > 0:
-                    new_segs.append(seg[:offset])
-                
-                new_segs.append(array('q', [value]))
-                
-                if offset < slen - 1:
-                    new_segs.append(seg[offset+1:])
-                
-                self.segments[i:i+1] = new_segs
-                return
-            current += slen
+        new_segs = []
+        if offset > 0:
+            new_segs.append(seg[:offset])
+        
+        new_segs.append(array('q', [value]))
+        
+        slen = len(seg)
+        if offset < slen - 1:
+            new_segs.append(seg[offset+1:])
+        
+        self.segments[seg_idx:seg_idx+1] = new_segs
+        self._rebuild_offsets()
+        
+        # Optimization: Try merging adjacent mutables
+        mut_idx = seg_idx if offset == 0 else seg_idx + 1
+        if self._try_merge(mut_idx): self._rebuild_offsets()
+        if self._try_merge(mut_idx - 1): self._rebuild_offsets()
+
+    def replace(self, idx, value):
+        if idx < 0: idx += self._total_len
+        if idx < 0 or idx >= self._total_len: return
+        
+        # Fast path: just update override
+        self.overrides[idx] = value
+
 
     def insert_map(self, idx, vals):
-        """Insert a sequence/list val at idx."""
-        # vals should be a list or array
+        self._flush_overrides() # Must flush before structural change
         if idx < 0: idx += self._total_len
+
         if idx > self._total_len: idx = self._total_len
         
         self._total_len += len(vals)
-        
-        # Optimization: if vals is small list, make it array
         if isinstance(vals, list):
             vals = array('q', vals)
+            
+        import bisect
         
         if idx == 0:
             self.segments.insert(0, vals)
+            # Try merge with next
+            if self._try_merge(0): pass
+            self._rebuild_offsets()
             return
-            
-        current = 0
-        for i, seg in enumerate(self.segments):
-            slen = len(seg)
-            # Insert point is within this segment or immediately after
-            if idx <= current + slen:
-                offset = idx - current
-                
-                if offset == 0:
-                     self.segments.insert(i, vals)
-                     return
-                if offset == slen:
-                     self.segments.insert(i + 1, vals)
-                     return
 
-                # Split
-                left = seg[:offset]
-                right = seg[offset:]
-                self.segments[i:i+1] = [left, vals, right]
-                return
-            current += slen
+        seg_idx = bisect.bisect_right(self.offsets, idx) - 1
+        # If exact match to next segment start?
+        # bisect_right( [0, 10], 10) -> 2. index 1. Segment 1 starts at 10.
+        # if idx == 10. offset = 0.
+        # We want to insert BEFORE segment 1.
         
-        # Append at very end
-        self.segments.append(vals)
+        # Handling append at very end
+        if idx == self._total_len - len(vals): # Total len already increased
+             # Append
+             self.segments.append(vals)
+             # Try merge
+             if self._try_merge(len(self.segments)-2): pass
+             self._rebuild_offsets()
+             return
+
+        seg_start = self.offsets[seg_idx]
+        offset = idx - seg_start
+        seg = self.segments[seg_idx]
+        
+        if offset == len(seg):
+             # Insert after this segment (before next)
+             self.segments.insert(seg_idx + 1, vals)
+             if self._try_merge(seg_idx): pass # Merge current and new? No, new is next.
+             # Merge new and next_next?
+             # Let's simple rebuild
+             self._rebuild_offsets()
+             # Try merge logic properly: check neighbors of inserted
+             if self._try_merge(seg_idx): self._rebuild_offsets() # Merge seg_idx and seg_idx+1
+             if self._try_merge(seg_idx+1): self._rebuild_offsets() 
+             return
+             
+        if offset == 0:
+             # Insert before this segment
+             self.segments.insert(seg_idx, vals)
+             self._rebuild_offsets()
+             if self._try_merge(seg_idx-1): self._rebuild_offsets()
+             if self._try_merge(seg_idx): self._rebuild_offsets()
+             return
+
+        # Split
+        left = seg[:offset]
+        right = seg[offset:]
+        self.segments[seg_idx:seg_idx+1] = [left, vals, right]
+        self._rebuild_offsets()
+        
+        # Merge attempts
+        # seg_idx + 1 is the new vals
+        if self._try_merge(seg_idx+1): self._rebuild_offsets() # with right
+        if self._try_merge(seg_idx): self._rebuild_offsets() # with left/vals (refshifted)
 
     def delete_range(self, start, end):
-        """Delete [start, end)"""
+        self._flush_overrides() # Must flush before structural change
         if start < 0: start = 0
+
         if end > self._total_len: end = self._total_len
         if start >= end: return
 
         count = end - start
         self._total_len -= count
         
-        new_segments = []
-        current = 0
+        import bisect
+        start_seg_idx = bisect.bisect_right(self.offsets, start) - 1
         
-        for seg in self.segments:
+        new_segments = []
+        # Keep segments before start_seg_idx
+        new_segments.extend(self.segments[:start_seg_idx])
+        
+        # Scan from start_seg_idx
+        current = self.offsets[start_seg_idx] if self.offsets else 0
+        
+        for i in range(start_seg_idx, len(self.segments)):
+            seg = self.segments[i]
             slen = len(seg)
             seg_start = current
             seg_end = current + slen
+            current += slen
             
-            # Check overlap
             overlap_start = max(seg_start, start)
             overlap_end = min(seg_end, end)
             
             if overlap_start < overlap_end:
-                # There is overlap, we need to clip
-                
-                # Keep part before overlap
                 if seg_start < overlap_start:
-                    keep_len = overlap_start - seg_start
-                    new_segments.append(seg[:keep_len])
-                
-                # Part overlapping is deleted
-                
-                # Keep part after overlap
+                    new_segments.append(seg[:overlap_start - seg_start])
                 if overlap_end < seg_end:
-                    skip_len = overlap_end - seg_start
-                    new_segments.append(seg[skip_len:])
-            else:
-                # No overlap, keep entire segment
-                new_segments.append(seg)
-                
-            current += slen
-            
+                    new_segments.append(seg[overlap_end - seg_start:])
+            elif seg_start >= end:
+                 new_segments.append(seg)
+        
         self.segments = new_segments
+        self._rebuild_offsets()
+
 
 
 class VirtualBuffer:
@@ -1515,7 +1618,7 @@ class VirtualBuffer:
                     case_sensitive: bool = False, is_regex: bool = False) -> int:
         """Replace all occurrences. Returns count."""
         # For compatibility, keeping sync version but it might be slow for huge files
-        matches = self.search(query, case_sensitive, is_regex)
+        matches, _ = self.search(query, case_sensitive, is_regex)
         if not matches:
             return 0
             
@@ -1534,42 +1637,53 @@ class VirtualBuffer:
 
     def replace_all_async(self, query: str, replacement: str, 
                           case_sensitive: bool = False, is_regex: bool = False,
-                          on_progress=None, on_complete=None, chunk_size=1000):
+                          on_progress=None, on_complete=None, chunk_size=1000,
+                          target_lines: list = None):
         """
         Async replace all using line-by-line scanning with time budget.
         More robust for unlimited replacements on huge files.
+        
+        Args:
+            target_lines: Optional list/set of line numbers to process. 
+                          If provided, scans only these lines (much faster).
         """
         # Ensure suppression flag exists (monkey-patch if needed for running instance, but better in init)
         if not hasattr(self, '_suppress_notifications'):
             self._suppress_notifications = 0
             
         # Define context manager locally if method injection is messy, 
-        # but better to have it as method. 
-        # I will implement the logic inline or use a helper.
+        # but we need to notify observers at end
         
-        total_lines = self.total()
-        current_line = 0
+        if is_regex and not isinstance(query, str):
+            # Already compiled pattern?
+            pattern = query
+        else:
+            pattern = None
+            if is_regex:
+                try:
+                    flags = 0 if case_sensitive else re.IGNORECASE
+                    pattern = re.compile(query, flags)
+                except re.error:
+                    return None
+            else:
+                if not case_sensitive:
+                    query_lower = query.lower()
+                    
         count = 0
         
-        # Compile regex if needed
-        pattern = None
-        if is_regex:
-            flags = 0 if case_sensitive else re.IGNORECASE
-            try:
-                pattern = re.compile(query, flags)
-            except:
-                if on_complete: on_complete(0)
-                return lambda: None
-        else:
-            if not case_sensitive:
-                query_lower = query.lower()
-                
-        # Start batch undo
-        self.begin_action()
+        # Use target_lines or full range
+        line_source = sorted(list(target_lines)) if target_lines else None
+        total_work = len(line_source) if line_source else self.total()
+        
+        # Iterator state
+        current_idx = 0 
+        # If full scan, current_idx corresponds to current_line
+        # If target scan, it's index into line_source
+        
         is_cancelled = False
         
         def process_chunk():
-            nonlocal current_line, count, is_cancelled
+            nonlocal current_idx, count, is_cancelled
             
             if is_cancelled:
                 self.end_action()
@@ -1581,12 +1695,24 @@ class VirtualBuffer:
             if not hasattr(self, '_suppress_notifications'): self._suppress_notifications = 0
             self._suppress_notifications += 1
             
+            # Determine chunk range
+            start_idx = current_idx
+            limit = total_work
+            end_chunk_idx = min(start_idx + chunk_size, limit)
+            
+            
             try:
-                while current_line < total_lines:
-                    # Check time budget (e.g. 12ms target for >60fps)
-                    if (time.time() - start_time) > 0.012:
-                        break
-
+                # Process chunk using index
+                while current_idx < end_chunk_idx:
+                    # Resolve line number
+                    if line_source:
+                        current_line = line_source[current_idx]
+                        if current_line >= self.total(): # Safety check if file shrank
+                             current_idx += 1
+                             continue
+                    else:
+                        current_line = current_idx
+                        
                     line_text = self.get_line(current_line)
                     new_text = None
                     
@@ -1615,9 +1741,28 @@ class VirtualBuffer:
                         # Handle newline shifts
                         newlines_added = new_text.count('\n') - line_text.count('\n')
                         if newlines_added != 0:
-                             current_line += newlines_added 
+                             # Changes line count. 
+                             # If iterating linearly (None source), we shift index.
+                             if not line_source:
+                                 # We need to skip the new lines we just inserted? 
+                                 # Or process them? Usually replace-all avoids reprocessing.
+                                 # current_idx (which is line no) points to start of replaced block.
+                                 # We want next iteration to be after the block.
+                                 # Replaced block size = 1 + newlines_added.
+                                 # Next loop should be at current_line + 1 + newlines_added.
+                                 # current_idx incremented at end of loop is +1. 
+                                 # So we add newlines_added to it.
+                                 current_idx += newlines_added
+                                 # Update chunk end?
+                                 end_chunk_idx += newlines_added
+                                 limit += newlines_added # Total increased
+                                 
+                             # If using line_source (targeted), line numbers shift invalidates subsequent target_lines.
+                             # This is why we shouldn't use targeted replace if newlines change.
+                             # But if we safeguard against it in UI, we might be ok.
+                             pass
                     
-                    current_line += 1
+                    current_idx += 1
             finally:
                  self._suppress_notifications -= 1
                  if self._suppress_notifications == 0:
@@ -1625,9 +1770,9 @@ class VirtualBuffer:
             
             # Update progress
             if on_progress:
-                on_progress(count, current_line, self.total())
+                on_progress(count, current_idx, total_work)
                 
-            if current_line < self.total():
+            if current_idx < limit:
                 return True # Continue
             else:
                 self.end_action()
@@ -1645,107 +1790,7 @@ class VirtualBuffer:
 
     # ... (rest of methods)
 
-    def replace_all_async(self, query: str, replacement: str, 
-                          case_sensitive: bool = False, is_regex: bool = False,
-                          on_progress=None, on_complete=None, chunk_size=1000):
-        """
-        Async replace all using line-by-line scanning with time budget.
-        More robust for unlimited replacements on huge files.
-        """
-        total_lines = self.total()
-        current_line = 0
-        count = 0
-        
-        # Compile regex if needed
-        pattern = None
-        if is_regex:
-            flags = 0 if case_sensitive else re.IGNORECASE
-            try:
-                pattern = re.compile(query, flags)
-            except:
-                if on_complete: on_complete(0)
-                return lambda: None
-        else:
-            if not case_sensitive:
-                query_lower = query.lower()
-                
-        # Start batch undo
-        self.begin_action()
-        is_cancelled = False
-        
-        def process_chunk():
-            nonlocal current_line, count, is_cancelled
-            
-            if is_cancelled:
-                self.end_action()
-                return False
-            
-            start_time = time.time()
-            
-            # Use batch_notifications to suppress UI updates for every single line replace
-            with self.batch_notifications():
-                while current_line < total_lines:
-                    # Check time budget (e.g. 12ms target for >60fps)
-                    if (time.time() - start_time) > 0.012:
-                        break
 
-                    line_text = self.get_line(current_line)
-                    new_text = None
-                    
-                    if is_regex:
-                        if pattern.search(line_text):
-                            new_text, subs = pattern.subn(replacement, line_text)
-                            if subs > 0:
-                                count += subs
-                    else:
-                        # Simple string replace
-                        if case_sensitive:
-                            if query in line_text:
-                                new_text = line_text.replace(query, replacement)
-                                count += line_text.count(query)
-                        else:
-                            if query_lower in line_text.lower():
-                                flags = re.IGNORECASE
-                                new_text, subs = re.subn(re.escape(query), lambda m: replacement, line_text, flags=flags)
-                                if subs > 0:
-                                    count += subs
-
-                    if new_text is not None and new_text != line_text:
-                        # Apply change using replace(), propagating _record_undo
-                        self.replace(current_line, 0, current_line, len(line_text), new_text, _record_undo=True)
-                        
-                        # Handle newline shifts if any
-                        newlines_added = new_text.count('\n') - line_text.count('\n')
-                        if newlines_added != 0:
-                             # If lines were added, skip them in this pass
-                             current_line += newlines_added 
-                             # Note: total_lines increases implicitly by buffer ops, 
-                             # but our loop bound 'total_lines' variable is static?
-                             # self.total() changes. We should update cached limit or check self.total()
-                             # But 'process_chunk' re-reads self.total() via property? No.
-                             # Let's update loop limit dynamic check
-                    
-                    current_line += 1
-            
-            # Update progress
-            if on_progress:
-                on_progress(count, current_line, self.total())
-                
-            if current_line < self.total():
-                return True # Continue
-            else:
-                self.end_action()
-                if on_complete:
-                    on_complete(count)
-                return False
-                
-        GLib.idle_add(process_chunk)
-        
-        def cancel():
-            nonlocal is_cancelled
-            is_cancelled = True
-            
-        return cancel
     
         start_ln, start_col, end_ln, end_col = match
         # Check validity? (Line length might have changed if we are not careful)
