@@ -151,7 +151,8 @@ class SyntaxPatterns:
 # SYNTAX ENGINE
 # ==========================================================
 
-class SyntaxEngine:
+
+class RegexSyntaxEngine:
     """
     Performs syntax tokenization using regex patterns.
     Manages syntax cache.
@@ -644,4 +645,5 @@ def detect_rtl_line(text):
         if t in ("R", "AL", "RLE", "RLO"):
             return True
     return False
+
 

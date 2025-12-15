@@ -16,7 +16,7 @@ import re
 import time
 from contextlib import contextmanager
 from gi.repository import GLib
-from syntax import SyntaxEngine
+from syntax import RegexSyntaxEngine
 
 
 @dataclass
@@ -620,7 +620,7 @@ class VirtualBuffer:
         self._mmap: Optional[mmap.mmap] = None
         self._file: Optional[object] = None
         self._indexer = LineIndexer()
-        self.syntax_engine = SyntaxEngine()
+        self.syntax_engine = RegexSyntaxEngine()
         self.syntax_engine.set_text_provider(self.get_line)
         
         # Memory optimized line mapping:
@@ -636,6 +636,16 @@ class VirtualBuffer:
         self.selection = Selection()
         self._suppress_notifications = 0
         self._size_delta: int = 0 # Track size changes relative to indexer
+
+    def set_language(self, lang):
+        current_engine = self.syntax_engine
+        
+        if not isinstance(current_engine, RegexSyntaxEngine):
+            print(f"Switching to RegexSyntaxEngine for {lang}")
+            self.syntax_engine = RegexSyntaxEngine()
+            self.syntax_engine.set_text_provider(self.get_line)
+        
+        self.syntax_engine.set_language(lang)
 
     @contextmanager
     def batch_notifications(self):
@@ -773,6 +783,14 @@ class VirtualBuffer:
         
         if emit_changed:
             self._notify_observers()
+            
+        # Ensure syntax engine is reset/notified
+        # If it's TreeSitter, it needs to load text if language is set.
+        # But set_language will be called AFTER this usually.
+        # However, if language WAS set, we might need to reset.
+        
+        # For robustness, we can invalidate.
+        self.syntax_engine.invalidate_from(0)
 
     def load_file(self, filepath: str, encoding: Optional[str] = None, progress_callback: Optional[callable] = None) -> None:
         """Load a file using lazy index."""
@@ -791,6 +809,7 @@ class VirtualBuffer:
         
         # Build line index (fast scan)
         self._indexer.build_from_file(filepath, encoding=encoding)
+            
         # self._lines = [] # Clear cached lines - handled by init
         
         # Open mmap for random access with detected encoding
@@ -1238,6 +1257,11 @@ class VirtualBuffer:
         self.cursor_line = end_line
         self.cursor_col = end_col
             
+        # Trigger TreeSitter re-parse if applicable
+        if hasattr(self.syntax_engine, 'apply_edit'):
+            # TODO: Pass real byte offsets for incremental parsing
+            self.syntax_engine.apply_edit(0, 0, 0, (0,0), (0,0), (0,0))
+            
         return end_line, end_col
         
     def insert_newline(self):
@@ -1301,6 +1325,11 @@ class VirtualBuffer:
             from undo_redo import DeleteCommand, Position
             cmd = DeleteCommand(Position(start_line, start_col), Position(end_line, end_col), deleted)
             self._view.undo_manager.push(cmd)
+            
+        # Trigger TreeSitter re-parse if applicable
+        if hasattr(self.syntax_engine, 'apply_edit'):
+            # TODO: Pass real byte offsets for incremental parsing
+            self.syntax_engine.apply_edit(0, 0, 0, (0,0), (0,0), (0,0))
             
         return deleted
 

@@ -10,7 +10,7 @@ import json
 from enum import Enum, auto
 from virtual_buffer import VirtualBuffer
 from word_wrap import VisualLineMapper
-from syntax import SyntaxEngine, SyntaxPatterns
+from syntax import RegexSyntaxEngine, SyntaxPatterns
 from undo_redo import UndoRedoManager
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -4019,8 +4019,15 @@ class VirtualTextView(Gtk.DrawingArea):
                 return self.syntax_colors[token_type]
             
             # Fallback for string variants
+            # Fallback for string variants
             if 'string' in token_type:
                 return self.syntax_colors.get('string')
+            
+            # Fallback for other variants (e.g. function_definition -> function)
+            # This handles cases where mapping might be missed or subtle differences
+            if 'function' in token_type: return self.syntax_colors.get('function')
+            if 'class' in token_type: return self.syntax_colors.get('class')
+            if 'keyword' in token_type: return self.syntax_colors.get('keywords')
                 
         return None
 
@@ -4126,12 +4133,12 @@ class VirtualTextView(Gtk.DrawingArea):
             segments = self.mapper.get_line_segments(current_log_line)
             
             # Syntax Tokens
-            # Progressive Rendering:
-            # Check if tokens are cached. If not, queue for idle processing and render plain text.
+            # Check if tokens are cached. If not, tokenize synchronously (regex is fast)
             tokens = self.syntax.get_cached(current_log_line)
             if tokens is None:
-                # Force synchronous tokenization for the line currently under cursor to prevent typing flicker
-                if current_log_line == self.buf.cursor_line:
+                # Regex is fast enough to tokenize synchronously
+                # This prevents "flashing" caused by cache clearing + async idle queue.
+                if isinstance(self.syntax, RegexSyntaxEngine):
                     tokens = self.syntax.tokenize(current_log_line, line_text)
                 else:
                     tokens = []
@@ -6816,10 +6823,9 @@ class EditorWindow(Adw.ApplicationWindow):
             if editor.current_file_path != path:
                 editor.current_file_path = path
                 
-                # Update syntax highlighting
-                lang = detect_language(path)
-                editor.view.syntax.set_language(lang)
-                editor.view.queue_draw()
+                # NOTE: Syntax highlighting will be set in load_file_into_editor
+                # after the file content is actually loaded. Don't set it here
+                # on an empty buffer or TreeSitter will parse empty content.
 
                 # Update header title if this is the active page
                 if editor == self.get_current_page():
@@ -8197,7 +8203,8 @@ class EditorWindow(Adw.ApplicationWindow):
                  
                  # Update syntax highlighting
                  lang = detect_language(path)
-                 editor.view.syntax.set_language(lang)
+                 editor.view.buf.set_language(lang)
+                 editor.view.syntax = editor.view.buf.syntax_engine
                  editor.view.queue_draw()
             
             # Add to recent files
@@ -8360,8 +8367,8 @@ class EditorWindow(Adw.ApplicationWindow):
             
             # Enable Syntax Highlighting
             lang = detect_language(path)
-            editor.view.syntax.set_language(lang)
-            editor.buf.syntax_engine.set_language(lang)
+            editor.view.buf.set_language(lang)
+            editor.view.syntax = editor.view.buf.syntax_engine
             
             return
 
@@ -8391,7 +8398,8 @@ class EditorWindow(Adw.ApplicationWindow):
             
             # Enable Syntax Highlighting
             lang = detect_language(path)
-            editor.view.syntax.set_language(lang)
+            editor.view.buf.set_language(lang)
+            editor.view.syntax = editor.view.buf.syntax_engine
             
             # Clear optimization caches
             editor.view.renderer.last_ln_width = 0
@@ -8402,19 +8410,6 @@ class EditorWindow(Adw.ApplicationWindow):
             editor.current_encoding = idx.encoding
             editor.current_file_path = path
 
-            # Detect language for syntax highlighting
-            ext = os.path.splitext(path)[1].lower()
-            lang = {
-                '.py': 'python',
-                '.js': 'javascript',
-                '.c': 'c', '.h': 'c',
-                '.rs': 'rust',
-                '.html': 'html', '.htm': 'html',
-                '.css': 'css',
-                '.dsl': 'dsl'
-            }.get(ext)
-            editor.buf.syntax_engine.set_language(lang)
-            
             # Trigger width scan for the new file
             editor.view.file_loaded()
             
