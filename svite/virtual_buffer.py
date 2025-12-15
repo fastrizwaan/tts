@@ -437,9 +437,6 @@ class SegmentedLineMap:
         # replace() splits ranges into [before, val, after]. Length constant.
         # So we can iterate. 
         # BUT: modifying segments invalidates indices for subsequent operations?
-        # replace(idx) works on absolute index.
-        # If we split segment 0 (0-100) at 10. becomes [0-10, 10, 11-100].
-        # next override at 20. index 20 is now in segment 2.
         # Our replace() logic does lookup via offsets.
         # As long as we rebuild offsets or update offsets incrementally, it works.
         # For efficiency, we can rebuild offsets once at end? 
@@ -606,7 +603,6 @@ class SegmentedLineMap:
         self._rebuild_offsets()
 
 
-
 class VirtualBuffer:
     """
     High-performance text buffer supporting millions of lines.
@@ -677,13 +673,13 @@ class VirtualBuffer:
         # 3. If modified (negative), we don't have file offset
         return None
 
-    def get_line_at_offset(self, offset: int):
+    def get_line_at_offset(self, byte_offset: int):
         """
         Map global byte offset to (line, col).
         Handles appended text that is not yet in the static indexer.
         """
         # 1. Try static indexer
-        idx, off_in_line = self._indexer.get_line_at_offset(offset)
+        idx, off_in_line = self._indexer.get_line_at_offset(byte_offset)
         
         # 2. Check if we need to scan forward (appended text)
         # If indexer returned the last known line, check if we overflowed it
@@ -786,7 +782,7 @@ class VirtualBuffer:
         file_size = os.path.getsize(filepath)
         
         if file_size == 0:
-            self._lines = array('q', [-1]) # Use modified cache for empty?
+            self._lines = SegmentedLineMap(1) # One empty line
             self._modified_cache = {0: ""}
             self._size_delta = 0
             self._is_modified = False 
@@ -1309,6 +1305,14 @@ class VirtualBuffer:
         new_end_line, new_end_col = self.insert(start_line, start_col, text, _record_undo=_record_undo)
         return (deleted, new_end_line, new_end_col)
 
+    def save(self, save_path: str) -> None:
+        """Save the current buffer content to a file."""
+        with open(save_path, 'w', encoding=getattr(self, 'current_encoding', 'utf-8')) as f:
+            for i in range(self.total_lines):
+                f.write(self.get_line(i))
+                if i < self.total_lines - 1: # Add newline for all but the last line
+                    f.write('\n')
+        
         self._filepath = save_path
         self._is_modified = False
         self.load_file(save_path)
@@ -1370,11 +1374,15 @@ class VirtualBuffer:
     def begin_action(self):
         """Start a batch of undoable actions."""
         if hasattr(self, '_view') and hasattr(self._view, 'undo_manager'):
+            print("VirtualBuffer: begin_action calling manager.begin_batch()")
             self._view.undo_manager.begin_batch()
+        else:
+            print("VirtualBuffer: begin_action failed - no view/manager")
 
     def end_action(self):
         """End the current batch."""
         if hasattr(self, '_view') and hasattr(self._view, 'undo_manager'):
+            print("VirtualBuffer: end_action calling manager.end_batch()")
             self._view.undo_manager.end_batch()
             
     def replace_current(self, match, replacement, _record_undo=True):
@@ -1668,7 +1676,8 @@ class VirtualBuffer:
             else:
                 if not case_sensitive:
                     query_lower = query.lower()
-                    
+        
+        self.begin_action()
         count = 0
         
         # Use target_lines or full range
