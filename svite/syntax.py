@@ -151,6 +151,79 @@ class SyntaxPatterns:
 # SYNTAX ENGINE
 # ==========================================================
 
+# OPTIMIZATION: Pre-compiled patterns for all languages (fast path)
+_FAST_PATTERNS = {
+    'python': {
+        'comment': re.compile(r'#.*$'),
+        'decorator': re.compile(r'@\w+'),
+        'string': re.compile(r'''(?:f|F|r|R|b|B|u|U)?(?:"""(?:[^\\]|\\.)*?"""|\'\'\'(?:[^\\]|\\.)*?\'\'\'|"(?:[^"\\]|\\.)*?"|'(?:[^'\\]|\\.)*?')'''),
+        'function': re.compile(r'\b(def)\s+(\w+)'),
+        'class': re.compile(r'\b(class)\s+(\w+)'),
+        'keywords': re.compile(r'\b(as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b'),
+        'bool_ops': re.compile(r'\b(and|And|None|True|False)\b'),
+        'builtins': re.compile(r'\b(abs|all|any|ascii|bin|bool|bytearray|bytes|callable|chr|classmethod|compile|complex|delattr|dict|dir|divmod|enumerate|eval|exec|filter|float|format|frozenset|getattr|globals|hasattr|hash|help|hex|id|input|int|isinstance|issubclass|iter|len|list|locals|map|max|memoryview|min|next|object|oct|open|ord|pow|print|property|range|repr|reversed|round|set|setattr|slice|sorted|staticmethod|str|sum|super|tuple|type|vars|zip|__import__|__init__)\b'),
+        'number': re.compile(r'\b\d+\.?\d*([eE][+-]?\d+)?\b'),
+        'helpers': re.compile(r'\b(self|__\w+__)\b'),
+    },
+    'javascript': {
+        'comment': re.compile(r'(//.*$|/\*[\s\S]*?\*/)'),
+        'string': re.compile(r'''(`(?:[^`\\]|\\.)*`|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')'''),
+        'function': re.compile(r'\b(function)\s+(\w+)'),
+        'class': re.compile(r'\b(class)\s+(\w+)'),
+        'keywords': re.compile(r'\b(break|case|catch|class|const|continue|debugger|default|delete|do|else|export|extends|finally|for|function|if|import|in|instanceof|let|new|return|super|switch|this|throw|try|typeof|var|void|while|with|yield)\b'),
+        'builtins': re.compile(r'\b(Array|Boolean|Date|Error|Function|JSON|Math|Number|Object|Promise|RegExp|String|Symbol|console|document|window)\b'),
+        'number': re.compile(r'\b\d+\.?\d*([eE][+-]?\d+)?\b'),
+    },
+    'c': {
+        'comment': re.compile(r'(//.*$|/\*[\s\S]*?\*/)'),
+        'preprocessor': re.compile(r'#\s*(include|define|undef|ifdef|ifndef|if|else|elif|endif|pragma)'),
+        'string': re.compile(r'"(?:[^"\\]|\\.)*"'),
+        'keywords': re.compile(r'\b(auto|break|case|char|const|continue|default|do|double|else|enum|extern|float|for|goto|if|inline|int|long|register|restrict|return|short|signed|sizeof|static|struct|switch|typedef|union|unsigned|void|volatile|while)\b'),
+        'number': re.compile(r'\b\d+\.?\d*([eE][+-]?\d+)?[fFuUlL]?\b'),
+    },
+    'html': {
+        'comment': re.compile(r'<!--[\s\S]*?-->'),
+        'tag': re.compile(r'</?[\w-]+>?'),
+        'attribute': re.compile(r'\b[\w-]+='),
+        'string': re.compile(r'"[^"]*"|\'[^\']*\''),
+        'entity': re.compile(r'&\w+;'),
+    },
+    'css': {
+        'comment': re.compile(r'/\*[\s\S]*?\*/'),
+        'selector': re.compile(r'[.#]?[\w-]+(?=\s*\{)'),
+        'property': re.compile(r'\b[\w-]+(?=:)'),
+        'string': re.compile(r'"[^"]*"|\'[^\']*\''),
+        'number': re.compile(r'\b\d+\.?\d*(px|em|rem|%|vh|vw)?\b'),
+        'color': re.compile(r'#[0-9a-fA-F]{3,8}\b'),
+    },
+    'dsl': {
+        'comment': re.compile(r'\{\{[^}]*\}\}'),
+        'header': re.compile(r'#[A-Z_]+\b'),
+        'phonetic': re.compile(r'/[^/]+/|\[[^\[\]]*?\](?=\s|$|[,.;])'),
+        'pos_label': re.compile(r'\((?:n|v|adj|adv|prep|conj|pron|interj|num|det|aux|part|abbr|pl|sing|def|indef|sense_t|usage|var|pos)\)'),
+        'color_tag': re.compile(r'\[c\s+[^\]]+\]|\[/c\]'),
+        'attr_tag': re.compile(r'\[(?:ref|url|lang)\s+[^\]]+\]|\[/(?:ref|url|lang)\]'),
+        'tag_bracket': re.compile(r'(?:\[(?:/?(?:m[0-9]?|ex|com|trn|p|b|i|u|sub|sup|s)\b|\*)\]|/\*\])'),
+        'zone': re.compile(r'\[\*\]|\[/\*\]'),
+        'stress': re.compile(r'''\[(?:'|/)\]'''),
+        'link': re.compile(r'<<[^>]*>>'),
+        'file_ref': re.compile(r'\b[\w-]+\.(?:wav|mp3|ogg|bmp|png|jpg|jpeg|gif)\b'),
+        'escape': re.compile(r'\\[~@\[\]{}\\]'),
+        'tilde': re.compile(r'~'),
+        'at_sign': re.compile(r'@'),
+    },
+}
+
+# Pattern matching order for each language
+_FAST_ORDER = {
+    'python': ['comment', 'string', 'decorator', 'function', 'class', 'keywords', 'bool_ops', 'builtins', 'number', 'helpers'],
+    'javascript': ['comment', 'string', 'function', 'class', 'keywords', 'builtins', 'number'],
+    'c': ['comment', 'preprocessor', 'string', 'keywords', 'number'],
+    'html': ['comment', 'tag', 'attribute', 'string', 'entity'],
+    'css': ['comment', 'selector', 'property', 'string', 'color', 'number'],
+    'dsl': ['comment', 'header', 'phonetic', 'color_tag', 'attr_tag', 'tag_bracket', 'pos_label', 'zone', 'stress', 'link', 'file_ref', 'escape', 'tilde', 'at_sign'],
+}
+
 
 class RegexSyntaxEngine:
     """
@@ -209,6 +282,46 @@ class RegexSyntaxEngine:
         self.line_states = {} # {line_num: (state, delimiter, context_stack)}
         self.master_regex = None
         self.text_provider = None
+        self.use_fast_path = False  # Enable fast path for supported languages
+        self.fast_patterns = None
+        self.fast_order = None
+    
+    def _tokenize_fast(self, line_num, text):
+        """Optimized fast path for all supported languages."""
+        if not self.fast_patterns or not self.fast_order:
+            return []
+        
+        tokens = []
+        covered = [False] * len(text)
+        
+        for pattern_name in self.fast_order:
+            pattern = self.fast_patterns.get(pattern_name)
+            if not pattern:
+                continue
+            
+            for match in pattern.finditer(text):
+                start, end = match.span()
+                
+                # Skip if region already covered
+                if any(covered[start:end]):
+                    continue
+                
+                # Handle function/class (extract keyword + name)
+                if pattern_name in ('function', 'class') and match.lastindex and match.lastindex >= 2:
+                    kw_start, kw_end = match.span(1)
+                    name_start, name_end = match.span(2)
+                    
+                    tokens.append((kw_start, kw_end, 'keywords'))
+                    covered[kw_start:kw_end] = [True] * (kw_end - kw_start)
+                    
+                    tokens.append((name_start, name_end, pattern_name))
+                    covered[name_start:name_end] = [True] * (name_end - name_start)
+                else:
+                    tokens.append((start, end, pattern_name))
+                    covered[start:end] = [True] * (end - start)
+        
+        tokens.sort(key=lambda x: (x[0], x[1]))
+        return tokens
 
     def set_text_provider(self, provider):
         """Set function(line_num) -> text to allow gap filling"""
@@ -226,7 +339,17 @@ class RegexSyntaxEngine:
         self.patterns = SyntaxPatterns.get(lang)
         self.cache.clear()
         self.line_states.clear()
-        self._compile_master_regex()
+        
+        # Enable fast path for supported languages
+        if lang in _FAST_PATTERNS:
+            self.use_fast_path = True
+            self.fast_patterns = _FAST_PATTERNS[lang]
+            self.fast_order = _FAST_ORDER[lang]
+        else:
+            self.use_fast_path = False
+            self.fast_patterns = None
+            self.fast_order = None
+            self._compile_master_regex()
 
     def _compile_master_regex(self):
         if not self.patterns:
@@ -350,6 +473,15 @@ class RegexSyntaxEngine:
             del self.cache[line_num]
 
     def tokenize(self, line_num, text):
+        # FAST PATH: Use optimized highlighter for supported languages
+        if self.use_fast_path:
+            if line_num in self.cache:
+                return self.cache[line_num]
+            tokens = self._tokenize_fast(line_num, text)
+            self.cache[line_num] = tokens
+            return tokens
+        
+        # SLOW PATH: Original complex state machine for unsupported languages
         if not self.patterns:
             return []
 
