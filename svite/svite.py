@@ -1157,7 +1157,9 @@ class VirtualTextView(Gtk.DrawingArea):
         
         # Core Components from edig
         self.mapper = VisualLineMapper(buf)
-        self.syntax = SyntaxEngine()
+        self.syntax = buf.syntax_engine
+        self.syntax_queue = set()
+        self.syntax_idle_id = None
         self.undo_manager = UndoRedoManager()
         
         # Initialize Metrics (formerly in Renderer)
@@ -4023,6 +4025,45 @@ class VirtualTextView(Gtk.DrawingArea):
         return None
 
 
+    def _process_syntax_queue(self):
+        """Idle callback to process syntax highlighting."""
+        import time
+        start_t = time.time()
+        
+        if not self.syntax_queue:
+            self.syntax_idle_id = None
+            return False
+            
+        # Sort by proximity to center of screen (approx scroll_line)
+        # to prioritize visible area
+        center = self.scroll_line + (self.get_allocated_height() // self.line_h // 2)
+        sorted_q = sorted(list(self.syntax_queue), key=lambda x: abs(x - center))
+        
+        to_remove = set()
+        processed = 0
+        budget = 0.010 # 10ms budget
+        
+        for ln in sorted_q:
+            if (time.time() - start_t) > budget:
+                break
+                
+            if 0 <= ln < self.buf.total():
+                self.syntax.tokenize(ln, self.buf.get_line(ln))
+            
+            to_remove.add(ln)
+            processed += 1
+            
+        self.syntax_queue -= to_remove
+        
+        if processed > 0:
+            self.queue_draw()
+            
+        if not self.syntax_queue:
+            self.syntax_idle_id = None
+            return False
+            
+        return True
+
     def draw_view(self, area, cr, w, h):
         import time
         draw_start = time.time()
@@ -4085,7 +4126,19 @@ class VirtualTextView(Gtk.DrawingArea):
             segments = self.mapper.get_line_segments(current_log_line)
             
             # Syntax Tokens
-            tokens = self.syntax.tokenize(current_log_line, line_text)
+            # Progressive Rendering:
+            # Check if tokens are cached. If not, queue for idle processing and render plain text.
+            tokens = self.syntax.get_cached(current_log_line)
+            if tokens is None:
+                # Force synchronous tokenization for the line currently under cursor to prevent typing flicker
+                if current_log_line == self.buf.cursor_line:
+                    tokens = self.syntax.tokenize(current_log_line, line_text)
+                else:
+                    tokens = []
+                    if current_log_line not in self.syntax_queue:
+                        self.syntax_queue.add(current_log_line)
+                        if self.syntax_idle_id is None:
+                             self.syntax_idle_id = GLib.idle_add(self._process_syntax_queue)
         
             # Safeguard: If we are on first line and offset is invalid (too big), clamp it
             if current_log_line == self.scroll_line:

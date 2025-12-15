@@ -1180,13 +1180,16 @@ class VirtualBuffer:
         current_line = self._resolve_line(line)
         col = min(col, len(current_line))
         
-        self.syntax_engine.invalidate_from(line)
+        insert_lines = text.split('\n')
+        
+        if len(insert_lines) == 1:
+            self.syntax_engine.invalidate_line(line)
+        else:
+             self.syntax_engine.invalidate_from(line)
         self._size_delta += len(text.encode('utf-8')) # Approximate using utf-8
         
         before = current_line[:col]
         after = current_line[col:]
-        
-        insert_lines = text.split('\n')
         
         if len(insert_lines) == 1:
             # Single line modification
@@ -1252,7 +1255,10 @@ class VirtualBuffer:
         
         if start_line > end_line or (start_line == end_line and start_col >= end_col):
             return
-        self.syntax_engine.invalidate_from(start_line)
+        if start_line == end_line:
+            self.syntax_engine.invalidate_line(start_line)
+        else:
+            self.syntax_engine.invalidate_from(start_line)
         
         if provided_text is not None:
             deleted = provided_text

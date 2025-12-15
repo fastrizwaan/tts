@@ -338,6 +338,16 @@ class SyntaxEngine:
     # -----------------------------
     # Core tokenization
     # -----------------------------
+    def get_cached(self, line_num):
+        """Return tokens if already cached, otherwise None (don't calculate)."""
+        return self.cache.get(line_num)
+
+
+    def invalidate_line(self, line_num):
+        """Invalidate cache for a single line."""
+        if line_num in self.cache:
+            del self.cache[line_num]
+
     def tokenize(self, line_num, text):
         if not self.patterns:
             return []
@@ -347,6 +357,12 @@ class SyntaxEngine:
 
         # Initialize stack from previous line
         stack = self.get_start_state(line_num)
+        
+        # Capture old state for this line (if it exists) to check for changes
+        old_next_start_state = None
+        if line_num in self.line_states:
+             old_next_start_state = list(self.line_states[line_num])
+
         tokens = []
         pos = 0
         length = len(text)
@@ -537,9 +553,19 @@ class SyntaxEngine:
                     tokens.append((pos, length, content_type))
                     pos = length
         
-        # End of line
-        self.line_states[line_num] = list(stack)
+        # End of line state
+        new_state = list(stack)
+        self.line_states[line_num] = new_state
         self.cache[line_num] = self._apply_overlays(text, tokens)
+        
+        # Propagation Check: If exit state changed, invalidate next line
+        # Simple comparison of list of tuples is fine
+        if old_next_start_state != new_state:
+             if (line_num + 1) in self.cache:
+                 del self.cache[line_num + 1]
+             # Note: We rely on the renderer/idle loop to re-tokenize line_num + 1
+             # which will then recurse this logic.
+        
         return self.cache[line_num]
 
     def _apply_overlays(self, text, tokens):
