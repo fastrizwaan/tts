@@ -1346,8 +1346,8 @@ class VirtualTextView(Gtk.DrawingArea):
         self.cursor_visible = True
         self.cursor_blink_timeout = None
 
-        self.cursor_phase = 0.0           # animation phase 0 → 2
-        self.cursor_fade_speed = 0.03     # 0.02 ~ 50fps smooth fade
+        self.cursor_phase = 1.0           # animation phase 0 → 2
+        self.cursor_fade_speed = 0.01     # 0.02 ~ 50fps smooth fade
 
         self.start_cursor_blink()
         
@@ -1691,7 +1691,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.on_scroll_callback()
             self.queue_draw()
         else:
-            # No word wrap: Direct line scrolling with fractional position for smoothness
+            # No wrap: Direct line scrolling with fractional position for smoothness
             if not hasattr(self, 'scroll_line_frac'):
                 self.scroll_line_frac = 0.0
             
@@ -1887,7 +1887,7 @@ class VirtualTextView(Gtk.DrawingArea):
     def start_cursor_blink(self):
         """Start smooth cursor blinking with lightweight animation."""
         self.cursor_visible = True
-        self.cursor_phase = 0.0
+        self.cursor_phase = 1.0
 
         FPS = 60
         INTERVAL = int(1000 / FPS)
@@ -1913,7 +1913,7 @@ class VirtualTextView(Gtk.DrawingArea):
             self.cursor_blink_timeout = None
 
         self.cursor_visible = True
-        self.cursor_phase = 0.0
+        self.cursor_phase = 1.0
         self.queue_draw()
 
     def on_commit(self, im, text):
@@ -4036,7 +4036,7 @@ class VirtualTextView(Gtk.DrawingArea):
             
         # Sort by proximity to center of screen (approx scroll_line)
         # to prioritize visible area
-        center = self.scroll_line + (self.get_allocated_height() // self.line_h // 2)
+        center = self.scroll_line + (self.get_height() // self.line_h // 2)
         sorted_q = sorted(list(self.syntax_queue), key=lambda x: abs(x - center))
         
         to_remove = set()
@@ -4397,7 +4397,7 @@ class VirtualTextView(Gtk.DrawingArea):
                              cx = base_x + pos.x / Pango.SCALE
                              
                              cr.set_source_rgba(1, 1, 1, self.cursor_phase if self.cursor_phase <= 1 else 2 - self.cursor_phase)
-                             cr.rectangle(cx, current_y, 2, self.line_h)
+                             cr.rectangle(cx, current_y, 1, self.line_h)
                              cr.fill()
 
                 current_y += self.line_h
