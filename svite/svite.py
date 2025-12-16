@@ -1216,6 +1216,7 @@ class VirtualTextView(Gtk.DrawingArea):
         self.highlight_cache = {}
         self.current_match_idx = -1
         self.current_match = None
+        self._skip_to_position = None  # (line, col) - skip matches before this after replace
         
         self.highlight_current_line = True
         self.highlight_brackets = True
@@ -1363,29 +1364,43 @@ class VirtualTextView(Gtk.DrawingArea):
         self.max_match_length = max_match_length
         self.current_match_idx = -1
         self.current_match = None
-        
-        # Performance: For huge number of matches (1M+), building a cache dictionary 
-        # is extremely slow (O(N) sync).
-        # We now rely on dynamic rendering using bisect in draw_view.
-        # So we skip highlight_cache population.
         self.highlight_cache = {} 
 
         if not matches:
+            self._skip_to_position = None
             self.queue_draw()
             return
 
+        # Check if we have a skip position to honor (set by replace operation)
+        if self._skip_to_position:
+            skip_ln, skip_col = self._skip_to_position
+            self._skip_to_position = None  # Clear after use
+            
+            for i, m in enumerate(matches):
+                m_ln, m_col = m[0], m[1]
+                if (m_ln > skip_ln) or (m_ln == skip_ln and m_col >= skip_col):
+                    self.current_match_idx = i
+                    self.current_match = m
+                    self._scroll_to_match(m)
+                    self.queue_draw()
+                    return
+            
+            # No match after skip position - wrap to first
+            if matches:
+                self.current_match_idx = 0
+                self.current_match = matches[0]
+                self._scroll_to_match(matches[0])
+                self.queue_draw()
+                return
+
         # Try to preserve current match if requested
         if preserve_current and old_match is not None:
-            # Check if old index is valid in new list and matches old match
             if 0 <= old_idx < len(matches):
                 if matches[old_idx] == old_match:
                     self.current_match_idx = old_idx
                     self.current_match = old_match
                     self.queue_draw()
                     return
-
-        # Note: We skip the O(N) cache build loop here.
-        # This prevents locking the UI when 'Find' completes on a massive file.
         
         if self.search_matches:
             self.current_match_idx = 0
@@ -5304,11 +5319,13 @@ class FindReplaceBar(Gtk.Box):
         self._cancel_replace = None
         self._pending_replace = None # Queue replace args if search is busy
         self._suppress_auto_search = False # Flag to prevent auto-search on buffer change (e.g. during replace all)
+        self._last_replaced_match = None  # Guard against rapid double-replace
         self.add_css_class("find-bar")
         self.set_visible(False)
         self._search_timeout_id = None
         self._scroll_refresh_timeout = None
-        
+        self._in_replace = False
+
         # Connect scroll callback for viewport-based search refresh
         self.editor.view.on_scroll_callback = self._on_editor_scrolled
         
@@ -5530,10 +5547,21 @@ class FindReplaceBar(Gtk.Box):
         return False
 
     def on_search_changed(self, *args):
+        # 🔒 Do not re-search while replacing
+        if self._in_replace:
+            return False
+
         # Debounce to prevent excessive searches while typing
         if self._search_timeout_id:
             GLib.source_remove(self._search_timeout_id)
-        self._search_timeout_id = GLib.timeout_add(200, self._perform_search)
+            self._search_timeout_id = None
+
+        self._search_timeout_id = GLib.timeout_add(
+            200,
+            self._perform_search
+        )
+        return False
+
         
     def _perform_search(self):
         self._search_timeout_id = None
@@ -5680,60 +5708,39 @@ class FindReplaceBar(Gtk.Box):
         self.update_match_label()
         
     def on_replace(self, *args):
-        # Get replacement text
-        replacement = self.replace_entry.get_text()
-        
         # Get current match
-        if self.editor.view.current_match:
-            # Perform replacement
-            # Perform replacement
-            self.editor.buf.replace_current(self.editor.view.current_match, replacement)
-            
-            # Update search results (re-search to keep sync)
+        match = self.editor.view.current_match
+        if not match:
+            return
 
-            self.on_search_changed()
+        # Guard against rapid clicking replacing the same match multiple times
+        if self._last_replaced_match and self._last_replaced_match == match:
+            return
+        self._last_replaced_match = match
             
-            # The re-search might pick up the replaced text as a match? 
-            # If so, we want to skip it?
-            # Standard behavior: move to next match after replace.
-            
-            # self.editor.view.next_match() called via on_search_changed reset?
-            # on_search_changed resets matches.
-            
-            # We want to find the NEXT match from the current position.
-            # But search() finds from start.
-            
-            # Let's simplify: replace, then re-search, then try to find match after the edit.
-            # Or just next_match() after re-search?
-            # VirtualTextView.set_search_results resets current_match to 0.
-            
-            # We need to preserve position.
-            # Ideally `search` shouldn't be full re-scan if we can avoid it.
-            # But for now reliability > speed.
-            
-            # We can find where we were (line/col) and advance.
-            old_ln, old_col = self.editor.view.current_match[:2]
-            
-            # Re-search
-            self.on_search_changed()
-            
-            # Find the match that comes after (old_ln, old_col)
-            # Since we replaced, the text is changed. The next match is likely further ahead.
-            
-            # Find index of match that is >= old_ln, old_col (adjusted)
-            # Actually, we just need to find the first match that triggers 'next'.
-            # set_search_results sets current to 0.
-            
-            if self.editor.view.search_matches:
-                 # Find first match after old position
-                 for i, m in enumerate(self.editor.view.search_matches):
-                     ms_ln, ms_col = m[:2]
-                     if (ms_ln > old_ln) or (ms_ln == old_ln and ms_col >= old_col + len(replacement)):
-                         self.editor.view.current_match_idx = i
-                         self.editor.view.current_match = m
-                         self.editor.view._scroll_to_match(m)
-                         self.editor.view.queue_draw()
-                         break
+        replacement = self.replace_entry.get_text()
+        s_ln, s_col, e_ln, e_col = match[0:4]
+        
+        # Calculate end position after replacement
+        replacement_lines = replacement.split('\n')
+        if len(replacement_lines) == 1:
+            new_end_ln = s_ln
+            new_end_col = s_col + len(replacement)
+        else:
+            new_end_ln = s_ln + len(replacement_lines) - 1
+            new_end_col = len(replacement_lines[-1])
+        
+        # Set skip position BEFORE modifying buffer
+        # This tells set_search_results to skip matches before this position
+        self.editor.view._skip_to_position = (new_end_ln, new_end_col)
+        
+        # Perform replacement
+        self.editor.buf.replace_current(match, replacement)
+        self.editor.buf.set_cursor(new_end_ln, new_end_col)
+        
+        # Re-search - set_search_results will use _skip_to_position
+        self.on_search_changed()
+        self.update_match_label()
         
     def on_replace_all(self, *args):
         replacement = self.replace_entry.get_text()

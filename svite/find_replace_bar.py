@@ -14,7 +14,9 @@ class FindReplaceBar(Gtk.Box):
         self.set_visible(False)
         self._search_timeout_id = None
         self._scroll_refresh_timeout = None
-        
+        self._in_replace = False
+        self._last_replaced_match = None  # Guard against rapid double-replace
+
         # Connect scroll callback for viewport-based search refresh logic (if needed)
         # edig's EditorView handles scroll internally. 
         # We can connect to scrollbar or just expose a callback.
@@ -257,23 +259,43 @@ class FindReplaceBar(Gtk.Box):
              self.matches_label.set_text(f"{idx} of {count}")
         
     def on_replace(self, *args):
+        match = self.editor_view.get_current_match()
+        if not match:
+            return
+
+        # Guard against rapid clicking replacing the same match multiple times
+        if self._last_replaced_match and self._last_replaced_match == match:
+            return
+        self._last_replaced_match = match
+
+        sl, sc, el, ec = match[0:4]
         replacement = self.replace_entry.get_text()
-        if self.editor_view.current_match:
-            # Replace current logic
-            match = self.editor_view.current_match
-            self.editor_view.buffer.replace_current(match, replacement)
-            
-            # Re-search
-            self.on_search_changed() 
-            # Note: on_search_changed is async/debounced? No, we call it, but it sets timeout.
-            # We want immediate update?
-            # Manually call _perform_search? 
-            # Or simplified:
-            # We just updated buffer. We should trigger search update.
-            # Ideally buffer update triggers search update if search is active?
-            # For now, manually trigger.
-            # self._perform_search() # But we want to preserve position logic?
-            # Let's rely on user clicking Next for now or standard re-search.
+
+        # Calculate where replacement will end
+        replacement_lines = replacement.split('\n')
+        if len(replacement_lines) == 1:
+            new_end_ln = sl
+            new_end_col = sc + len(replacement)
+        else:
+            new_end_ln = sl + len(replacement_lines) - 1
+            new_end_col = len(replacement_lines[-1])
+
+        # Set skip position BEFORE modifying buffer
+        # This tells set_search_results to skip matches before this position
+        self.editor_view._skip_to_position = (new_end_ln, new_end_col)
+
+        # Perform replacement
+        buf = self.editor_view.buf
+        buf.delete(sl, sc, el, ec)
+        buf.insert(sl, sc, replacement)
+        buf.set_cursor(new_end_ln, new_end_col)
+
+        # Re-search - set_search_results will use _skip_to_position
+        self._perform_search()
+        self._update_label_idx()
+        self.editor_view.queue_draw()
+
+
             
     def on_replace_all(self, *args):
         replacement = self.replace_entry.get_text()
