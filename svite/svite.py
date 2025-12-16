@@ -8,7 +8,7 @@ import bisect
 import re
 import json
 from enum import Enum, auto
-from virtual_buffer import VirtualBuffer
+from virtual_buffer import VirtualBuffer, normalize_replacement_string
 from word_wrap import VisualLineMapper
 from syntax import RegexSyntaxEngine, SyntaxPatterns
 from undo_redo import UndoRedoManager
@@ -5720,6 +5720,25 @@ class FindReplaceBar(Gtk.Box):
             
         replacement = self.replace_entry.get_text()
         s_ln, s_col, e_ln, e_col = match[0:4]
+        
+        # Handle Regex Replacement with capturing groups
+        if self.regex_check.get_active():
+            try:
+                # 1. Get original match text
+                match_text = self.editor.buf.get_text_range(s_ln, s_col, e_ln, e_col)
+                
+                # 2. Compile pattern
+                query = self.find_entry.get_text()
+                flags = 0 if self.case_check.get_active() else re.IGNORECASE
+                pattern = re.compile(query, flags)
+                
+                # 3. Normalize replacement (\1 -> \g<1>)
+                norm_repl = normalize_replacement_string(replacement)
+                
+                # 4. Expand
+                replacement = pattern.sub(norm_repl, match_text)
+            except Exception as e:
+                print(f"Regex replacement error: {e}")
         
         # Calculate end position after replacement
         replacement_lines = replacement.split('\n')

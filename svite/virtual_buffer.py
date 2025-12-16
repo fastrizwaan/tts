@@ -19,6 +19,49 @@ from gi.repository import GLib
 from syntax import RegexSyntaxEngine
 
 
+def normalize_replacement_string(replacement: str) -> str:
+    r"""
+    Normalize capture group references in replacement strings.
+    
+    Converts \1, \2, etc. and $1, $2, etc. to Python's \g<1>, \g<2> format.
+    
+    Carefully ignores escaped backslashes (\\1 should remain as literal \1).
+    
+    Args:
+        replacement: The replacement string that may contain capture group references
+        
+    Returns:
+        Normalized replacement string compatible with Python's re.sub()
+        
+    Examples:
+        >>> normalize_replacement_string(r'\1')
+        '\\g<1>'
+        >>> normalize_replacement_string(r'$1')
+        '\\g<1>'
+        >>> normalize_replacement_string(r'\\1')
+        '\\\\1'
+        >>> normalize_replacement_string(r'\1 and \2')
+        '\\g<1> and \\g<2>'
+        >>> normalize_replacement_string(r'$1 and $2')
+        '\\g<1> and \\g<2>'
+    """
+    # Pattern to match \1, \2, etc. but NOT \\1, \\2
+    # Uses negative lookbehind to avoid matching escaped backslashes
+    # The pattern matches a backslash followed by one or more digits,
+    # but only if that backslash is not preceded by another backslash
+    backslash_pattern = r'(?<!\\)\\(\d+)'
+    
+    # Replace \1 with \g<1>, \2 with \g<2>, etc.
+    # The \g<...> syntax is Python's explicit group reference format
+    normalized = re.sub(backslash_pattern, r'\\g<\1>', replacement)
+    
+    # Also convert $1, $2, etc. to \g<1>, \g<2>
+    # Python's re.sub doesn't support $1 syntax natively
+    dollar_pattern = r'\$(\d+)'
+    normalized = re.sub(dollar_pattern, r'\\g<\1>', normalized)
+    
+    return normalized
+
 @dataclass
 class LineInfo:
     """Information about a line in the buffer."""
@@ -1351,6 +1394,55 @@ class VirtualBuffer:
         self._filepath = save_path
         self._is_modified = False
         self.load_file(save_path)
+
+    # ==================== Indentation ====================
+
+    def indent_selection(self):
+        """Indent selected lines."""
+        if not self.selection.has_selection():
+             return
+
+        # Get line range
+        start_ln, start_col, end_ln, end_col = self.selection.get_bounds()
+        
+        # Adjust end_ln if selection ends at start of line
+        # e.g. selecting line 1 fully: (1, 0) to (2, 0). Should only affect line 1.
+        if end_ln > start_ln and end_col == 0:
+            end_ln -= 1
+            
+        indent_str = "    " # Default to 4 spaces
+        
+        with self.batch_notifications():
+             for ln in range(start_ln, end_ln + 1):
+                 self.insert(ln, 0, indent_str, _record_undo=True)
+
+    def unindent_selection(self):
+        """Unindent selected lines or current line."""
+        start_ln = self.cursor_line
+        end_ln = self.cursor_line
+        
+        if self.selection.has_selection():
+            start_ln, _, end_ln, end_col = self.selection.get_bounds()
+            if end_ln > start_ln and end_col == 0:
+                end_ln -= 1
+                
+        with self.batch_notifications():
+            for ln in range(start_ln, end_ln + 1):
+                line_text = self.get_line(ln)
+                if not line_text: continue
+                
+                # Check what to remove
+                if line_text.startswith('\t'):
+                    self.delete(ln, 0, ln, 1, _record_undo=True)
+                elif line_text.startswith('    '):
+                    self.delete(ln, 0, ln, 4, _record_undo=True)
+                elif line_text.startswith(' '):
+                    # Remove up to 4 spaces
+                    count = 0
+                    while count < 4 and count < len(line_text) and line_text[count] == ' ':
+                        count += 1
+                    if count > 0:
+                        self.delete(ln, 0, ln, count, _record_undo=True)
 
     # ==================== Search & Replace ====================
 

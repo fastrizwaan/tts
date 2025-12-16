@@ -5,6 +5,7 @@ gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, Gdk, GLib
 from typing import Optional
 import re
+from virtual_buffer import normalize_replacement_string
 
 class FindReplaceBar(Gtk.Box):
     def __init__(self, editor_view):
@@ -270,6 +271,29 @@ class FindReplaceBar(Gtk.Box):
 
         sl, sc, el, ec = match[0:4]
         replacement = self.replace_entry.get_text()
+
+        # Handle Regex Replacement with capturing groups (e.g. \1, $1)
+        if self.regex_check.get_active():
+            try:
+                # 1. Get original match text
+                match_text = self.editor_view.buf.get_text_range(sl, sc, el, ec)
+                
+                # 2. Compile pattern to apply substitution
+                query = self.find_entry.get_text()
+                flags = 0 if self.case_check.get_active() else re.IGNORECASE
+                pattern = re.compile(query, flags)
+                
+                # 3. Normalize replacement string (\1 -> \g<1>)
+                norm_replacement = normalize_replacement_string(replacement)
+                
+                # 4. Expand replacement
+                # Note: We apply sub to the EXACT matched text. 
+                # This ensures backreferences to groups within the match work.
+                replacement = pattern.sub(norm_replacement, match_text)
+            except Exception as e:
+                print(f"Regex replacement error: {e}")
+                # Fallback to literal replacement logic if regex fails
+
 
         # Calculate where replacement will end
         replacement_lines = replacement.split('\n')
