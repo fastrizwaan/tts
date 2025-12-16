@@ -7251,19 +7251,16 @@ class EditorWindow(Adw.ApplicationWindow):
         
         # Close the original page (it's now empty, so this is fast)
         self.tab_view.close_page(page)
+        
+        # Update UI state in the old window to hide tab bar if only 1 tab remains
+        self.update_ui_state()
+        self.update_tab_dropdown()
 
     def grab_focus_editor(self):
         """Helper to grab focus on the current editor view"""
         editor = self.get_current_page()
         if editor:
             editor.view.grab_focus()
-        
-
-        
-        # Update UI state
-        self.update_ui_state()
-        self.update_tab_dropdown()
-        
 
 
     def close_tab_after_drag(self, tab_index):
@@ -8593,23 +8590,32 @@ class VirtualTextEditor(Adw.Application):
         win = self.props.active_window
         if not win:
             win = EditorWindow(self)
-            
-            # Open files from command line if any
-            if self.files_to_open:
-                # Close the initial empty tab
-                if win.tab_view.get_n_pages() == 1:
-                    first_page = win.tab_view.get_nth_page(0)
+        
+        # Open files from command line if any (works for both new and existing windows)
+        if self.files_to_open:
+            # If this is a new window with only the initial empty tab, close it first
+            if win.tab_view.get_n_pages() == 1:
+                first_page = win.tab_view.get_nth_page(0)
+                editor = first_page.get_child()._editor
+                
+                # Check if it's an empty untitled file
+                if (not editor.current_file_path and 
+                    editor.buf.total() == 1 and 
+                    len(editor.buf.get_line(0)) == 0):
+                    # Close the initial empty tab
                     win.tab_view.close_page(first_page)
                     for tab in win.tab_bar.tabs:
                         if hasattr(tab, '_page') and tab._page == first_page:
                             win.tab_bar.remove_tab(tab)
                             break
-                
-                # Open each file in a new tab
-                for file_path in self.files_to_open:
+            
+            # Open each file in a new tab
+            for file_path in self.files_to_open:
+                # Check if file is already open - if so, activate that tab
+                if not win.activate_tab_with_file(file_path):
                     win.add_tab(file_path)
-                
-                self.files_to_open = []
+            
+            self.files_to_open = []
         
         win.present()
     
