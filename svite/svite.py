@@ -7235,6 +7235,13 @@ class EditorWindow(Adw.ApplicationWindow):
         # Mark the tab to not release untitled numbers since they were transferred
         page._untitled_numbers_transferred = True
         
+        # Remove the ChromeTab from the old window's ChromeTabBar before closing
+        # This prevents the tab from hanging in the old window
+        for tab in self.tab_bar.tabs:
+            if hasattr(tab, '_page') and tab._page == page:
+                self.tab_bar.remove_tab(tab)
+                break
+        
         # Close the original page (it's now empty, so this is fast)
         self.tab_view.close_page(page)
 
