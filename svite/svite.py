@@ -4969,6 +4969,11 @@ class ChromeTabBar(Adw.WrapBox):
         # self._connect_hover(tab)
 
         self.update_separators()
+        
+        # Update window UI state (visibility of tab bar)
+        window = self.get_ancestor(Adw.ApplicationWindow)
+        if window and hasattr(window, 'update_ui_state'):
+            window.update_ui_state()
 
 
 
@@ -4990,6 +4995,11 @@ class ChromeTabBar(Adw.WrapBox):
         self.tabs.remove(tab)
 
         self.update_separators()
+    
+        # Update window UI state (visibility of tab bar)
+        window = self.get_ancestor(Adw.ApplicationWindow)
+        if window and hasattr(window, 'update_ui_state'):
+            window.update_ui_state()
 
     # _connect_hover REMOVED - logic moved to ChromeTab
 
