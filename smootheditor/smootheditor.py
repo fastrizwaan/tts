@@ -225,7 +225,8 @@ class TextEditorWindow(Adw.ApplicationWindow):
         }}
         """
         css_provider.load_from_data(css.encode())
-        self.text_view.get_style_context().add_provider(
+        Gtk.StyleContext.add_provider_for_display(
+            self.get_display(),
             css_provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
