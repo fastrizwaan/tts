@@ -16,7 +16,7 @@ import re
 import time
 from contextlib import contextmanager
 from gi.repository import GLib
-from syntax import RegexSyntaxEngine
+from syntax_v2 import StateAwareSyntaxEngine
 
 
 def normalize_replacement_string(replacement: str) -> str:
@@ -663,7 +663,7 @@ class VirtualBuffer:
         self._mmap: Optional[mmap.mmap] = None
         self._file: Optional[object] = None
         self._indexer = LineIndexer()
-        self.syntax_engine = RegexSyntaxEngine()
+        self.syntax_engine = StateAwareSyntaxEngine()
         self.syntax_engine.set_text_provider(self.get_line)
         
         # Memory optimized line mapping:
@@ -683,9 +683,9 @@ class VirtualBuffer:
     def set_language(self, lang):
         current_engine = self.syntax_engine
         
-        if not isinstance(current_engine, RegexSyntaxEngine):
-            print(f"Switching to RegexSyntaxEngine for {lang}")
-            self.syntax_engine = RegexSyntaxEngine()
+        if not isinstance(current_engine, StateAwareSyntaxEngine):
+            print(f"Switching to StateAwareSyntaxEngine for {lang}")
+            self.syntax_engine = StateAwareSyntaxEngine()
             self.syntax_engine.set_text_provider(self.get_line)
         
         self.syntax_engine.set_language(lang)

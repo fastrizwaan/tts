@@ -10,7 +10,7 @@ import json
 from enum import Enum, auto
 from virtual_buffer import VirtualBuffer, normalize_replacement_string
 from word_wrap import VisualLineMapper
-from syntax import RegexSyntaxEngine, SyntaxPatterns
+from syntax_v2 import StateAwareSyntaxEngine
 from undo_redo import UndoRedoManager
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -4153,7 +4153,7 @@ class VirtualTextView(Gtk.DrawingArea):
             if tokens is None:
                 # Regex is fast enough to tokenize synchronously
                 # This prevents "flashing" caused by cache clearing + async idle queue.
-                if isinstance(self.syntax, RegexSyntaxEngine):
+                if isinstance(self.syntax, StateAwareSyntaxEngine):
                     tokens = self.syntax.tokenize(current_log_line, line_text)
                 else:
                     tokens = []
