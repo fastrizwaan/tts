@@ -292,6 +292,7 @@ class StateAwareSyntaxEngine:
         self.text_provider: Optional[Callable[[int], str]] = None
         self._total_lines_provider: Optional[Callable[[], int]] = None
         self._patterns = None
+        self.theme: Optional[str] = None
     
     def set_text_provider(self, provider: Callable[[int], str]):
         """Set function to get line text: provider(line_num) -> str"""
@@ -311,6 +312,10 @@ class StateAwareSyntaxEngine:
             self._patterns = PythonPatterns
         else:
             self._patterns = None
+
+    def set_theme(self, theme: str):
+        """Set the current theme (light/dark)."""
+        self.theme = theme
     
     def invalidate_from(self, start_line: int):
         """Invalidate cache and state chain from a line onwards."""
