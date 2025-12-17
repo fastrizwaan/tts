@@ -135,6 +135,7 @@ class TextEditorWindow(Adw.ApplicationWindow):
         self.lines_per_page = 1000
         self.search_results = []
         self.current_search_index = 0
+        self.scroll_loading = False  # Prevent scroll feedback loop
         
         # Main layout
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -366,7 +367,7 @@ class TextEditorWindow(Adw.ApplicationWindow):
     
     def on_scroll_changed(self, adj):
         """Virtual scrolling - load different page window based on scroll position"""
-        if not self.is_large_file or not self.indexer:
+        if not self.is_large_file or not self.indexer or self.scroll_loading:
             return
         
         # Calculate which virtual line we're at based on scroll position
@@ -386,20 +387,19 @@ class TextEditorWindow(Adw.ApplicationWindow):
         target_page = (virtual_line // self.lines_per_page) * self.lines_per_page
         
         # Only reload if we've moved to a significantly different page
-        if abs(target_page - self.current_start_line) > self.lines_per_page // 2:
-            self.load_page_virtual(target_page)
+        if abs(target_page - self.current_start_line) > self.lines_per_page // 4:
+            self.load_page_virtual(target_page, preserve_scroll_ratio=scroll_ratio)
     
-    def load_page_virtual(self, start_line):
+    def load_page_virtual(self, start_line, preserve_scroll_ratio=None):
         """Load specific page window without appending"""
-        if not self.indexer:
+        if not self.indexer or self.scroll_loading:
             return
+        
+        self.scroll_loading = True
         
         total_lines = self.indexer.get_line_count()
         start_line = max(0, min(start_line, total_lines - self.lines_per_page))
         end_line = min(start_line + self.lines_per_page, total_lines)
-        
-        # Disconnect scroll handler temporarily to avoid triggering reload
-        self.vadj.disconnect_by_func(self.on_scroll_changed)
         
         # Load new page window
         text = self.indexer.get_lines(start_line, end_line - 1)
@@ -410,8 +410,20 @@ class TextEditorWindow(Adw.ApplicationWindow):
         self.update_line_numbers(start_line, end_line - start_line)
         self.update_navigation()
         
-        # Reconnect scroll handler
-        self.vadj.connect("value-changed", self.on_scroll_changed)
+        # Restore approximate scroll position if needed
+        if preserve_scroll_ratio is not None:
+            GLib.idle_add(lambda: self.restore_scroll_position(preserve_scroll_ratio))
+        
+        self.scroll_loading = False
+    
+    def restore_scroll_position(self, ratio):
+        """Restore scroll position after page load"""
+        adj = self.vadj
+        upper = adj.get_upper()
+        page_size = adj.get_page_size()
+        new_value = ratio * (upper - page_size)
+        adj.set_value(max(0, min(new_value, upper - page_size)))
+        return False
     
     def navigate_pages(self, direction):
         """Navigate through pages in large files"""
@@ -655,12 +667,21 @@ Try opening a huge log file!
             
             self.current_start_line = 0
             self.lines_per_page = 1000
-            self.load_page_virtual(0)
             
-            self.text_view.set_editable(False)
+            # Initial load
+            total_lines = self.indexer.get_line_count()
+            end_line = min(self.lines_per_page, total_lines)
+            text = self.indexer.get_lines(0, end_line - 1)
+            self.buffer.set_text(text)
+            self.update_line_numbers(0, end_line)
+            
+            # Enable editing for large files too
+            self.text_view.set_editable(True)
+            
             self.progress_bar.set_visible(False)
-            self.set_title(f"{filename} - Ultimate Editor (Large)")
+            self.set_title(f"{filename} - Ultimate Editor (Virtual Scroll)")
             self.update_status()
+            self.update_navigation()
             
             return False
         
@@ -669,7 +690,26 @@ Try opening a huge log file!
     def on_save_clicked(self, button):
         """Save file"""
         if self.is_large_file:
-            self.status_bar.set_text("Cannot save large files in read-only mode")
+            # For large files, show warning but allow save
+            dialog = Adw.MessageDialog(
+                transient_for=self,
+                heading="Save Large File?",
+                body="This will save only the currently visible window of lines. To save the entire file, please use another editor."
+            )
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("save", "Save Visible Lines")
+            dialog.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+            
+            def on_response(dlg, response):
+                if response == "save":
+                    if self.current_file:
+                        self.save_file(self.current_file)
+                    else:
+                        file_dialog = Gtk.FileDialog()
+                        file_dialog.save(self, None, self.on_save_response)
+            
+            dialog.connect("response", on_response)
+            dialog.present()
             return
         
         if self.current_file:
