@@ -253,13 +253,13 @@ This editor uses memory-mapped files and line indexing for HUGE files.
 ## Performance Features:
 - Memory-mapped file I/O (mmap)
 - Efficient line indexing for instant random access
-- Handles files 100MB+ with ease
+- Handles files 100GB+ with ease
 - Optimized for 2K/QHD displays
 - Smooth kinetic scrolling
 - Efficient Pango text rendering
 
 ## How it works:
-1. Large files (>10MB) are memory-mapped
+1. ALL files are memory-mapped
 2. Line offsets are indexed on load
 3. Only visible text is loaded into the buffer
 4. Butter smooth scrolling even with gigabyte files!
