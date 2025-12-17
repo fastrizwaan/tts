@@ -365,42 +365,53 @@ class TextEditorWindow(Adw.ApplicationWindow):
         self.line_buffer.set_text(lines)
     
     def on_scroll_changed(self, adj):
-        """Handle scroll for lazy loading in large files"""
+        """Virtual scrolling - load different page window based on scroll position"""
         if not self.is_large_file or not self.indexer:
             return
         
-        # Check if near bottom
+        # Calculate which virtual line we're at based on scroll position
         value = adj.get_value()
         upper = adj.get_upper()
         page_size = adj.get_page_size()
         
-        if value + page_size >= upper - 100:
-            self.load_more_lines()
+        if upper == 0:
+            return
+        
+        # Map scroll position to line number in the entire file
+        total_lines = self.indexer.get_line_count()
+        scroll_ratio = value / max(upper - page_size, 1)
+        virtual_line = int(scroll_ratio * total_lines)
+        
+        # Calculate which page window this falls into
+        target_page = (virtual_line // self.lines_per_page) * self.lines_per_page
+        
+        # Only reload if we've moved to a significantly different page
+        if abs(target_page - self.current_start_line) > self.lines_per_page // 2:
+            self.load_page_virtual(target_page)
     
-    def load_more_lines(self):
-        """Load more lines when scrolling in large files"""
-        if not self.is_large_file or not self.indexer:
+    def load_page_virtual(self, start_line):
+        """Load specific page window without appending"""
+        if not self.indexer:
             return
         
         total_lines = self.indexer.get_line_count()
-        end_line = self.current_start_line + self.lines_per_page
+        start_line = max(0, min(start_line, total_lines - self.lines_per_page))
+        end_line = min(start_line + self.lines_per_page, total_lines)
         
-        if end_line >= total_lines:
-            return
+        # Disconnect scroll handler temporarily to avoid triggering reload
+        self.vadj.disconnect_by_func(self.on_scroll_changed)
         
-        # Load next chunk
-        next_chunk_size = min(500, total_lines - end_line)
-        if next_chunk_size <= 0:
-            return
+        # Load new page window
+        text = self.indexer.get_lines(start_line, end_line - 1)
+        self.buffer.set_text(text)
         
-        text = self.indexer.get_lines(end_line, end_line + next_chunk_size - 1)
+        self.current_start_line = start_line
         
-        # Append to buffer
-        end_iter = self.buffer.get_end_iter()
-        self.buffer.insert(end_iter, "\n" + text)
-        self.lines_per_page += next_chunk_size
-        
+        self.update_line_numbers(start_line, end_line - start_line)
         self.update_navigation()
+        
+        # Reconnect scroll handler
+        self.vadj.connect("value-changed", self.on_scroll_changed)
     
     def navigate_pages(self, direction):
         """Navigate through pages in large files"""
@@ -408,30 +419,17 @@ class TextEditorWindow(Adw.ApplicationWindow):
             return
         
         total_lines = self.indexer.get_line_count()
-        page_size = 1000
+        page_size = self.lines_per_page
         
         new_start = self.current_start_line + (direction * page_size)
         new_start = max(0, min(new_start, total_lines - page_size))
         
         if new_start != self.current_start_line:
-            self.load_page(new_start)
+            self.load_page_virtual(new_start)
     
     def load_page(self, start_line):
-        """Load specific page of lines"""
-        if not self.indexer:
-            return
-        
-        total_lines = self.indexer.get_line_count()
-        end_line = min(start_line + 1000, total_lines)
-        
-        text = self.indexer.get_lines(start_line, end_line - 1)
-        self.buffer.set_text(text)
-        
-        self.current_start_line = start_line
-        self.lines_per_page = end_line - start_line
-        
-        self.update_line_numbers(start_line, self.lines_per_page)
-        self.update_navigation()
+        """Load specific page of lines (for initial load and jump)"""
+        self.load_page_virtual(start_line)
     
     def update_navigation(self):
         """Update navigation controls"""
@@ -439,7 +437,7 @@ class TextEditorWindow(Adw.ApplicationWindow):
             return
         
         total_lines = self.indexer.get_line_count()
-        end_line = self.current_start_line + self.lines_per_page
+        end_line = min(self.current_start_line + self.lines_per_page, total_lines)
         
         self.nav_label.set_text(
             f"Lines {self.current_start_line + 1:,} - {end_line:,} of {total_lines:,}"
@@ -656,7 +654,8 @@ Try opening a huge log file!
             self.indexer.index_lines(progress_callback)
             
             self.current_start_line = 0
-            self.load_page(0)
+            self.lines_per_page = 1000
+            self.load_page_virtual(0)
             
             self.text_view.set_editable(False)
             self.progress_bar.set_visible(False)
