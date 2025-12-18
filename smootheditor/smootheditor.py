@@ -121,13 +121,13 @@ class TextEditorWindow(Adw.ApplicationWindow):
         self.is_large_file = False
         self.large_file_threshold = 10 * 1024 * 1024  # 10MB
         
-        # Main layout
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.set_content(box)
+        # Main layout using ToolbarView for automatic shadow
+        toolbar_view = Adw.ToolbarView()
+        self.set_content(toolbar_view)
         
         # Header bar with controls
         header = Adw.HeaderBar()
-        box.append(header)
+        toolbar_view.add_top_bar(header)
         
         # Open button
         open_btn = Gtk.Button(icon_name="document-open-symbolic")
@@ -167,10 +167,14 @@ class TextEditorWindow(Adw.ApplicationWindow):
         menu_btn.set_menu_model(self.create_settings_menu())
         header.pack_end(menu_btn)
         
+        # Content box for progress bar, scrolled window, and status bar
+        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        toolbar_view.set_content(content_box)
+        
         # Progress bar for indexing
         self.progress_bar = Gtk.ProgressBar()
         self.progress_bar.set_visible(False)
-        box.append(self.progress_bar)
+        content_box.append(self.progress_bar)
         
         # Scrolled window with optimizations
         scrolled = Gtk.ScrolledWindow()
@@ -178,7 +182,7 @@ class TextEditorWindow(Adw.ApplicationWindow):
         scrolled.set_hexpand(True)
         scrolled.set_kinetic_scrolling(True)
         scrolled.set_overlay_scrolling(True)
-        box.append(scrolled)
+        content_box.append(scrolled)
         
         # Text view with performance optimizations
         self.text_view = GtkSource.View()
@@ -218,7 +222,7 @@ class TextEditorWindow(Adw.ApplicationWindow):
         self.status_bar.set_margin_end(12)
         self.status_bar.set_margin_top(6)
         self.status_bar.set_margin_bottom(6)
-        box.append(self.status_bar)
+        content_box.append(self.status_bar)
         
         # Track changes for status
         self.buffer.connect("changed", self.on_buffer_changed)
