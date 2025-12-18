@@ -238,9 +238,16 @@ class TextEditorWindow(Adw.ApplicationWindow):
         style_manager.connect('notify::dark', self.on_theme_changed)
         self.update_theme()
 
-        # Load sample text
-        self.load_sample_text()
-        
+        # Focus the editor on startup with a slight delay to ensure correct rendering
+        def on_startup_focus():
+            self.text_view.set_editable(True)
+            self.text_view.grab_focus()
+            # Ensure line highlight is visible by placing cursor at start
+            self.buffer.place_cursor(self.buffer.get_start_iter())
+            return False
+            
+        GLib.idle_add(on_startup_focus)
+
     def setup_actions(self):
         # View Options
         self.add_toggle_action("show-line-numbers", True, 
@@ -377,48 +384,6 @@ class TextEditorWindow(Adw.ApplicationWindow):
             line_count = buffer.get_line_count()
             self.status_bar.set_text(f"{line_count} lines, {char_count} characters")
     
-    def load_sample_text(self):
-        """Load sample text for demonstration"""
-        sample = """# Welcome to Buttery Smooth Editor with mmap!
-
-This editor uses memory-mapped files and line indexing for HUGE files.
-
-## Performance Features:
-- Memory-mapped file I/O (mmap)
-- Efficient line indexing for instant random access
-- Handles files 1GB+ with ease
-- Optimized for 2K/QHD displays
-- Smooth kinetic scrolling
-- Efficient Pango text rendering
-- fully feature rich
-- comprehensive high performance syntax highlighting for all popular languages
-- high performance find replace with regex
-- multi tab, multi window support
-- opens files with mmap, utf16, utf8 le/be bom
-
-## How it works:
-1. ALL files are memory-mapped
-2. Line offsets are indexed on load
-3. Only visible text is loaded into the buffer
-4. Butter smooth scrolling even with gigabyte files!
-
-## Try it out:
-- Open a huge log file, CSV, or text dump
-- Watch it load and index quickly
-- Scroll smoothly through millions of lines
-- Edit text with zero lag
-
-""" + "\n".join([f"Line {i}: This is sample content for testing smooth scrolling performance." for i in range(100)])
-        
-        self.buffer.set_text(sample)
-        
-        # Set Markdown for sample
-        lang_manager = GtkSource.LanguageManager.get_default()
-        markdown = lang_manager.get_language('markdown')
-        if markdown:
-            self.buffer.set_language(markdown)
-            
-        self.update_status()
     
     def update_language(self, filename):
         """Detect and set language for syntax highlighting"""
