@@ -573,15 +573,20 @@ class IndexedFile:
         if self.is_empty:
             self.index = array('Q', [0])
             return
-
+    
         mm = self.mm
         total_size = len(mm)
         
         # Determine newline pattern based on endianness
-        if self.encoding == "utf-16le":
+        # Note: "utf-16" without suffix defaults to LE in Python
+        # Also handle "utf-16-le" and "utf-16-be" variants
+        encoding_lower = self.encoding.lower().replace('-', '')
+        if encoding_lower in ("utf16le", "utf16"):
             newline_bytes = b'\n\x00'  # UTF-16LE: \n = 0x0A 0x00
+            bom = b'\xff\xfe'  # LE BOM
         else:  # utf-16be
             newline_bytes = b'\x00\n'  # UTF-16BE: \n = 0x00 0x0A
+            bom = b'\xfe\xff'  # BE BOM
         
         # Check for BOM and set start position
         start_pos = 0
@@ -589,6 +594,13 @@ class IndexedFile:
             first_two = mm[0:2]
             if first_two in (b'\xff\xfe', b'\xfe\xff'):
                 start_pos = 2
+                # Verify BOM matches expected endianness
+                if first_two != bom:
+                    # BOM doesn't match detected encoding - adjust
+                    if first_two == b'\xff\xfe':
+                        newline_bytes = b'\n\x00'  # LE
+                    else:
+                        newline_bytes = b'\x00\n'  # BE
         
         # Use array.array for fast integer storage
         self.index = array('Q', [start_pos])
@@ -620,8 +632,7 @@ class IndexedFile:
             self.index.append(total_size)
         
         if progress_callback:
-            GLib.idle_add(progress_callback, 1.0)
-
+            GLib.idle_add(progress_callback, 1.0) 
     def total_lines(self):
         return len(self.index) - 1
 

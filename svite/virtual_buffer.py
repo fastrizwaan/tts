@@ -106,73 +106,73 @@ class LineIndexer:
         self._total_size = file_size
         self._offsets = array('Q', [0])
         self._lengths = array('Q')
-        self._implicit_lengths = False # Reset
+        self._implicit_lengths = False  # Reset
         
         if file_size == 0:
             self._lengths.append(0)
             return
+        
+        # Determine newline sequence and step size based on encoding
+        encoding_lower = encoding.lower() if encoding else 'utf-8'
+        if 'utf-16' in encoding_lower or 'utf16' in encoding_lower:
+            # UTF-16 handling
+            step = 2
             
-        newline_seq = b'\n'
-        step = 1
+            # Check BOM to determine endianness
+            with open(filepath, 'rb') as f:
+                bom = f.read(2)
+            
+            if bom == b'\xfe\xff':  # BE BOM
+                newline_seq = b'\x00\n'
+            else:  # LE BOM or no BOM (default to LE)
+                newline_seq = b'\n\x00'
+        else:
+            # UTF-8 / ASCII
+            newline_seq = b'\n'
+            step = 1
         
-        # Determine newline sequence and step based on encoding
-        is_utf16 = False
-        if encoding:
-            enc_lower = encoding.lower()
-            if enc_lower.startswith('utf-16'):
-                is_utf16 = True
-                step = 2
-                # Check BOM or endianness to decide newline sequence
-                # Ideally, we should detect endianness from BOM if strictly 'utf-16'
-                # But here we might just have 'utf-16' passed from detect_encoding.
-                # If 'utf-16' and starts with BOM, we need to respect it.
-                
-                # We'll peek at the file start if checks are ambiguous
-                newline_seq = b'\n\x00' # Default to LE
-                
-                with open(filepath, 'rb') as f:
-                    head = f.read(2)
-                    if head == b'\xfe\xff': # BE
-                        newline_seq = b'\x00\n'
-                    elif head == b'\xff\xfe': # LE
-                        newline_seq = b'\n\x00'
-                    elif enc_lower == 'utf-16be':
-                        newline_seq = b'\x00\n'
-                    # else 'utf-16le' or 'utf-16' default -> LE (most common on Windows/Linux for this)
-        
-        # Save newline len for implicit mode later if needed
+        # Save newline length for potential implicit mode
         newline_len = len(newline_seq)
-
-        with open(filepath, 'rb') as f:
-            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                pos = 0
-                while pos < file_size:
-                    # Find next newline
-                    if is_utf16:
-                        # For UTF-16, we need to search aligned
-                        newline_pos = mm.find(newline_seq, pos)
-                        # Alignment check: (newline_pos - 0) must be divisible by 2
-                        while newline_pos != -1 and (newline_pos % 2) != 0:
-                             newline_pos = mm.find(newline_seq, newline_pos + 1)
-                    else:
-                        newline_pos = mm.find(newline_seq, pos)
+        
+        current_pos = 0
+        try:
+            with open(filepath, 'rb') as f:
+                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                    # Skip BOM if present for UTF-16
+                    if 'utf-16' in encoding_lower and file_size >= 2:
+                        bom_check = mm[:2]
+                        if bom_check in (b'\xff\xfe', b'\xfe\xff'):
+                            current_pos = 2
+                            self._offsets[0] = 2  # Update start position
+                    
+                    while current_pos < file_size:
+                        next_newline = mm.find(newline_seq, current_pos)
                         
-                    if newline_pos == -1:
-                        # Last line without newline
-                        self._lengths.append(file_size - pos)
-                        break
-                    else:
-                        self._lengths.append(newline_pos - pos)
-                        pos = newline_pos + len(newline_seq)
-                        if pos < file_size:
-                            self._offsets.append(pos)
-                
-                # Handle file ending with newline
-                if file_size >= len(newline_seq):
-                     suffix = mm[file_size - len(newline_seq):file_size]
-                     if suffix == newline_seq:
-                        self._offsets.append(file_size)
-                        self._lengths.append(0)
+                        if next_newline == -1:
+                            # Last line without newline
+                            length = file_size - current_pos
+                            self._lengths.append(length)
+                            break
+                        else:
+                            length = next_newline - current_pos
+                            self._lengths.append(length)
+                            
+                            # Move past the full newline sequence
+                            current_pos = next_newline + newline_len
+                            if current_pos < file_size:
+                                self._offsets.append(current_pos)
+                    
+                    # Handle file ending with newline
+                    if file_size >= step:
+                        suffix = mm[file_size - step:file_size]
+                        if suffix == newline_seq:
+                            self._offsets.append(file_size)
+                            self._lengths.append(0)
+                            
+        except (FileNotFoundError, ValueError, OSError) as e:
+            print(f"Error building index: {e}")
+            self._offsets = array('Q', [0])
+            self._lengths = array('Q', [0])
     
     def build_from_text(self, text: str) -> None:
         """Build line index from in-memory text."""
@@ -405,9 +405,13 @@ class SegmentedLineMap:
     def __init__(self, total_count):
         self.segments = [range(total_count)]
         self._total_len = total_count
-        # Cache start offsets for O(log N) access
         self.offsets = array('Q', [0])
-        self.overrides = {} # Sparse updates {line_idx: new_val}
+        self.overrides = {}
+
+    # ---- COMPATIBILITY SHIMS ----
+
+    def __len__(self):
+        return self._total_len
         
     def _rebuild_offsets(self):
         """Rebuild offsets array from segments."""
@@ -428,26 +432,25 @@ class SegmentedLineMap:
         return self._total_len
 
     def __getitem__(self, idx):
-        if idx < 0: idx += self._total_len
         if isinstance(idx, slice):
             start, stop, step = idx.indices(self._total_len)
-            result = []
-            for i in range(start, stop, step):
-                result.append(self[i])
-            return result
-            
-        if idx < 0 or idx >= self._total_len: 
-             return -1
-        
+            return [self[i] for i in range(start, stop, step)]
+    
+        if idx < 0:
+            idx += self._total_len
+        if idx < 0 or idx >= self._total_len:
+            raise IndexError(idx)
+    
         if idx in self.overrides:
-             return self.overrides[idx]
-        
-        # O(log S) lookup
+            return self.overrides[idx]
+    
         import bisect
         seg_idx = bisect.bisect_right(self.offsets, idx) - 1
         seg_start = self.offsets[seg_idx]
-        offset = idx - seg_start
-        return self.segments[seg_idx][offset]
+        return self.segments[seg_idx][idx - seg_start]
+
+
+
 
     def _try_merge(self, idx):
         """Try to merge segment at idx with idx+1 if compliant."""
@@ -836,12 +839,13 @@ class VirtualBuffer:
         self.syntax_engine.invalidate_from(0)
 
     def load_file(self, filepath: str, encoding: Optional[str] = None, progress_callback: Optional[callable] = None) -> None:
-        """Load a file using lazy index."""
+        """Load a file using lazy index. Patched to detect encoding BEFORE indexing."""
         self.close()
         
         self._filepath = filepath
         file_size = os.path.getsize(filepath)
         
+        # 1. Handle Empty Files (Preserved)
         if file_size == 0:
             self._lines = SegmentedLineMap(1) # One empty line
             self._modified_cache = {0: ""}
@@ -850,28 +854,31 @@ class VirtualBuffer:
             self._notify_observers()
             return
         
-        # Build line index (fast scan)
-        self._indexer.build_from_file(filepath, encoding=encoding)
-            
-        # self._lines = [] # Clear cached lines - handled by init
-        
-        # Open mmap for random access with detected encoding
+        # 2. PATCH: Detect Encoding FIRST
+        # We must establish the encoding before building the index so the 
+        # indexer knows if it needs to step 2 bytes for UTF-16 newlines.
         if encoding:
             self.current_encoding = encoding
         else:
+            # Assuming detect_encoding is the imported function available in scope
             self.current_encoding = detect_encoding(filepath)
+
+        # 3. Build line index using the CONFIRMED encoding
+        self._indexer.build_from_file(filepath, encoding=self.current_encoding)
+            
+        # 4. Open mmap (Preserved)
         self._file = open(filepath, 'rb')
         self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
         
-        # Initialize lines as lazy identity map
+        # 5. Initialize lines as lazy identity map (Preserved)
         cnt = self._indexer.line_count
         self._lines = SegmentedLineMap(cnt)
         
-        # Ensure final progress reported
+        # 6. Final Progress Report (Preserved)
         if progress_callback:
             progress_callback(1.0)
 
-        # Reset modification tracking structures
+        # 7. Reset tracking structures (Preserved)
         self._modified_cache = {}
         self._size_delta = 0
         self._is_modified = False
@@ -1011,31 +1018,68 @@ class VirtualBuffer:
     
     def _resolve_line(self, line_idx: int) -> str:
         """
-        Internal: Resolve a line content.
-        If _lines is None (identity map), item = line_idx.
+        Resolve a logical line index to actual text.
+
+        Resolution order:
+        1. Identity map (no _lines): line_idx is file line
+        2. SegmentedLineMap: returns int (file line) or negative (modified cache)
+        3. Decode ONLY from mmap / indexer
         """
+
+        # ----------------------------
+        # Step 1: resolve logical → physical
+        # ----------------------------
         if self._lines is None:
-             item = line_idx
+            item = line_idx
         else:
-             item = self._lines[line_idx]
-             
-        if item >= 0:
-             # It's a lazy index into file
-             if self._mmap:
-                 info = self._indexer.get_line_info(item)
-                 if info:
-                     self._mmap.seek(info.offset)
-                     data = self._mmap.read(info.length)
-                     encoding = getattr(self, 'current_encoding', 'utf-8')
-                     try:
-                         text = data.decode(encoding)
-                     except UnicodeDecodeError:
-                         text = data.decode(encoding, errors='replace')
-                     return text
-             return "" 
-        else:
-             cache_idx = ~item
-             return self._modified_cache.get(cache_idx, "")
+            item = self._lines[line_idx]
+
+        # ----------------------------
+        # Step 2: modified in-memory line
+        # ----------------------------
+        if isinstance(item, int) and item < 0:
+            cache_idx = ~item
+            return self._modified_cache.get(cache_idx, "")
+
+        # ----------------------------
+        # Step 3: physical file line
+        # ----------------------------
+        if not isinstance(item, int) or item < 0:
+            return ""
+
+        if not self._mmap:
+            return ""
+
+        info = self._indexer.get_line_info(item)
+        if not info:
+            return ""
+
+        self._mmap.seek(info.offset)
+        data = self._mmap.read(info.length)
+        
+        encoding = getattr(self, "current_encoding", "utf-8")
+        enc = encoding.lower().replace("-", "")
+        
+        if enc.startswith("utf16"):
+            # Strip CR (Windows line endings)
+            if data.endswith(b"\r\x00") or data.endswith(b"\x00\r"):
+                data = data[:-2]
+        
+            # Strip trailing UTF-16 NUL code unit (U+0000)
+            if data.endswith(b"\x00\x00"):
+                data = data[:-2]
+        
+            # Ensure even byte length
+            if len(data) & 1:
+                data = data[:-1]
+        
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            return data.decode(encoding, errors="replace")
+
+
+
              
     def get_line(self, line_num: int) -> str:
         """Get content of a specific line (0-indexed)."""
