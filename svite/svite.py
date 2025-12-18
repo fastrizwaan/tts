@@ -1902,10 +1902,18 @@ class VirtualTextView(Gtk.DrawingArea):
                 # Horizontal
                 # Need max line width.. rough estimate or scanning
                 # For now assume mostly visible or fixed large width
-                self.hadj.set_upper(2000) # Arbitrary for now
-                self.hadj.set_value(self.scroll_x)
-                self.hadj.set_page_size(width)
-                self.hscroll.set_visible(True)
+                # Horizontal (NO-WRAP)
+                viewport_w = width
+                
+                content_w = max(viewport_w, int(self.max_line_width))
+                
+                self.hadj.set_lower(0)
+                self.hadj.set_upper(content_w)
+                self.hadj.set_page_size(viewport_w)
+                self.hadj.set_value(min(self.scroll_x, max(0, content_w - viewport_w)))
+                
+                self.hscroll.set_visible(content_w > viewport_w)
+
                 
         finally:
             self.scroll_update_pending = False
@@ -4154,6 +4162,9 @@ class VirtualTextView(Gtk.DrawingArea):
         visual_lines_drawn = 0
         total_lines = self.buf.total()
         
+        # --- HORIZONTAL SCROLL MEASUREMENT (NO-WRAP ONLY) ---
+        max_line_px = 0
+        
         while visual_lines_drawn < visible_lines and current_log_line < total_lines:
             line_text = self.buf.get_line(current_log_line)
             segments = self.mapper.get_line_segments(current_log_line)
@@ -4195,6 +4206,13 @@ class VirtualTextView(Gtk.DrawingArea):
                 # Set text ONCE for reused layout to avoid expensive re-analysis (triples performance)
                 layout.set_text(seg_text, -1)
                 
+                # --- HORIZONTAL SCROLL MEASURE (NO WRAP) ---
+                if not self.mapper.enabled:
+                    _, logical = layout.get_extents()
+                    w_px = logical.width / Pango.SCALE
+                    if w_px > max_line_px:
+                        max_line_px = w_px
+
                 # Draw Line Number (only on first segment)
                 if i == 0 and self.show_line_numbers:
                     cr.set_source_rgb(0.5, 0.5, 0.5)
@@ -4438,6 +4456,13 @@ class VirtualTextView(Gtk.DrawingArea):
             
             # End of segment loop
             current_log_line += 1
+        
+        # ✅ PUBLISH MEASURED WIDTH FOR SCROLLBAR LOGIC
+        if self.mapper.enabled:
+            self.max_line_width = 0
+        elif max_line_px > 0:
+            self.max_line_width = max_line_px
+
         render_elapsed = time.time() - render_start
         
         # Draw progress overlay if calculating
