@@ -2,7 +2,8 @@
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, Gio, GLib, Pango
+gi.require_version('GtkSource', '5')
+from gi.repository import Gtk, Adw, Gio, GLib, Pango, GtkSource
 import mmap
 import os
 
@@ -159,6 +160,12 @@ class TextEditorWindow(Adw.ApplicationWindow):
         font_box.append(plus_btn)
         
         header.pack_end(font_box)
+
+        # Settings menu
+        menu_btn = Gtk.MenuButton()
+        menu_btn.set_icon_name("open-menu-symbolic")
+        menu_btn.set_menu_model(self.create_settings_menu())
+        header.pack_end(menu_btn)
         
         # Progress bar for indexing
         self.progress_bar = Gtk.ProgressBar()
@@ -174,7 +181,15 @@ class TextEditorWindow(Adw.ApplicationWindow):
         box.append(scrolled)
         
         # Text view with performance optimizations
-        self.text_view = Gtk.TextView()
+        self.text_view = GtkSource.View()
+        self.text_view.set_show_line_numbers(True)
+        self.text_view.set_highlight_current_line(True)
+        self.text_view.set_show_right_margin(True)
+        self.text_view.set_right_margin_position(80)
+        self.text_view.set_tab_width(4)
+        self.text_view.set_auto_indent(True)
+        self.text_view.set_insert_spaces_instead_of_tabs(True)
+        self.text_view.set_smart_backspace(True)
         self.text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self.text_view.set_monospace(True)
         self.text_view.set_left_margin(12)
@@ -212,8 +227,126 @@ class TextEditorWindow(Adw.ApplicationWindow):
         self.current_file = None
         self.current_filepath = None
         
+        # Settings state
+        self.selected_theme_id = "auto"
+
+        # Setup actions
+        self.setup_actions()
+        
+        # Setup theme handling
+        style_manager = Adw.StyleManager.get_default()
+        style_manager.connect('notify::dark', self.on_theme_changed)
+        self.update_theme()
+
         # Load sample text
         self.load_sample_text()
+        
+    def setup_actions(self):
+        # View Options
+        self.add_toggle_action("show-line-numbers", True, 
+            lambda action, state: self.text_view.set_show_line_numbers(state.get_boolean()))
+        
+        self.add_toggle_action("highlight-current-line", True,
+            lambda action, state: self.text_view.set_highlight_current_line(state.get_boolean()))
+            
+        self.add_toggle_action("show-right-margin", True,
+            lambda action, state: self.text_view.set_show_right_margin(state.get_boolean()))
+            
+        self.add_toggle_action("word-wrap", True, self.on_word_wrap_toggled)
+        
+        # Behavior Options
+        self.add_toggle_action("auto-indent", True,
+            lambda action, state: self.text_view.set_auto_indent(state.get_boolean()))
+            
+        self.add_toggle_action("smart-backspace", True,
+            lambda action, state: self.text_view.set_smart_backspace(state.get_boolean()))
+
+        # Theme Action
+        action = Gio.SimpleAction.new_stateful("theme", GLib.VariantType.new("s"), GLib.Variant("s", "auto"))
+        action.connect("change-state", self.on_theme_action_changed)
+        self.add_action(action)
+
+    def add_toggle_action(self, name, default, callback):
+        action = Gio.SimpleAction.new_stateful(name, None, GLib.Variant.new_boolean(default))
+        action.connect("change-state", self.create_toggle_callback(callback))
+        self.add_action(action)
+        # Initialize
+        callback(action, GLib.Variant.new_boolean(default))
+        
+    def create_toggle_callback(self, real_callback):
+        def wrapper(action, state):
+            action.set_state(state)
+            real_callback(action, state)
+        return wrapper
+
+    def on_word_wrap_toggled(self, action, state):
+        wrap_mode = Gtk.WrapMode.WORD_CHAR if state.get_boolean() else Gtk.WrapMode.NONE
+        self.text_view.set_wrap_mode(wrap_mode)
+
+    def on_theme_action_changed(self, action, state):
+        action.set_state(state)
+        self.selected_theme_id = state.get_string()
+        self.update_theme()
+
+    def create_settings_menu(self):
+        menu = Gio.Menu()
+        
+        # View Section
+        view_section = Gio.Menu()
+        view_section.append("Show Line Numbers", "win.show-line-numbers")
+        view_section.append("Highlight Current Line", "win.highlight-current-line")
+        view_section.append("Show Right Margin", "win.show-right-margin")
+        view_section.append("Word Wrap", "win.word-wrap")
+        menu.append_section("View", view_section)
+        
+        # Behavior Section
+        behavior_section = Gio.Menu()
+        behavior_section.append("Auto Indent", "win.auto-indent")
+        behavior_section.append("Smart Backspace", "win.smart-backspace")
+        menu.append_section("Behavior", behavior_section)
+        
+        # Theme Section
+        theme_menu = Gio.Menu()
+        theme_menu.append("Auto (System)", "win.theme::auto")
+        
+        scheme_manager = GtkSource.StyleSchemeManager.get_default()
+        ids = scheme_manager.get_scheme_ids()
+        # Sort nicely, maybe prioritize common ones?
+        for scheme_id in sorted(ids):
+            scheme = scheme_manager.get_scheme(scheme_id)
+            name = scheme.get_name() if scheme else scheme_id
+            theme_menu.append(name, f"win.theme::{scheme_id}")
+            
+        menu.append_submenu("Theme", theme_menu)
+        
+        return menu
+
+    def on_theme_changed(self, manager, pspec):
+        self.update_theme()
+        
+    def update_theme(self):
+        scheme_manager = GtkSource.StyleSchemeManager.get_default()
+        scheme = None
+        
+        if self.selected_theme_id != "auto":
+            scheme = scheme_manager.get_scheme(self.selected_theme_id)
+        
+        if not scheme:
+            # Auto logic or fallback
+            style_manager = Adw.StyleManager.get_default()
+            is_dark = style_manager.get_dark()
+            
+            if is_dark:
+                scheme = scheme_manager.get_scheme('adwaita-dark')
+                if not scheme:
+                    scheme = scheme_manager.get_scheme('oblivion')
+            else:
+                scheme = scheme_manager.get_scheme('adwaita')
+                if not scheme:
+                    scheme = scheme_manager.get_scheme('classic')
+            
+        if scheme:
+            self.buffer.set_style_scheme(scheme)
     
     def update_font(self):
         """Update font with CSS"""
@@ -253,10 +386,15 @@ This editor uses memory-mapped files and line indexing for HUGE files.
 ## Performance Features:
 - Memory-mapped file I/O (mmap)
 - Efficient line indexing for instant random access
-- Handles files 100GB+ with ease
+- Handles files 1GB+ with ease
 - Optimized for 2K/QHD displays
 - Smooth kinetic scrolling
 - Efficient Pango text rendering
+- fully feature rich
+- comprehensive high performance syntax highlighting for all popular languages
+- high performance find replace with regex
+- multi tab, multi window support
+- opens files with mmap, utf16, utf8 le/be bom
 
 ## How it works:
 1. ALL files are memory-mapped
@@ -273,7 +411,20 @@ This editor uses memory-mapped files and line indexing for HUGE files.
 """ + "\n".join([f"Line {i}: This is sample content for testing smooth scrolling performance." for i in range(100)])
         
         self.buffer.set_text(sample)
+        
+        # Set Markdown for sample
+        lang_manager = GtkSource.LanguageManager.get_default()
+        markdown = lang_manager.get_language('markdown')
+        if markdown:
+            self.buffer.set_language(markdown)
+            
         self.update_status()
+    
+    def update_language(self, filename):
+        """Detect and set language for syntax highlighting"""
+        lang_manager = GtkSource.LanguageManager.get_default()
+        language = lang_manager.guess_language(filename, None)
+        self.buffer.set_language(language)
     
     def update_status(self):
         """Update status bar"""
@@ -331,6 +482,7 @@ This editor uses memory-mapped files and line indexing for HUGE files.
                     
                     self.buffer.set_text(text)
                     self.set_title(f"{file.get_basename()} - Buttery Smooth Editor")
+                    self.update_language(file.get_basename())
                     self.update_status()
             else:
                 # For large files, use mmap and indexing
@@ -371,6 +523,7 @@ This editor uses memory-mapped files and line indexing for HUGE files.
             
             self.progress_bar.set_visible(False)
             self.set_title(f"{filename} - Buttery Smooth Editor (Large File)")
+            self.update_language(filename)
             self.update_status()
             
             return False  # Don't repeat
