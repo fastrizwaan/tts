@@ -1393,8 +1393,15 @@ class VirtualTextView(Gtk.DrawingArea):
         # Connect to size changes to update scrollbars
         self.connect('resize', self.on_resize)
 
-    def set_search_results(self, matches, max_match_length=0, preserve_current=False):
-        """Update search results."""
+    def set_search_results(self, matches, max_match_length=0, preserve_current=False, auto_scroll=True):
+        """Update search results.
+        
+        Args:
+            matches: List of match tuples (line, col, length)
+            max_match_length: Maximum match length
+            preserve_current: Try to preserve current match
+            auto_scroll: If True, scroll to first match. If False, don't scroll (used when editing).
+        """
         old_idx = self.current_match_idx
         old_match = self.current_match
         
@@ -1419,7 +1426,8 @@ class VirtualTextView(Gtk.DrawingArea):
                 if (m_ln > skip_ln) or (m_ln == skip_ln and m_col >= skip_col):
                     self.current_match_idx = i
                     self.current_match = m
-                    self._scroll_to_match(m)
+                    if auto_scroll:
+                        self._scroll_to_match(m)
                     self.queue_draw()
                     return
             
@@ -1427,7 +1435,8 @@ class VirtualTextView(Gtk.DrawingArea):
             if matches:
                 self.current_match_idx = 0
                 self.current_match = matches[0]
-                self._scroll_to_match(matches[0])
+                if auto_scroll:
+                    self._scroll_to_match(matches[0])
                 self.queue_draw()
                 return
 
@@ -1440,12 +1449,9 @@ class VirtualTextView(Gtk.DrawingArea):
                     self.queue_draw()
                     return
         
-        if self.search_matches:
-            self.current_match_idx = 0
-            self.current_match = self.search_matches[0]
-            # Auto-scroll to first match
-            self._scroll_to_match(self.current_match)
-            
+        # Don't set current_match on initial search - orange highlight only shows
+        # when user clicks Next/Previous buttons
+        # Just show yellow highlights for all matches, no orange current match
         self.queue_draw()
 
     def next_match(self):
@@ -2078,11 +2084,25 @@ class VirtualTextView(Gtk.DrawingArea):
         """Handle committed text from IM (finished composition)"""
         if text:
             self.buf.insert_text(text, overwrite=self.overwrite_mode)
+            self._notify_find_bar_editing()
             self.keep_cursor_visible()
             self.stop_cursor_blink()
             self.restart_blink_after_idle()
             self.queue_draw()
             self.update_im_cursor_location()
+
+    def _notify_find_bar_editing(self):
+        """Notify find bar that user is actively editing.
+        
+        Only clears the orange (current match) highlight when editing.
+        Yellow highlights (all matches) remain visible.
+        Orange highlight only reappears when clicking Next/Previous.
+        """
+        # Only clear the orange (current match) highlight, keep yellow (all matches)
+        if hasattr(self, 'current_match') and self.current_match is not None:
+            self.current_match = None
+            self.current_match_idx = -1
+            self.queue_draw()
 
     def restart_blink_after_idle(self):
         """Restart cursor blinking only once after user stops typing."""
@@ -2411,6 +2431,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.buf.delete_word_backward()
             else:
                 self.buf.backspace()
+            self._notify_find_bar_editing()
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
@@ -2423,6 +2444,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.buf.delete_word_forward()
             else:
                 self.buf.delete_key()
+            self._notify_find_bar_editing()
             self.keep_cursor_visible()
             self.update_im_cursor_location()
             self.queue_draw()
@@ -4091,6 +4113,26 @@ class VirtualTextView(Gtk.DrawingArea):
     def on_scroll(self, c, dx, dy):
         """Handle mouse wheel scroll with pixel-wise precision."""
         if dy:
+             # Calculate total visual lines (including wrapped lines)
+             total_lines = self.buf.total()
+             h = self.get_height()
+             visible_lines = max(1, int(h / self.line_h)) if self.line_h > 0 else 1
+             
+             # Calculate total visual lines (accounting for word wrap)
+             total_visual_lines = 0
+             for i in range(total_lines):
+                 segments = self.mapper.get_line_segments(i)
+                 total_visual_lines += len(segments)
+             
+             # If all content fits in viewport, don't allow scrolling
+             if total_visual_lines <= visible_lines:
+                 # Reset scroll position to top
+                 self.scroll_line = 0
+                 self.scroll_visual_offset = 0
+                 if hasattr(self, 'scroll_line_frac'):
+                     self.scroll_line_frac = 0.0
+                 return True
+             
              # dy is typically 1.0 per click, or smaller for touchpads
              # We want smooth scrolling, so we map dy to a fraction of a line
              # Sensitivity: 1.0 dy = 3 lines roughly in old code
@@ -4104,7 +4146,6 @@ class VirtualTextView(Gtk.DrawingArea):
                  
              self.scroll_line_frac += dy * scroll_speed
              
-             total_lines = self.buf.total()
              
              # Normalize fraction to keep it between 0.0 and 1.0 by moving visual lines
              while self.scroll_line_frac >= 1.0:
@@ -4219,7 +4260,9 @@ class VirtualTextView(Gtk.DrawingArea):
         draw_start = time.time()
 
         is_dark = getattr(self, 'is_dark', True)
-        cr.set_source_rgb(0.10, 0.10, 0.10 if is_dark else 1.0)
+        # Use the properly configured editor background color
+        bg = getattr(self, 'editor_background_color', (0.1, 0.1, 0.1, 1.0))
+        cr.set_source_rgba(*bg)
         cr.rectangle(0, 0, w, h)
         cr.fill()
 
@@ -4402,7 +4445,9 @@ class VirtualTextView(Gtk.DrawingArea):
                 cr.rectangle(ln_width, current_y, viewport_w, self.line_h)
                 cr.clip()
                 cr.move_to(base_x, current_y)
-                cr.set_source_rgb(0.9, 0.9, 0.9 if is_dark else 0.0)
+                # Use the properly configured text foreground color
+                fg = getattr(self, 'text_foreground_color', (0.9, 0.9, 0.9))
+                cr.set_source_rgb(*fg)
                 PangoCairo.show_layout(cr, layout)
                 cr.restore()
 
@@ -4423,8 +4468,15 @@ class VirtualTextView(Gtk.DrawingArea):
                         b = self.visual_byte_index(seg_text, rel)
                         pos = layout.get_cursor_pos(b)[0]
                         cx = base_x + pos.x / Pango.SCALE
+                        
+                        # Use theme-appropriate cursor color
+                        if is_dark:
+                            cursor_r, cursor_g, cursor_b = 1.0, 1.0, 1.0  # White for dark theme
+                        else:
+                            cursor_r, cursor_g, cursor_b = 0.0, 0.0, 0.0  # Black for light theme
+                        
                         cr.set_source_rgba(
-                            1, 1, 1,
+                            cursor_r, cursor_g, cursor_b,
                             self.cursor_phase if self.cursor_phase <= 1 else 2 - self.cursor_phase
                         )
 
@@ -5691,7 +5743,7 @@ class FindReplaceBar(Gtk.Box):
         self.find_entry = Gtk.SearchEntry()
         self.find_entry.set_hexpand(True)
         self.find_entry.set_placeholder_text("Find")
-        self.find_entry.connect("search-changed", self.on_search_changed)
+        # NOTE: No search-changed handler - search only runs on Enter/button click
         self.find_entry.connect("activate", self.on_find_next)
         
         self.find_overlay.set_child(self.find_entry)
@@ -5718,6 +5770,12 @@ class FindReplaceBar(Gtk.Box):
         self.find_entry.add_controller(key_ctrl)
         
         find_box.append(self.find_overlay)
+        
+        # Search button - explicit trigger for search
+        self.search_btn = Gtk.Button(icon_name="edit-find-symbolic")
+        self.search_btn.set_tooltip_text("Search (Enter)")
+        self.search_btn.connect("clicked", self.on_search_clicked)
+        find_box.append(self.search_btn)
         
         # Navigation Box (linked)
         nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -5889,6 +5947,19 @@ class FindReplaceBar(Gtk.Box):
                 
         return False
 
+    def mark_user_editing(self):
+        """Called when user edits the document.
+        
+        With explicit search button, we do nothing here - search only
+        updates when user clicks Search button or presses Enter.
+        This eliminates viewport scrolling issues during editing.
+        """
+        pass  # No auto-update on edit - user must explicitly search
+
+    def on_search_clicked(self, *args):
+        """Handle Search button click - perform search with auto-scroll."""
+        self._perform_search(auto_scroll=True)
+
     def on_search_changed(self, *args):
         # 🔒 Do not re-search while replacing
         if self._in_replace:
@@ -5906,8 +5977,9 @@ class FindReplaceBar(Gtk.Box):
         return False
 
         
-    def _perform_search(self):
+    def _perform_search(self, auto_scroll=True):
         self._search_timeout_id = None
+        self._auto_scroll = auto_scroll  # Store for use in callbacks
         
         # Reset progressive search state for new search
         self._search_last_line = 0
@@ -5953,13 +6025,13 @@ class FindReplaceBar(Gtk.Box):
         # For small files (<50k lines), use synchronous search
         if total_lines < 50000:
             matches, max_len = self.editor.buf.search(query, case_sensitive, is_regex, max_matches=-1)
-            self.editor.view.set_search_results(matches, max_len)
+            self.editor.view.set_search_results(matches, max_len, auto_scroll=self._auto_scroll)
             self.update_match_label()
             return False
             
         if total_lines < 100000000:
             def on_progress(matches, lines_searched, total, max_len):
-                self.editor.view.set_search_results(matches, max_len, preserve_current=True)
+                self.editor.view.set_search_results(matches, max_len, preserve_current=True, auto_scroll=self._auto_scroll)
                 # Show progress in label
                 percent = int((lines_searched / total) * 100)
                 count = len(matches)
@@ -5968,7 +6040,7 @@ class FindReplaceBar(Gtk.Box):
             
             def on_complete(matches, max_len):
                 self._cancel_search = None
-                self.editor.view.set_search_results(matches, max_len, preserve_current=True)
+                self.editor.view.set_search_results(matches, max_len, preserve_current=True, auto_scroll=self._auto_scroll)
                 self.update_match_label()
                 # self.find_entry.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, None) # Not supported on SearchEntry
                 
@@ -6043,8 +6115,13 @@ class FindReplaceBar(Gtk.Box):
 
 
     def on_find_next(self, *args):
-        self.editor.view.next_match()
-        self.update_match_label()
+        # If no matches exist, perform search first
+        if not self.editor.view.search_matches:
+            self._perform_search(auto_scroll=True)
+        else:
+            # Navigate to next match
+            self.editor.view.next_match()
+            self.update_match_label()
         
     def on_find_prev(self, *args):
         self.editor.view.prev_match()
@@ -6311,6 +6388,7 @@ class EditorPage:
     def __init__(self, untitled_title="Untitled 1"):
         self.buf = VirtualBuffer()
         self.view = VirtualTextView(self.buf)
+        self.view._editor = self  # Back-reference for view to access parent EditorPage
         self.view.set_margin_top(0)
         self.current_encoding = "utf-8"
         self.current_file_path = None
