@@ -3800,9 +3800,11 @@ class VirtualTextView(Gtk.DrawingArea):
         if is_dark:
             r, g, b, a = self.hex_to_rgba_floats("#191919")
             self.editor_background_color = (r, g, b, a)
+            self.current_line_background_color = (1.0, 1.0, 1.0, 0.05) # 8% white tint for dark theme
         else:
             r, g, b, a = self.hex_to_rgba_floats("#fafafa")
             self.editor_background_color = (r, g, b, a)
+            self.current_line_background_color = (0.0, 0.0, 0.0, 0.05) # 6% black tint for light theme
 
         # Helper for Pango colors
         def hex_to_pango(hex_str):
@@ -4342,6 +4344,12 @@ class VirtualTextView(Gtk.DrawingArea):
                     cr.show_text(txt)
 
                 base_x = ln_width + 2 - self.scroll_x
+
+                # ---- current line highlight ----
+                if self.highlight_current_line and current_log_line == self.buf.cursor_line:
+                    cr.set_source_rgba(*self.current_line_background_color)
+                    cr.rectangle(0, current_y, w, self.line_h)
+                    cr.fill()
 
                 # ---- selection background ----
                 if sel_start_ln != -1:
