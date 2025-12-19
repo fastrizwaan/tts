@@ -1416,6 +1416,8 @@ class VirtualTextView(Gtk.DrawingArea):
         if self.search_matches:
             self.current_match_idx = 0
             self.current_match = self.search_matches[0]
+            # Auto-scroll to first match
+            self._scroll_to_match(self.current_match)
             
         self.queue_draw()
 
@@ -1502,6 +1504,46 @@ class VirtualTextView(Gtk.DrawingArea):
             visible_lines = max(1, self.get_height() // self.line_h)
             self.scroll_line = max(0, s_ln - visible_lines // 2)
             self.scroll_visual_offset = 0
+        
+        # --- Horizontal Scrolling ---
+        # Ensure the match is visible horizontally
+        if self.hadj:
+            # Calculate target X position (approximate using char_width)
+            # 50px margin/padding assumed (gutter + left padding)
+            gutter_w = 50 
+            if hasattr(self, 'gutter_width'):
+                 gutter_w = self.gutter_width
+            
+            # Using char_width (approximate for variable width, but good enough for monospace/code)
+            # If char_width is not available (e.g. not initialized), skip
+            cw = getattr(self, 'char_width', 10) # default fallback
+            
+            match_x = (s_col * cw)
+            
+            curr_val = self.hadj.get_value()
+            page_size = self.hadj.get_page_size()
+            max_val = curr_val + page_size
+            
+            # Margins for context
+            # CENTER IT:
+            # target_val = match_x - (viewport_width / 2)
+            # We want the match column to be in the middle of the screen
+            
+            target_val = curr_val
+            
+            # If match is on screen, maybe we don't force center?
+            # User request: "center the match in the viewport so that it is visible clearly"
+            # This implies forcing center is desired for clarity.
+            
+            center_target = match_x - (page_size / 2) + (cw / 2)
+            target_val = max(0, center_target)
+            
+            # Don't scroll past the end (though uppper bound usually handles this, we can clamp)
+            upper = self.hadj.get_upper()
+            target_val = min(target_val, max(0, upper - page_size))
+
+            if abs(target_val - curr_val) > 1: # Avoid jitter
+                self.hadj.set_value(target_val)
         
         self.update_scrollbar()
         self.queue_draw()
@@ -1942,9 +1984,23 @@ class VirtualTextView(Gtk.DrawingArea):
                 else:
                     ln_width = 0
 
+                # Check active match to ensure it's within scrollable range
+                match_limit_w = 0
+                if self.current_match:
+                    try:
+                        # Match: (line, col, end_line, end_col)
+                        # Ensure we can scroll at least to the match + some margin
+                        m_col = self.current_match[1]
+                        cw = getattr(self, 'char_width', 10)
+                        # Allow scrolling a bit past the match start
+                        match_limit_w = (m_col + 50) * cw
+                    except:
+                        pass
+
                 content_w = max(
                     viewport_w,
-                    int(self.max_line_width) + ln_width + 2
+                    int(self.max_line_width) + ln_width + 2,
+                    int(match_limit_w) + ln_width + 2
                 )
 
                 
@@ -2251,49 +2307,11 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # Alt+Z - Toggle word wrap
         if alt_pressed and (name == "z" or name == "Z"):
-            # Calculate current byte/char position within the line before switching
-            current_char_offset = 0
-            width = self.get_width()
-            ln_width = 30
-            if self.show_line_numbers:
-                ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
-            viewport_w_chars = max(1, int((width - ln_width - 40) / max(0.1, self.char_width)))
-
-            if self.mapper.enabled:
-                # Switching Wrap -> No Wrap
-                # Convert visual offset to horizontal scroll
-                frac = getattr(self, 'scroll_line_frac', 0.0)
-                current_char_offset = (self.scroll_visual_offset + frac) * viewport_w_chars
-                
-                self.mapper.enabled = False
-                self.scroll_visual_offset = 0
-                self.scroll_x = int(current_char_offset * self.char_width)
-            else:
-                # Switching No Wrap -> Wrap
-                # Convert horizontal scroll to visual offset
-                current_char_offset = self.scroll_x / max(0.1, self.char_width)
-                
-                # Ensure mapper has correct viewport width for accurate estimation!
-                self.mapper.set_viewport_width(width - ln_width - 40, self.char_width)
-                
-                self.mapper.enabled = True
-                self.scroll_x = 0
-                
-                # New visual offset
-                self.scroll_visual_offset = int(current_char_offset / viewport_w_chars)
-                # Remainder could be added to frac, but visual lines are integers for now in mapper
-                # We can update frac to include the horizontal position remainder? 
-                # Ideally, we start at the beginning of that visual line.
-                
-                # Update metrics will update viewport width in mapper
-                self.update_metrics() 
-                # Re-calculate with exact mapper width if changed
-                
-            self.update_metrics() # Ensure metrics up to date
-            self.queue_draw()
-            GLib.idle_add(self.update_scrollbar)
-            # self.keep_cursor_visible() # Don't force cursor visible, keep scroll pos?
-            # Actually user wants to see what they were looking at.
+            # Get the window and call its on_toggle_word_wrap method
+            # This ensures find bar is closed and search cleared before toggling
+            window = self.get_ancestor(Adw.ApplicationWindow)
+            if window and hasattr(window, 'on_toggle_word_wrap'):
+                window.on_toggle_word_wrap(None, None)
             return True
 
         # Alt+Arrow keys for text movement
@@ -3700,7 +3718,10 @@ class VirtualTextView(Gtk.DrawingArea):
     @wrap_enabled.setter
     def wrap_enabled(self, value):
         self.mapper.enabled = value
+        self.mapper.invalidate_all()
+        self.highlight_cache = {} # Clear highlight cache as positions change
         self.update_metrics()
+        self.update_scrollbar() # Force scrollbar update
         self.queue_draw()
         
     def set_font(self, font_desc):
@@ -4282,45 +4303,51 @@ class VirtualTextView(Gtk.DrawingArea):
                             cr.fill()
 
                 # ---- search highlights (FIXED) ----
+                # ---- search highlights (FIXED) ----
                 if self.search_matches and self.max_match_length > 0:
-                    search_start = max(0, seg_start - self.max_match_length)
-                    idx = bisect.bisect_left(
-                        self.search_matches,
-                        (current_log_line, search_start, 0, 0),
-                    )
-                    for mi in range(idx, len(self.search_matches)):
-                        m = self.search_matches[mi]
-                        s_ln, s_col, e_ln, e_col = m[:4]
-                        if s_ln > current_log_line:
-                            break
-                        if s_ln == current_log_line and s_col >= seg_end:
-                            break
-                        if not (s_ln <= current_log_line <= e_ln):
-                            continue
+                    try:
+                        search_start = max(0, seg_start - self.max_match_length)
+                        idx = bisect.bisect_left(
+                            self.search_matches,
+                            (current_log_line, search_start, 0, 0),
+                        )
+                        for mi in range(idx, len(self.search_matches)):
+                            m = self.search_matches[mi]
+                            s_ln, s_col, e_ln, e_col = m[:4]
+                            if s_ln > current_log_line:
+                                break
+                            if s_ln == current_log_line and s_col >= seg_end:
+                                break
+                            if not (s_ln <= current_log_line <= e_ln):
+                                continue
 
-                        ms = s_col if s_ln == current_log_line else 0
-                        me = e_col if e_ln == current_log_line else seg_end
-                        isect_s = max(ms, seg_start)
-                        isect_e = min(me, seg_end)
-                        if isect_s >= isect_e:
-                            continue
+                            ms = s_col if s_ln == current_log_line else 0
+                            me = e_col if e_ln == current_log_line else seg_end
+                            isect_s = max(ms, seg_start)
+                            isect_e = min(me, seg_end)
+                            if isect_s >= isect_e:
+                                continue
 
-                        rel_s = isect_s - seg_start
-                        rel_e = isect_e - seg_start
-                        b_s = self.visual_byte_index(seg_text, rel_s)
-                        b_e = self.visual_byte_index(seg_text, rel_e)
+                            rel_s = isect_s - seg_start
+                            rel_e = isect_e - seg_start
+                            b_s = self.visual_byte_index(seg_text, rel_s)
+                            b_e = self.visual_byte_index(seg_text, rel_e)
 
-                        pos_s = layout.get_cursor_pos(b_s)[0]
-                        pos_e = layout.get_cursor_pos(b_e)[0]
+                            pos_s = layout.get_cursor_pos(b_s)[0]
+                            pos_e = layout.get_cursor_pos(b_e)[0]
 
-                        x1 = base_x + pos_s.x / Pango.SCALE
-                        x2 = base_x + pos_e.x / Pango.SCALE
+                            x1 = base_x + pos_s.x / Pango.SCALE
+                            x2 = base_x + pos_e.x / Pango.SCALE
 
-                        color = (1.0, 0.5, 0.0, 0.6) if self.current_match_idx == mi else (1.0, 1.0, 0.0, 0.4)
-                        cr.set_source_rgba(*color)
-                        
-                        cr.rectangle(x1, current_y, x2 - x1, self.line_h)
-                        cr.fill()
+                            color = (1.0, 0.5, 0.0, 0.6) if self.current_match_idx == mi else (1.0, 1.0, 0.0, 0.4)
+                            cr.set_source_rgba(*color)
+                            
+                            cr.rectangle(x1, current_y, x2 - x1, self.line_h)
+                            cr.fill()
+                    except Exception as e:
+                        # Log error but don't crash drawing (causes blank screen)
+                        # print(f"Search highlight draw error: {e}")
+                        pass
 
                 # ---- syntax ----
                 attr_list = Pango.AttrList()
@@ -7949,6 +7976,11 @@ class EditorWindow(Adw.ApplicationWindow):
         self.grab_focus_editor()
 
     def on_toggle_word_wrap(self, action, param):
+        # Close find bar if active (this also clears search results)
+        editor = self.get_current_page()
+        if editor and hasattr(editor, 'find_bar') and editor.find_bar and editor.find_bar.get_visible():
+            editor.find_bar.close()
+        
         manager = self.get_application().settings_manager
         current = manager.get_setting("word-wrap")
         manager.set_setting("word-wrap", not current)

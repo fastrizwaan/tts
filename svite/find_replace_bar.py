@@ -179,6 +179,7 @@ class FindReplaceBar(Gtk.Box):
         self.replace_entry.grab_focus()
         
     def close(self, *args):
+        self.find_entry.set_text("")  # Clear the search entry
         self.set_visible(False)
         self.editor_view.grab_focus()
         self.editor_view.set_search_results([])

@@ -1,0 +1,4272 @@
+#!/usr/bin/env python3
+import sys, os, mmap, gi, cairo, time, unicodedata, signal
+from threading import Thread
+from array import array
+import math 
+import datetime
+import bisect
+import re
+import json
+from enum import Enum, auto
+from virtual_buffer import VirtualBuffer, normalize_replacement_string
+from word_wrap import VisualLineMapper
+from syntax_v2 import StateAwareSyntaxEngine
+from undo_redo import UndoRedoManager
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+gi.require_version("Gdk", "4.0")
+
+from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo, GLib, Gio
+
+# Global variable to track dragged tab for drag and drop
+DRAGGED_TAB = None
+
+CSS_OVERLAY_SCROLLBAR = """
+/* ===== Vertical overlay scrollbar ===== */
+/* Vertical Scrollbar container */
+.overlay-scrollbar {{
+    background-color: transparent;
+
+}}
+
+
+/* Trough (track) */
+.overlay-scrollbar trough {{
+    min-width: 8px;
+    border-radius: 0px;
+    background-color: transparent;
+
+}}
+
+/* Trough hover highlight */
+.overlay-scrollbar trough:hover {{
+    background-color: alpha(@window_fg_color, 0.2);
+    transition: background-color 200ms ease;
+
+}}
+
+/* Base slider (thumb) */
+.overlay-scrollbar trough > slider {{
+    min-width: 2px;
+    border-radius: 12px;
+    background-color: alpha(@window_fg_color, 0.2);
+    transition: min-width 200ms ease, background-color 200ms ease;
+}}
+
+
+/* Slider expands when trough is hovered */
+.overlay-scrollbar trough:hover > slider {{
+    min-width: 8px;
+    background-color: alpha(@window_bg_color, 0.05);
+}}
+/* Container hover highlights trough */
+.overlay-scrollbar:hover trough {{
+    background-color: alpha(@window_fg_color, 0.1);
+}}
+
+/* Container hover expands slider */
+.overlay-scrollbar:hover trough > slider {{
+    min-width: 8px;
+    background-color: rgba(53,132,228,1);
+}}
+
+
+/* Slider expands when hovered directly */
+.overlay-scrollbar trough > slider:hover {{
+    min-width: 8px;
+    background-color: rgba(73,152,248, 1);
+}}
+/* Slider active/dragging */
+.overlay-scrollbar trough > slider:active {{
+    min-width: 8px;
+    background-color: rgba(53,132,228, 1);
+}}
+
+
+
+/* ===== Horizontal overlay scrollbar ===== */
+
+/* Horizontal Scrollbar container */
+.hscrollbar-overlay {{
+    background-color: transparent;
+    margin-bottom: 0px;
+}}
+
+/* Trough (track) */
+.hscrollbar-overlay trough {{
+    min-height: 8px;
+    border-radius: 0px;
+    background-color: transparent;
+    margin-bottom: 0px;    
+}}
+
+/* Trough hover highlight */
+.hscrollbar-overlay trough:hover {{
+    background-color: alpha(@window_fg_color, 0.2);
+    transition: background-color 200ms ease;
+    margin-bottom: 0px;
+}}
+
+/* Base slider (thumb) */
+.hscrollbar-overlay trough > slider {{
+    min-height: 2px;
+    border-radius: 12px;
+    background-color: alpha(@window_fg_color, 0.2);
+    transition: min-height 200ms ease, background-color 200ms ease;
+}}
+
+
+/* Slider expands when trough is hovered */
+.hscrollbar-overlay trough:hover > slider {{
+    min-height: 8px;
+    background-color: alpha(@window_fg_color, 0.55);
+}}
+
+/* Container hover highlights trough */
+.hscrollbar-overlay:hover trough {{
+    background-color: alpha(@window_fg_color, 0.2);
+}}
+
+/* Container hover expands slider */
+.hscrollbar-overlay:hover trough > slider {{
+    min-height: 8px;
+    background-color: rgba(53,132,228,1);
+}}
+
+/* Slider expands when hovered directly */
+.hscrollbar-overlay trough > slider:hover {{
+    min-height: 8px;
+    background-color: rgba(73,152,248, 1);
+}}
+
+/* Slider active/dragging */
+.hscrollbar-overlay trough > slider:active {{
+    min-height: 8px;
+    background-color: rgba(53,132,228, 1);
+}}
+
+
+.toolbarview {{
+    background: @headerbar_bg_color; 
+}}
+
+/* ========================
+   Editor background
+   ======================== */
+.editor-surface {{
+    background-color: {bg_color};
+}}
+
+/* ========================
+   Chrome Tabs
+   ======================== */
+
+.chrome-tab {{
+    background: transparent;
+    color: alpha(@window_fg_color, 0.85);
+    min-height: 32px;
+    padding-left: 10px;
+    padding-right: 6px;
+    border-radius: 9px 9px 9px 9px;
+    margin-bottom: 1px;
+
+}}
+.header-modified-dot{{
+    min-width: 8px;
+    min-height: 8px;
+
+    background-color: alpha(@window_fg_color, 0.7);
+    border-radius: 4px;
+
+    margin-top: 5px;   /* vertically center inside tab */
+    margin-bottom: 5px;
+}}
+
+.modified-dot {{
+    min-width: 8px;
+    min-height: 8px;
+
+    background-color: alpha(@window_fg_color, 0.7);
+    border-radius: 4px;
+
+    margin-top: 12px;   /* vertically center inside tab */
+    margin-bottom: 12px;
+}}
+
+.chrome-tab label {{
+    font-weight: normal;
+}}
+
+.chrome-tab:hover {{
+    color: @window_fg_color;
+    background: alpha(@window_fg_color, 0.10);
+
+}}
+
+/* ACTIVE TAB (pilled) */
+.chrome-tab.active {{
+    background: alpha(@window_fg_color, 0.12);
+    color: @window_fg_color;
+}}
+
+.chrome-tab.active label {{
+    font-weight: normal;
+    opacity: 1;
+}}
+
+/* Dragging state */
+.chrome-tab.dragging {{
+    opacity: 0.5;
+}}
+
+/* Drop indicator line */
+.tab-drop-indicator {{
+    background: linear-gradient(to bottom, 
+        transparent 0%, 
+        rgba(0, 127, 255, 0.8) 20%, 
+        rgba(0, 127, 255, 1) 50%, 
+        rgba(0, 127, 255, 0.8) 80%, 
+        transparent 100%);
+    min-width: 3px;
+    border-radius: 2px;
+}}
+
+
+/* Modified marker */
+.chrome-tab.modified {{
+    font-style: normal;
+}}
+
+/* Reset all buttons inside tab (fixes size regression) */
+.chrome-tab button {{
+    background: none;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    margin: 0;
+    min-width: 0;
+    min-height: 0;
+}}
+
+/* close button specific */
+.chrome-tab .chrome-tab-close-button {{
+    padding: 2px;
+    opacity: 0.5;
+    color: @window_fg_color;
+}}
+
+.chrome-tab:hover .chrome-tab-close-button {{
+    opacity: 1;
+}}
+
+.chrome-tab.active .chrome-tab-close-button {{
+    opacity: 1;
+    color: @window_fg_color;
+}}
+
+/* ========================
+   Separators
+   ======================== */
+.chrome-tab-separator {{
+    min-width: 1px;
+    background-color: alpha(@window_fg_color, 0.15);
+    margin-top: 6px;
+    margin-bottom: 6px;
+}}
+
+.chrome-tab-separator.hidden {{
+    min-width: 0px;
+    background-color: transparent;
+}}
+.chrome-tab-separator:first-child {{
+    background-color: transparent;
+    min-width: 0;
+}}
+
+.chrome-tab-separator:last-child {{
+    background-color: transparent;
+    min-width: 0;
+}}
+/* ========================
+   Tab close button
+   ======================== */
+.chrome-tab-close-button {{
+    opacity: 0;
+    transition: opacity 300ms ease, background-color 300ms ease;
+    margin-right:0px;
+    padding:0px;
+}}
+
+.chrome-tab:hover .chrome-tab-close-button {{
+    opacity: 1;
+    border-radius: 20px;
+}}
+
+.chrome-tab-close-button:hover  {{
+    background-color: alpha(@window_fg_color, 0.2);
+}}
+
+.chrome-tab.active .chrome-tab-close-button:hover {{
+    opacity: 1;
+    background-color: alpha(@window_fg_color, 0.2);
+}}
+
+
+/* Corrected dropdown selectors - removed space after colon */
+.linked dropdown:first-child > button  {{
+    border-top-left-radius: 0px; 
+    border-bottom-left-radius: 0px; 
+    border-top-right-radius: 0px; 
+    border-bottom-right-radius: 0px;
+}}
+
+/* Explicit rule to ensure middle dropdowns have NO radius */
+.linked dropdown:not(:first-child):not(:last-child) > button {{
+    border-radius: 0;
+}}
+
+
+
+
+/* Corrected menubutton selectors - removed space after colon */
+.linked menubutton:first-child > button  {{
+    border-top-left-radius: 10px; 
+    border-bottom-left-radius: 10px; 
+    border-top-right-radius: 0px; 
+    border-bottom-right-radius: 0px;
+}}
+
+.linked menubutton:last-child > button {{
+    border-top-left-radius: 0px; 
+    border-bottom-left-radius: 0px; 
+    border-top-right-radius: 10px; 
+    border-bottom-right-radius: 10px;
+}} 
+
+/* Additional recommended fixes for consistent styling */
+.linked menubutton button {{
+    background: alpha(@window_fg_color, 0.05); padding:0px; padding-right: 3px; margin-left: 0px;
+}}
+
+.linked menubutton button:hover {{
+    background: alpha(@window_fg_color, 0.15);
+     padding:0px; padding-right: 3px;
+}}
+
+.linked menubutton button:active, 
+.linked menubutton button:checked {{
+    background-color: rgba(127, 127, 127, 0.3);
+    padding:0px; padding-right: 3px;
+}}
+
+.linked menubutton button:checked:hover {{
+       background: alpha(@window_fg_color, 0.2);
+}}
+
+
+/* Corrected button selectors - removed space after colon */
+.linked button  {{
+    border-top-left-radius: 10px; 
+    border-bottom-left-radius: 10px; 
+    border-top-right-radius: 0px; 
+    border-bottom-right-radius: 0px;
+    
+}}
+
+/* Additional recommended fixes for consistent styling */
+.linked button {{
+    background: alpha(@window_fg_color, 0.05); padding-left: 10px; padding-right:6px; 
+}}
+
+.linked button:hover {{
+    background: alpha(@window_fg_color, 0.15);
+
+}}
+
+/* Find Bar Styling */
+.find-bar {{
+    background-color: @headerbar_bg_color;
+    border-bottom: 1px solid alpha(@window_fg_color, 0.15);
+    padding: 0px;
+}}
+"""
+
+
+
+
+# ============================================================
+#   HELPER FUNCTIONS
+# ============================================================
+
+def detect_rtl_line(text):
+    """Detect if a line is RTL using Unicode bidirectional properties.
+    
+    Returns True  if the first strong directional character is RTL,
+    False if LTR, or False if no strong directional characters found.
+    """
+    for ch in text:
+        t = unicodedata.bidirectional(ch)
+        if t in ("L", "LRE", "LRO"):
+            return False
+        if t in ("R", "AL", "RLE", "RLO"):
+            return True
+    return False
+def detect_language(path):
+    """Detect language from file extension."""
+    if not path: return None
+    ext = os.path.splitext(path)[1].lower()
+    mapping = {
+        '.py': 'python',
+        '.js': 'javascript',
+        '.c': 'c',
+        '.h': 'c',
+        '.rs': 'rust',
+        '.html': 'html',
+        '.htm': 'html',
+        '.css': 'css',
+        '.dsl': 'dsl'
+    }
+    return mapping.get(ext, None)
+
+# ============================================================
+#   FULL INDEXING BUT MEMORY-SAFE
+# ============================================================
+
+class IndexedFile:
+    """
+    Fully indexes file once.
+    Memory-safe: only stores offsets, not decoded lines.
+    Works for UTF-8 and UTF-16 (LE/BE).
+    """
+
+    def __init__(self, path):
+        print(f"Opening file: {path}")
+        start = time.time()
+        
+        self.path = path
+        self.encoding = self.detect_encoding(path)
+        self.raw = open(path, "rb")
+        
+        # Check if file is empty
+        file_size = os.path.getsize(path)
+        if file_size == 0:
+            # Empty file - don't create mmap
+            self.mm = None
+            self.is_empty = True
+            print(f"File opened (empty file) in {time.time()-start:.2f}s")
+        else:
+            self.mm = mmap.mmap(self.raw.fileno(), 0, access=mmap.ACCESS_READ)
+            self.is_empty = False
+            print(f"File opened and mapped in {time.time()-start:.2f}s")
+
+        # Use array.array instead of list - much faster for millions of integers
+        # 'Q' = unsigned long long (8 bytes, perfect for file offsets)
+        self.index = array('Q')
+
+    def detect_encoding(self, path):
+        with open(path, "rb") as f:
+            data = f.read(4096)  # small peek is enough
+
+        # Handle empty files
+        if len(data) == 0:
+            return "utf-8"
+
+        # --- BOM detection ---
+        if data.startswith(b"\xff\xfe"):
+            return "utf-16le"
+        if data.startswith(b"\xfe\xff"):
+            return "utf-16be"
+        if data.startswith(b"\xef\xbb\xbf"):
+            return "utf-8-sig"
+
+        # --- Heuristic UTF-16LE detection (no BOM) ---
+        if len(data) >= 4:
+            zeros_in_odd = sum(1 for i in range(1, len(data), 2) if data[i] == 0)
+            ratio = zeros_in_odd / (len(data) / 2)
+            if ratio > 0.4:
+                return "utf-16le"
+
+        # --- Heuristic UTF-16BE detection (no BOM) ---
+        if len(data) >= 2:  # Need at least 2 bytes for this check
+            zeros_in_even = sum(1 for i in range(0, len(data), 2) if data[i] == 0)
+            ratio_be = zeros_in_even / (len(data) / 2)
+            if ratio_be > 0.4:
+                return "utf-16be"
+
+        # Default
+        return "utf-8"
+
+
+    def index_file(self, progress_callback=None):
+        start_time = time.time()
+        enc = self.encoding
+        
+        if self.is_empty:
+            print(f"Indexing empty file ({enc})...")
+            # Empty file has 0 lines (or 1 empty line depending on interpretation, 
+            # but for indexing purposes we can just leave index as [0])
+            self.index = array('Q', [0])
+            return
+
+        print(f"Indexing {len(self.mm) / (1024**3):.2f}GB file ({enc})...")
+
+
+        if enc.startswith("utf-16"):
+            self._index_utf16(progress_callback)
+        else:
+            self._index_utf8(progress_callback)
+        
+        elapsed = time.time() - start_time
+        index_size_mb = len(self.index) * 8 / (1024**2)  # 8 bytes per entry
+        
+        print(f"Indexed {len(self.index)-1:,} lines in {elapsed:.2f}s ({len(self.mm)/(1024**3)/elapsed:.2f} GB/s)")
+        print(f"Average line length: {len(self.mm)/(len(self.index)-1):.0f} bytes")
+        print(f"Index memory: {index_size_mb:.1f} MB ({index_size_mb*100/len(self.mm)*1024:.2f}% of file size)")
+
+
+
+
+    def _index_utf8(self, progress_callback=None):
+        """Fast UTF-8 indexing using mmap.find() - optimized for huge files"""
+        if self.is_empty:
+            self.index = array('Q', [0])
+            return
+
+        mm = self.mm
+        total_size = len(mm)
+        
+        # Use array.array for fast integer storage (10-20x faster than list for millions of items)
+        self.index = array('Q', [0])
+        
+        # Use mmap.find() to scan for newlines
+        pos = 0
+        last_report = 0
+        report_interval = 50_000_000  # Report every 50MB for less overhead
+        
+        while pos < total_size:
+            # Report progress less frequently (every 50MB instead of 10MB)
+            if progress_callback and pos - last_report > report_interval:
+                last_report = pos
+                progress = pos / total_size
+                GLib.idle_add(progress_callback, progress)
+            
+            # Find next newline directly in mmap (fast C-level search)
+            newline_pos = mm.find(b'\n', pos)
+            
+            if newline_pos == -1:
+                # No more newlines
+                break
+            
+            # Record position after the newline
+            pos = newline_pos + 1
+            self.index.append(pos)
+        
+        # Ensure file end is recorded
+        if not self.index or self.index[-1] != total_size:
+            self.index.append(total_size)
+        
+        if progress_callback:
+            GLib.idle_add(progress_callback, 1.0)
+
+    def _index_utf16(self, progress_callback=None):
+        """Fast UTF-16 indexing using mmap.find() directly - no memory copies"""
+        if self.is_empty:
+            self.index = array('Q', [0])
+            return
+    
+        mm = self.mm
+        total_size = len(mm)
+        
+        # Determine newline pattern based on endianness
+        # Note: "utf-16" without suffix defaults to LE in Python
+        # Also handle "utf-16-le" and "utf-16-be" variants
+        encoding_lower = self.encoding.lower().replace('-', '')
+        if encoding_lower in ("utf16le", "utf16"):
+            newline_bytes = b'\n\x00'  # UTF-16LE: \n = 0x0A 0x00
+            bom = b'\xff\xfe'  # LE BOM
+        else:  # utf-16be
+            newline_bytes = b'\x00\n'  # UTF-16BE: \n = 0x00 0x0A
+            bom = b'\xfe\xff'  # BE BOM
+        
+        # Check for BOM and set start position
+        start_pos = 0
+        if total_size >= 2:
+            first_two = mm[0:2]
+            if first_two in (b'\xff\xfe', b'\xfe\xff'):
+                start_pos = 2
+                # Verify BOM matches expected endianness
+                if first_two != bom:
+                    # BOM doesn't match detected encoding - adjust
+                    if first_two == b'\xff\xfe':
+                        newline_bytes = b'\n\x00'  # LE
+                    else:
+                        newline_bytes = b'\x00\n'  # BE
+        
+        # Use array.array for fast integer storage
+        self.index = array('Q', [start_pos])
+        
+        pos = start_pos
+        last_report = 0
+        report_interval = 50 * 1024 * 1024  # 50MB
+        
+        while pos < total_size:
+            # Report progress less frequently (every 50MB instead of 10MB)
+            if progress_callback and pos - last_report > report_interval:
+                last_report = pos
+                progress = pos / total_size
+                GLib.idle_add(progress_callback, progress)
+            
+            # Find next newline directly in mmap (fast C-level search)
+            newline_pos = mm.find(newline_bytes, pos)
+            
+            if newline_pos == -1:
+                # No more newlines
+                break
+            
+            # Record position after the newline (skip the 2-byte newline)
+            pos = newline_pos + 2
+            self.index.append(pos)
+        
+        # Ensure file end is recorded
+        if not self.index or self.index[-1] != total_size:
+            self.index.append(total_size)
+        
+        if progress_callback:
+            GLib.idle_add(progress_callback, 1.0) 
+    def total_lines(self):
+        return len(self.index) - 1
+
+    def __getitem__(self, line):
+        if self.is_empty:
+            return ""
+
+        if line < 0 or line >= self.total_lines():
+            return ""
+
+        start = self.index[line]
+        end = self.index[line + 1]
+
+        raw = self.mm[start:end]
+        return raw.decode(self.encoding, errors="replace").rstrip("\n\r")
+
+    def get_byte_range(self, start_line, end_line):
+        """Get raw bytes for a range of lines [start_line, end_line)"""
+        if self.is_empty:
+            return b""
+            
+        total = self.total_lines()
+        if start_line >= total:
+            return b""
+            
+        end_line = min(end_line, total)
+        if start_line >= end_line:
+            return b""
+            
+        start_idx = self.index[start_line]
+        end_idx = self.index[end_line]
+        
+        return self.mm[start_idx:end_idx]
+
+
+# ============================================================
+#   SELECTION
+# ============================================================
+
+class Selection:
+    """Manages text selection state"""
+    
+    def __init__(self):
+        self.start_line = -1
+        self.start_col = -1
+        self.end_line = -1
+        self.end_col = -1
+        self.active = False
+        self.selecting_with_keyboard = False
+    
+    def clear(self):
+        """Clear the selection"""
+        self.start_line = -1
+        self.start_col = -1
+        self.end_line = -1
+        self.end_col = -1
+        self.active = False
+        self.selecting_with_keyboard = False
+    
+    def set_wrap_enabled(self, enabled):
+        """Enable or disable word wrap."""
+        if self.wrap_enabled == enabled:
+            return
+        
+        self.wrap_enabled = enabled
+        self.wrap_cache = {}
+        self.visual_line_map = []
+        # self.total_visual_lines_cache = None
+        self.visual_line_anchor = (0, 0)
+
+    def set_start(self, line, col):
+        """Set selection start point"""
+        self.start_line = line
+        self.start_col = col
+        self.end_line = line
+        self.end_col = col
+        self.active = True
+    
+    def set_end(self, line, col):
+        """Set selection end point"""
+        self.end_line = line
+        self.end_col = col
+        self.active = (self.start_line != self.end_line or self.start_col != self.end_col)
+    
+    def has_selection(self):
+        """Check if there's an active selection"""
+        return self.active and (
+            self.start_line != self.end_line or 
+            self.start_col != self.end_col
+        )
+    
+    def get_bounds(self):
+        """Get normalized selection bounds (start always before end)"""
+        if not self.has_selection():
+            return None, None, None, None
+            
+        # Normalize so start is always before end
+        if self.start_line < self.end_line:
+            return self.start_line, self.start_col, self.end_line, self.end_col
+        elif self.start_line > self.end_line:
+            return self.end_line, self.end_col, self.start_line, self.start_col
+        else:
+            # Same line
+            if self.start_col <= self.end_col:
+                return self.start_line, self.start_col, self.end_line, self.end_col
+            else:
+                return self.end_line, self.end_col, self.start_line, self.start_col
+    
+    def contains_position(self, line, col):
+        """Check if a position is within the selection"""
+        if not self.has_selection():
+            return False
+            
+        start_line, start_col, end_line, end_col = self.get_bounds()
+        
+        if line < start_line or line > end_line:
+            return False
+        
+        if line == start_line and line == end_line:
+            return start_col <= col <= end_col
+        elif line == start_line:
+            return col >= start_col
+        elif line == end_line:
+            return col <= end_col
+        else:
+            return True
+# LEGACY Undo/Redo and VirtualBuffer REMOVED - Imported from undo_redo.py and virtual_buffer.py
+
+# ============================================================
+#   INPUT
+# ============================================================
+
+class InputController:
+    def __init__(self, view, buf):
+        self.view = view
+        self.buf = buf
+        self.dragging = False
+        self.drag_start_line = -1
+        self.drag_start_col = -1
+
+    def click(self, ln, col):
+        self.buf.set_cursor(ln, col)
+        self.buf.selection.clear()
+        self.drag_start_line = ln
+        self.drag_start_col = col
+        self.dragging = False
+
+    def start_drag(self, ln, col):
+        self.dragging = True
+        self.drag_start_line = ln
+        self.drag_start_col = col
+        
+        # Set cursor first (this clears old selection and sets cursor position)
+        self.buf.set_cursor(ln, col, extend_selection=False)
+        
+        # Now establish the new selection anchor at the current cursor position
+        self.buf.selection.set_start(ln, col)
+        self.buf.selection.set_end(ln, col)
+
+    def drag_to(self, x, y):
+        """Handle drag to x,y coordinates"""
+        ln, col = self.view.xy_to_line_col(x, y)
+        self.update_drag(ln, col)
+
+    def update_drag(self, ln, col):
+
+        if self.dragging:
+            self.buf.selection.set_end(ln, col)
+            self.buf.set_cursor(ln, col, extend_selection=True)
+
+    def end_drag(self):
+        """End drag selection"""
+        self.dragging = False
+
+    def move_left(self, extend_selection=False):
+        b = self.buf
+        ln, col = b.cursor_line, b.cursor_col
+        
+        if not extend_selection and b.selection.has_selection():
+            # Move to start of selection
+            start_ln, start_col, _, _ = b.selection.get_bounds()
+            b.set_cursor(start_ln, start_col, extend_selection)
+        elif col > 0:
+            # Move left within line
+            b.set_cursor(ln, col - 1, extend_selection)
+        elif ln > 0:
+            # At start of line - move to end of previous line (selecting the newline)
+            prev = b.get_line(ln - 1)
+            b.set_cursor(ln - 1, len(prev), extend_selection)
+
+    def move_right(self, extend_selection=False):
+        b = self.buf
+        ln, col = b.cursor_line, b.cursor_col
+        line = b.get_line(ln)
+        
+        if not extend_selection and b.selection.has_selection():
+            # Move to end of selection
+            _, _, end_ln, end_col = b.selection.get_bounds()
+            b.set_cursor(end_ln, end_col, extend_selection)
+        elif col < len(line):
+            # Move right within line
+            b.set_cursor(ln, col + 1, extend_selection)
+        elif ln + 1 < b.total():
+            # At end of line - move to start of next line (selecting the newline)
+            b.set_cursor(ln + 1, 0, extend_selection)
+
+    def move_up(self, extend_selection=False):
+        b = self.buf
+        ln = b.cursor_line
+        
+        # If selection active and not extending, collapse to start
+        if not extend_selection and b.selection.has_selection():
+            start_ln, start_col, _, _ = b.selection.get_bounds()
+            b.set_cursor(start_ln, start_col, extend_selection)
+            return
+        
+        if self.view.mapper.enabled:
+            # Visual line movement
+            segments = self.view.mapper.get_line_segments(ln)
+            
+            # Find current segment index
+            vis_idx = 0
+            curr_col = b.cursor_col
+            for i, (s, e) in enumerate(segments):
+                if s <= curr_col <= e:
+                    vis_idx = i
+                    break
+            
+            target_ln = ln
+            target_vis_idx = vis_idx - 1
+            
+            if target_vis_idx < 0:
+                if ln > 0:
+                    target_ln = ln - 1
+                    t_segs = self.view.mapper.get_line_segments(target_ln)
+                    target_vis_idx = len(t_segs) - 1
+                else:
+                    if extend_selection: b.set_cursor(0, 0, True)
+                    return
+            else:
+                t_segs = segments
+
+            # Map column by X coordinate preservation
+            # 1. Calculate X of current cursor in current segment
+            s_start, s_end = segments[vis_idx]
+            text_seg = b.get_line(ln)[s_start:s_end]
+            col_in_seg = curr_col - s_start
+            
+            # We need a layout to get X
+            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+            cr = cairo.Context(surface)
+            layout = self.view.create_text_layout(cr, text_seg)
+            
+            # Convert col to Pango X
+            # Simplified: layout index_to_pos
+            # Need byte index
+            byte_idx = 0
+            for ch in text_seg[:col_in_seg]: byte_idx += len(ch.encode('utf-8'))
+            
+            pos = layout.index_to_pos(byte_idx)
+            target_x = pos.x # Pango units
+            
+            # 2. Map X to column in target segment
+            ts_start, ts_end = t_segs[target_vis_idx]
+            target_text_seg = b.get_line(target_ln)[ts_start:ts_end]
+            
+            col_in_target = self.view.pixel_to_column(cr, target_text_seg, target_x / Pango.SCALE)
+            
+            new_col = ts_start + col_in_target
+            b.set_cursor(target_ln, new_col, extend_selection)
+            
+        else:
+            # Logical movement
+            if ln > 0:
+                target_ln = ln - 1
+                target_len = len(b.get_line(target_ln))
+                new_col = min(b.cursor_col, target_len)
+                b.set_cursor(target_ln, new_col, extend_selection)
+            elif extend_selection:
+                b.set_cursor(0, 0, True)
+
+    def move_down(self, extend_selection=False):
+        b = self.buf
+        ln = b.cursor_line
+        
+        if not extend_selection and b.selection.has_selection():
+            _, _, end_ln, end_col = b.selection.get_bounds()
+            b.set_cursor(end_ln, end_col, extend_selection)
+            return
+
+        if self.view.mapper.enabled:
+            # Visual movement
+            segments = self.view.mapper.get_line_segments(ln)
+            curr_col = b.cursor_col
+            
+            vis_idx = 0
+            for i, (s, e) in enumerate(segments):
+                if s <= curr_col <= e:
+                    vis_idx = i
+                    break
+            
+            target_ln = ln
+            target_vis_idx = vis_idx + 1
+            
+            if target_vis_idx >= len(segments):
+                if ln < b.total() - 1:
+                    target_ln = ln + 1
+                    target_vis_idx = 0
+                    t_segs = self.view.mapper.get_line_segments(target_ln)
+                else:
+                    if extend_selection: 
+                        last_len = len(b.get_line(ln))
+                        b.set_cursor(ln, last_len, True)
+                    return
+            else:
+                t_segs = segments
+
+            # Map column by X
+            s_start, s_end = segments[vis_idx]
+            text_seg = b.get_line(ln)[s_start:s_end]
+            col_in_seg = curr_col - s_start
+            
+            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+            cr = cairo.Context(surface)
+            layout = self.view.create_text_layout(cr, text_seg)
+            
+            byte_idx = 0
+            for ch in text_seg[:col_in_seg]: byte_idx += len(ch.encode('utf-8'))
+            pos = layout.index_to_pos(byte_idx)
+            target_x = pos.x
+            
+            ts_start, ts_end = t_segs[target_vis_idx]
+            target_text_seg = b.get_line(target_ln)[ts_start:ts_end]
+            
+            col_in_target = self.view.pixel_to_column(cr, target_text_seg, target_x / Pango.SCALE)
+            
+            new_col = ts_start + col_in_target
+            b.set_cursor(target_ln, new_col, extend_selection)
+
+        else:
+            # Logical movement
+            if ln < b.total() - 1:
+                target_ln = ln + 1
+                target_len = len(b.get_line(target_ln))
+                new_col = min(b.cursor_col, target_len)
+                b.set_cursor(target_ln, new_col, extend_selection)
+            elif extend_selection:
+                last_len = len(b.get_line(ln))
+                b.set_cursor(ln, last_len, True)
+
+    def move_word_left(self, extend_selection=False):
+        """Move cursor to the start of the previous word"""
+        b = self.buf
+        ln, col = b.cursor_line, b.cursor_col
+        line = b.get_line(ln)
+        
+        # Helper to check if character is a word character
+        import unicodedata
+        def is_word_char(ch):
+            if ch == '_':
+                return True
+            cat = unicodedata.category(ch)
+            return cat[0] in ('L', 'N', 'M')
+        
+        # If at start of line, go to end of previous line
+        if col == 0:
+            if ln > 0:
+                prev_line = b.get_line(ln - 1)
+                b.set_cursor(ln - 1, len(prev_line), extend_selection)
+            return
+        
+        # Skip whitespace to the left
+        while col > 0 and line[col - 1].isspace():
+            col -= 1
+        
+        if col == 0:
+            b.set_cursor(ln, col, extend_selection)
+            return
+        
+        # Now we're on a non-whitespace character
+        # Check what type it is and skip that type
+        if is_word_char(line[col - 1]):
+            # Skip word characters to the left
+            while col > 0 and is_word_char(line[col - 1]):
+                col -= 1
+        else:
+            # Skip symbols/punctuation to the left (treat as a "word")
+            while col > 0 and not line[col - 1].isspace() and not is_word_char(line[col - 1]):
+                col -= 1
+        
+        b.set_cursor(ln, col, extend_selection)
+    
+    def move_word_right(self, extend_selection=False):
+        """Move cursor to the start of the next word"""
+        b = self.buf
+        ln, col = b.cursor_line, b.cursor_col
+        line = b.get_line(ln)
+        
+        # Helper to check if character is a word character
+        import unicodedata
+        def is_word_char(ch):
+            if ch == '_':
+                return True
+            cat = unicodedata.category(ch)
+            return cat[0] in ('L', 'N', 'M')
+        
+        # If at end of line, go to start of next line
+        if col >= len(line):
+            if ln + 1 < b.total():
+                b.set_cursor(ln + 1, 0, extend_selection)
+            return
+        
+        # Special handling when cursor is on space with no selection
+        if line[col].isspace() and not b.selection.has_selection():
+            # Select space(s) + next word
+            start_col = col
+            
+            # Skip whitespace on current line
+            while col < len(line) and line[col].isspace():
+                col += 1
+            
+            # If we reached end of line
+            if col >= len(line):
+                # Check if there's a next line
+                if ln + 1 < b.total():
+                    # Select space(s) + newline + next word from next line
+                    next_line = b.get_line(ln + 1)
+                    next_col = 0
+                    
+                    # Skip leading whitespace on next line
+                    while next_col < len(next_line) and next_line[next_col].isspace():
+                        next_col += 1
+                    
+                    # Select the next word on next line
+                    if next_col < len(next_line):
+                        if is_word_char(next_line[next_col]):
+                            while next_col < len(next_line) and is_word_char(next_line[next_col]):
+                                next_col += 1
+                        elif not next_line[next_col].isspace():
+                            while next_col < len(next_line) and not next_line[next_col].isspace() and not is_word_char(next_line[next_col]):
+                                next_col += 1
+                    
+                    # Set selection from start_col on current line to next_col on next line
+                    b.selection.set_start(ln, start_col)
+                    b.selection.set_end(ln + 1, next_col)
+                    b.cursor_line = ln + 1
+                    b.cursor_col = next_col
+                    return
+                else:
+                    # No next line - select spaces to end of line
+                    b.selection.set_start(ln, start_col)
+                    b.selection.set_end(ln, col)
+                    b.cursor_col = col
+                    return
+            
+            # We found a non-space character - select the word
+            if is_word_char(line[col]):
+                while col < len(line) and is_word_char(line[col]):
+                    col += 1
+            elif not line[col].isspace():
+                while col < len(line) and not line[col].isspace() and not is_word_char(line[col]):
+                    col += 1
+            
+            # Set selection from start_col to col
+            b.selection.set_start(ln, start_col)
+            b.selection.set_end(ln, col)
+            b.cursor_col = col
+            return
+        
+        # Check what type of character we're on and skip that type
+        if is_word_char(line[col]):
+            # Skip word characters to the right
+            while col < len(line) and is_word_char(line[col]):
+                col += 1
+        elif not line[col].isspace():
+            # Skip symbols/punctuation to the right (treat as a "word")
+            while col < len(line) and not line[col].isspace() and not is_word_char(line[col]):
+                col += 1
+        
+        # If extending an existing selection, skip whitespace AND select next word
+        # This makes second Ctrl+Shift+Right select space + next word
+        if extend_selection and b.selection.has_selection():
+            # Skip whitespace
+            while col < len(line) and line[col].isspace():
+                col += 1
+            
+            # Now select the next word
+            if col < len(line):
+                if is_word_char(line[col]):
+                    while col < len(line) and is_word_char(line[col]):
+                        col += 1
+                elif not line[col].isspace():
+                    while col < len(line) and not line[col].isspace() and not is_word_char(line[col]):
+                        col += 1
+        
+        b.set_cursor(ln, col, extend_selection)
+    def move_home(self, extend_selection=False):
+        """Move to beginning of line"""
+        b = self.buf
+        b.set_cursor(b.cursor_line, 0, extend_selection)
+
+    def move_end(self, extend_selection=False):
+        """Move to end of line"""
+        b = self.buf
+        line = b.get_line(b.cursor_line)
+        b.set_cursor(b.cursor_line, len(line), extend_selection)
+
+    def move_document_start(self, extend_selection=False):
+        """Move to beginning of document"""
+        self.buf.set_cursor(0, 0, extend_selection)
+
+    def move_document_end(self, extend_selection=False):
+        """Move to end of document"""
+        b = self.buf
+        total = b.total()
+        last_line = total - 1
+        last_line_text = b.get_line(last_line)
+        b.set_cursor(last_line, len(last_line_text), extend_selection)
+
+class VirtualTextView(Gtk.DrawingArea):
+
+    def __init__(self, buf):
+        super().__init__()
+        self.buf = buf
+        # Add reference from buffer to view for drag-and-drop
+        try:
+            buf._view = self
+        except:
+            pass # In case buf is a check_output mock
+            
+        self.use_tabs = True
+        self.auto_indent = True
+        
+        # Core Components from edig
+        self.mapper = VisualLineMapper(buf)
+        self.syntax = buf.syntax_engine
+        self.syntax_queue = set()
+        self.syntax_idle_id = None
+        self.undo_manager = UndoRedoManager()
+        
+        # Initialize Metrics (formerly in Renderer)
+        self.font_desc = Pango.FontDescription.from_string("Monospace 11")
+        self.matching_brackets = []
+        self.renderer = self
+        
+        # Compatibility shims for legacy renderer cache clearing
+        self.wrap_cache = {} # Dummy dict that can be .clear()-ed
+        self.visual_line_map = []
+        self.total_visual_lines_cache = None
+        self.total_visual_lines_locked = False
+        self.visual_line_anchor = (0, 0)
+        self.max_line_width = 0
+        self.needs_full_width_scan = False
+        self.estimated_total_cache = None
+        self.edits_since_cache_invalidation = 0
+ # Shim for legacy external access
+        self.line_h = 20 # Will be updated by update_metrics
+        self.char_width = 10 # Will be updated by update_metrics
+        self.tab_width = 4
+        self.show_line_numbers = True
+        
+        self.ctrl = InputController(self, buf)
+        self.scroll_line = 0
+        self.scroll_visual_offset = 0
+        self.scroll_x = 0
+        
+        # Wrapping
+        self.mapper.enabled = True
+        self.mapper.set_viewport_width(800) # Initial guess
+        
+        self.needs_scrollbar_init = False
+        self.overwrite_mode = False
+        
+        # Throttling
+        self.scroll_update_pending = False
+        self.pending_scroll_value = None
+        self.scrollbar_dragging = False
+        self.last_drag_value = None
+        self.calculating = False
+        self.calculation_message = ""
+        self.resize_update_pending = False
+        self._pending_triple_click = False
+        
+        # Busy Overlay
+        self._busy_overlay = None
+        self._busy_spinner = None
+        self._busy_label = None
+        self._pending_click = False
+        
+        # Search highlights
+        self.search_matches = []
+        self.highlight_cache = {}
+        self.current_match_idx = -1
+        self.current_match = None
+        self._skip_to_position = None  # (line, col) - skip matches before this after replace
+        
+        self.highlight_current_line = True
+        self.highlight_brackets = True
+        self.matching_brackets = [] # Store matches [((ln,col), (ln,col))]
+        self.on_scroll_callback = None
+        
+        self.set_focusable(True)
+        self.set_vexpand(True)
+        self.set_hexpand(True)
+        self.set_draw_func(self.draw_view)
+        
+        self.install_mouse()
+        self.install_keys()
+        self.install_im()
+        
+        # Initial Metrics Update
+        self.update_metrics()
+        self.update_colors_for_theme()
+        
+    def update_metrics(self):
+        """Update font metrics and notify mapper."""
+        # Create a temporary context to measure font
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surface)
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(self.font_desc)
+        layout.set_text("M", -1)
+        
+        ink, logical = layout.get_extents()
+        self.line_h = int(logical.height / Pango.SCALE)
+        self.char_width = logical.width / Pango.SCALE
+        self.mapper.set_char_width(self.char_width)
+        
+        # Update tab array if needed
+        pass
+
+
+
+
+    def create_hit_test_layout(self, text=""):
+        """Create a Pango layout for hit testing.
+        
+        Uses PangoCairo with a dummy surface to mimic Renderer.draw behavior
+        and ensure metrics match as closely as possible.
+        """
+        # Create a dummy surface/context if one isn't passed (we create internal)
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surface)
+        
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(self.font_desc)
+        
+        if True: # Uses standard tab array
+            tab_width_px = self.tab_width * self.char_width
+            tabs = Pango.TabArray.new(1, True)
+            tabs.set_tab(0, Pango.TabAlign.LEFT, int(tab_width_px))
+            layout.set_tabs(tabs)
+        layout.set_auto_dir(True)
+        layout.set_text(text, -1)
+        return layout
+
+    def create_text_layout(self, cr, text="", auto_dir=True):
+        """Create a Pango layout with standard settings.
+        
+        Args:
+            cr: Cairo context
+            text: Optional text to set
+            auto_dir: Whether to enable auto-direction (default True)
+            
+        Returns:
+            Configured Pango layout
+        """
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(self.font_desc)
+
+        # Apply tab width
+        if True: # Always use tabs
+            tab_width_px = self.tab_width * self.char_width
+            tabs = Pango.TabArray.new(1, True)
+            tabs.set_tab(0, Pango.TabAlign.LEFT, int(tab_width_px))
+            layout.set_tabs(tabs)
+
+        if auto_dir:
+            layout.set_auto_dir(True)
+        if text:
+            layout.set_text(text, -1)
+        return layout
+
+    def install_im(self):
+        self.install_scroll()
+        self.hadj = Gtk.Adjustment(
+            value=0, lower=0, upper=1, step_increment=20, page_increment=200, page_size=100
+        )
+        self.vadj = Gtk.Adjustment(
+            value=0, lower=0, upper=1, step_increment=1, page_increment=10, page_size=1
+        )
+        self.vadj.connect("value-changed", self.on_vadj_changed)
+        self.hadj.connect("value-changed", self.on_hadj_changed)
+
+        # Connect to buffer using observer pattern (not GObject signal)
+        if hasattr(self.buf, 'add_observer'):
+            self.buf.add_observer(self.on_buffer_changed)
+        elif hasattr(self.buf, 'connect'):
+             self.buf.connect("changed", self.on_buffer_changed)
+
+
+
+        # Setup IM context with preedit support
+        self.im = Gtk.IMMulticontext()
+        self.im.connect("commit", self.on_commit)
+        self.im.connect("preedit-changed", self.on_preedit_changed)
+        self.im.connect("preedit-start", self.on_preedit_start)
+        self.im.connect("preedit-end", self.on_preedit_end)
+        self.connect("resize", self.on_resize)
+
+        # Preedit state
+        self.preedit_string = ""
+        self.preedit_cursor = 0
+        
+        # Connect focus events
+        focus = Gtk.EventControllerFocus()
+        focus.connect("enter", self.on_focus_in)
+        focus.connect("leave", self.on_focus_out)
+        self.add_controller(focus)
+        
+        # Cursor blink state
+        # Cursor blink state (smooth fade)
+        self.cursor_visible = True
+        self.cursor_blink_timeout = None
+
+        self.cursor_phase = 1.0           # animation phase 0 → 2
+        self.cursor_fade_speed = 0.01     # 0.02 ~ 50fps smooth fade
+
+        self.start_cursor_blink()
+        
+        # Connect to size changes to update scrollbars
+        self.connect('resize', self.on_resize)
+
+    def set_search_results(self, matches, max_match_length=0, preserve_current=False):
+        """Update search results."""
+        old_idx = self.current_match_idx
+        old_match = self.current_match
+        
+        self.search_matches = matches
+        self.max_match_length = max_match_length
+        self.current_match_idx = -1
+        self.current_match = None
+        self.highlight_cache = {} 
+
+        if not matches:
+            self._skip_to_position = None
+            self.queue_draw()
+            return
+
+        # Check if we have a skip position to honor (set by replace operation)
+        if self._skip_to_position:
+            skip_ln, skip_col = self._skip_to_position
+            self._skip_to_position = None  # Clear after use
+            
+            for i, m in enumerate(matches):
+                m_ln, m_col = m[0], m[1]
+                if (m_ln > skip_ln) or (m_ln == skip_ln and m_col >= skip_col):
+                    self.current_match_idx = i
+                    self.current_match = m
+                    self._scroll_to_match(m)
+                    self.queue_draw()
+                    return
+            
+            # No match after skip position - wrap to first
+            if matches:
+                self.current_match_idx = 0
+                self.current_match = matches[0]
+                self._scroll_to_match(matches[0])
+                self.queue_draw()
+                return
+
+        # Try to preserve current match if requested
+        if preserve_current and old_match is not None:
+            if 0 <= old_idx < len(matches):
+                if matches[old_idx] == old_match:
+                    self.current_match_idx = old_idx
+                    self.current_match = old_match
+                    self.queue_draw()
+                    return
+        
+        if self.search_matches:
+            self.current_match_idx = 0
+            self.current_match = self.search_matches[0]
+            # Auto-scroll to first match
+            self._scroll_to_match(self.current_match)
+            
+        self.queue_draw()
+
+    def next_match(self):
+        if not self.search_matches:
+            return
+        
+        self.current_match_idx = (self.current_match_idx + 1) % len(self.search_matches)
+        self.current_match = self.search_matches[self.current_match_idx]
+        self._scroll_to_match(self.current_match)
+        self.queue_draw()
+        
+        # Progressive search: trigger continuation when near end
+        if hasattr(self, 'find_bar') and self.find_bar:
+            self.find_bar._check_progressive_search(self.current_match_idx)
+
+    def prev_match(self):
+        if not self.search_matches:
+            return
+            
+        self.current_match_idx = (self.current_match_idx - 1) % len(self.search_matches)
+        self.current_match = self.search_matches[self.current_match_idx]
+        self._scroll_to_match(self.current_match)
+        self.queue_draw()
+        
+        # Progressive search: trigger continuation when near end  
+        if hasattr(self, 'find_bar') and self.find_bar:
+            self.find_bar._check_progressive_search(self.current_match_idx)
+
+    def _scroll_to_match(self, match):
+        s_ln = match[0]
+        s_col = match[1]
+        
+        # Determine target scroll position
+        if self.mapper.enabled:
+            # Use visual estimation
+            # We want to center the match visually
+            
+            # Since Mapper doesn't support "visual line index of logical line X",
+            # we can only scroll to the start of the logical line + visual offset
+            vis_off, col_off = self.mapper.column_to_visual_offset(s_ln, s_col)
+            
+            self.scroll_line = s_ln
+            self.scroll_visual_offset = vis_off
+            
+            # Adjust to center (rough estimate of rows)
+            visible_rows = max(1, self.get_height() // self.line_h)
+            rows_above = visible_rows // 2
+            
+            # Simple backtrack to center
+            # Ideally we should backtrack 'rows_above' visual rows
+            # For now, just centering the logical line roughly
+            if rows_above > 0:
+                if self.scroll_visual_offset >= rows_above:
+                    self.scroll_visual_offset -= rows_above
+                else:
+                    rows_left = rows_above - self.scroll_visual_offset
+                    self.scroll_visual_offset = 0
+                    
+                    # Accurate backtracking loop to center the match
+                    # We need to backtrack 'rows_left' visual lines from the start of 's_ln'
+                    prev = s_ln - 1
+                    while prev >= 0 and rows_left > 0:
+                        # Get visual height of previous line
+                        h_p = self.mapper.get_visual_line_count(prev)
+                        
+                        if h_p > rows_left:
+                            # Previous line is taller than needed. 
+                            # We can stop here and show the bottom part of 'prev'
+                            self.scroll_line = prev
+                            self.scroll_visual_offset = max(0, h_p - rows_left)
+                            rows_left = 0
+                        else:
+                            # Previous line fits fully/partially within the space we need to fill
+                            rows_left -= h_p
+                            self.scroll_line = prev
+                            prev -= 1
+                    
+                    # If we ran out of lines (prev < 0) but still have rows_left, 
+                    # we are at the top of the file, so just stay at 0,0 (already set by loop logic effectively)
+
+        else:
+            # Logical lines
+            visible_lines = max(1, self.get_height() // self.line_h)
+            self.scroll_line = max(0, s_ln - visible_lines // 2)
+            self.scroll_visual_offset = 0
+        
+        # --- Horizontal Scrolling ---
+        # Ensure the match is visible horizontally
+        if self.hadj:
+            # Calculate target X position (approximate using char_width)
+            # 50px margin/padding assumed (gutter + left padding)
+            gutter_w = 50 
+            if hasattr(self, 'gutter_width'):
+                 gutter_w = self.gutter_width
+            
+            # Using char_width (approximate for variable width, but good enough for monospace/code)
+            # If char_width is not available (e.g. not initialized), skip
+            cw = getattr(self, 'char_width', 10) # default fallback
+            
+            match_x = (s_col * cw)
+            
+            curr_val = self.hadj.get_value()
+            page_size = self.hadj.get_page_size()
+            max_val = curr_val + page_size
+            
+            # Margins for context
+            # CENTER IT:
+            # target_val = match_x - (viewport_width / 2)
+            # We want the match column to be in the middle of the screen
+            
+            target_val = curr_val
+            
+            # If match is on screen, maybe we don't force center?
+            # User request: "center the match in the viewport so that it is visible clearly"
+            # This implies forcing center is desired for clarity.
+            
+            center_target = match_x - (page_size / 2) + (cw / 2)
+            target_val = max(0, center_target)
+            
+            # Don't scroll past the end (though uppper bound usually handles this, we can clamp)
+            upper = self.hadj.get_upper()
+            target_val = min(target_val, max(0, upper - page_size))
+
+            if abs(target_val - curr_val) > 1: # Avoid jitter
+                self.hadj.set_value(target_val)
+        
+        self.update_scrollbar()
+        self.queue_draw()
+
+    def on_buffer_changed(self, *args):
+        """Handle buffer content changes."""
+        # Invalidate layout cache
+        self.mapper.invalidate_all()
+        
+        # Queue redraw and scrollbar update
+        self.queue_draw()
+        GLib.idle_add(self.update_scrollbar)
+
+    def on_vadj_changed(self, adj):
+        """Handle scrollbar value change with smooth fractional scrolling."""
+        # Avoid recursive updates during scrollbar update
+        if self.scroll_update_pending:
+            return
+
+        val = adj.get_value()
+        
+        # Scrollbar resolution for smoothness
+        scroll_resolution = 1.0 # Should match update_scrollbar
+        
+        if self.mapper.enabled:
+            # Word wrap mode: Map scrollbar position to visual lines with smooth fractional offsets
+            total_vis = self.mapper.get_total_visual_lines()
+            if total_vis <= 0: 
+                return
+            
+            # Get scrollbar parameters
+            actual_val = val / scroll_resolution
+            upper = adj.get_upper() / scroll_resolution
+            page_size = adj.get_page_size() / scroll_resolution
+            max_scroll = max(1.0, upper - page_size)
+            
+            # Calculate target visual line position (with fractional part for smoothness)
+            # This gives us a continuous float value representing visual line position
+            ratio = min(1.0, actual_val / max_scroll) if max_scroll > 0 else 0.0
+            target_visual_line = ratio * max(0, total_vis - 1)
+            
+            total_lines = self.buf.total()
+            
+            # --- Optimization for Large Files ---
+            # Linear scanning of visual segments is O(N) and freezes for large files (e.g. 1M+ lines).
+            # We use a threshold: for small files, be precise. For large files, approximate.
+            if total_lines > 1000:
+                # O(1) Approximation for Large Files
+                
+                # Check if we are at the bottom (ratio near 1.0)
+                if ratio > 0.99:
+                    # Align end of file to bottom of viewport
+                    last_line = max(0, total_lines - 1)
+                    
+                    # Backtrack algorithm to fill viewport from bottom
+                    visible_rows = max(1, self.get_height() // self.line_h)
+                    needed = visible_rows
+                    
+                    # Assume last line height is 1 for speed in large files, or check cache?
+                    # Checking cache is safe enough for just one line.
+                    segments_last = self.mapper.get_line_segments(last_line)
+                    vis_height_last = len(segments_last) if segments_last else 1
+                    
+                    needed -= vis_height_last
+                    
+                    if needed < 0:
+                        # Last line is huge
+                        self.scroll_line = last_line
+                        self.scroll_visual_offset = max(0, vis_height_last - visible_rows)
+                    else:
+                        self.scroll_line = last_line
+                        self.scroll_visual_offset = 0
+                        
+                        # Accurate backtracking loop
+                        # Even for large files, we only scan the last ~50 lines, which is cheap.
+                        prev = last_line - 1
+                        while prev >= 0 and needed > 0:
+                             h_p = self.mapper.get_visual_line_count(prev)
+                             needed -= h_p
+                             self.scroll_line = prev
+                             prev -= 1
+                        
+                        if needed < 0:
+                             # Overshot. We are showing the bottom part of 'self.scroll_line'.
+                             self.scroll_visual_offset = abs(needed)
+                        
+                    self.scroll_line_frac = 0.0
+                    if self.on_scroll_callback:
+                        self.on_scroll_callback()
+                    self.queue_draw()
+                    return
+
+                # Normal Scroll Position
+                # We map ratio directly to logical line index.
+                # This assumes uniform distribution of wrapping, which is standard for huge files.
+                self.scroll_line = int(ratio * (total_lines - 1))
+                self.scroll_line = max(0, min(self.scroll_line, total_lines - 1))
+                self.scroll_visual_offset = 0
+                self.scroll_line_frac = 0.0
+                
+                if self.on_scroll_callback:
+                    self.on_scroll_callback()
+                self.queue_draw()
+                return
+
+            # --- Precise Calculation for Small Files ---
+            # Binary search logic could be used here if we had an Interval Tree, 
+            # but we don't. Linear scan is fast enough for < 1000 lines.
+            
+            # Use actual scroll value directly. 
+            # Adjustment value 0..X means "start showing from visual line X".
+            # Max value is (Total - PageSize), so at max scroll, we start at Total-PageSize,
+            # which naturally aligns the last line to the bottom of the viewport.
+            target_visual_line = actual_val
+            
+            current_visual = 0.0
+            
+            # Iterate through logical lines to find which one contains our target visual line
+            for i in range(total_lines):
+                segments = self.mapper.get_line_segments(i)
+                num_segments = len(segments) if segments else 1
+                
+                # Check if target is within this logical line's visual range
+                if current_visual <= target_visual_line < current_visual + num_segments:
+                    # Found the logical line
+                    self.scroll_line = i
+                    
+                    # Calculate visual offset within this line
+                    remaining = target_visual_line - current_visual
+                    self.scroll_visual_offset = int(remaining)
+                    self.scroll_line_frac = remaining - self.scroll_visual_offset
+                    
+                    # Clamp to valid range
+                    self.scroll_visual_offset = max(0, min(self.scroll_visual_offset, num_segments - 1))
+                    
+                    if self.scroll_line_frac < 0: self.scroll_line_frac = 0.0
+                    if self.scroll_line_frac >= 1.0: self.scroll_line_frac = 0.99
+                    
+                    if self.on_scroll_callback:
+                        self.on_scroll_callback()
+                    self.queue_draw()
+                    return
+                
+                current_visual += num_segments
+            
+            # Fallback - if we ran out of lines but haven't reached target
+            # This happens because get_total_visual_lines returns 1.05x estimate or due to slight miscalculation
+            
+            # IMPROVED FALLBACK: Instead of snapping to the very last line at the top,
+            # we want to align the end of the file with the BOTTOM of the viewport.
+            
+            # Find the last logical line
+            last_line = max(0, total_lines - 1)
+            
+            # Get visual height of the last line
+            segments_last = self.mapper.get_line_segments(last_line)
+            vis_height_last = len(segments_last) if segments_last else 1
+            
+            # We want to fill the viewport upwards from the bottom.
+            # Start at last line, backtrack until viewport is full.
+            
+            self.scroll_line = last_line
+            # Show the TOP of the last visual chunk of the last line? No, show the start of the last line if possible,
+            # but if it's huge, show the end.
+            # Actually simpler: Set scroll_line to last_line, and scroll_visual_offset such that the END is at viewport bottom.
+            
+            visible_rows = max(1, self.get_height() // self.line_h)
+            height_lines = visible_rows
+            
+            # Backtrack algorithm
+            curr = last_line
+            needed = height_lines
+            
+            # We already occupy 'vis_height_last' with the last line
+            needed -= vis_height_last
+            
+            # If the last line is TALLER than viewport, we scroll to show its end
+            if needed < 0:
+                 self.scroll_line = last_line
+                 # Visual offset should be such that end is at bottom
+                 # total_vis_lines_in_last = vis_height_last
+                 # We want to see the last 'visible_rows' of it
+                 self.scroll_visual_offset = max(0, vis_height_last - visible_rows)
+            else:
+                 # Last line fits, with space to spare. Backtrack to fill space.
+                 self.scroll_line = last_line
+                 self.scroll_visual_offset = 0 # Show start of last line
+                 
+                 # Now backtrack previous lines
+                 prev = curr - 1
+                 while prev >= 0 and needed > 0:
+                     seg_p = self.mapper.get_line_segments(prev)
+                     h_p = len(seg_p) if seg_p else 1
+                     needed -= h_p
+                     self.scroll_line = prev
+                     prev -= 1
+                 
+                 # if needed < 0, it means we went back one too many lines fully.
+                 # The 'scroll_line' is now the top line.
+                 # If needed < 0, it means the top line is only partially visible at top.
+                 # But we display integer lines at top (scroll_visual_offset).
+                 
+                 # The 'prev' loop moves scroll_line to the top-most fully or partially visible line.
+                 # If we overshot (needed < 0), it means 'self.scroll_line' (which is prev + 1 at this point)
+                 # has height 'h_current'. 'needed' is negative amount of that height that is CUT OFF at top.
+                 # So we need to show the BOTTOM part of that line.
+                 
+                 if needed < 0:
+                     # We need to skip the first 'abs(needed)' visual lines of self.scroll_line
+                     self.scroll_visual_offset = abs(needed)
+            
+            self.scroll_line_frac = 0.0
+            if self.on_scroll_callback:
+                self.on_scroll_callback()
+            self.queue_draw()
+        else:
+            # No wrap: Direct line scrolling with fractional position for smoothness
+            if not hasattr(self, 'scroll_line_frac'):
+                self.scroll_line_frac = 0.0
+            
+            # Convert scrollbar value to line position (with fraction)
+            actual_val = val / scroll_resolution
+            
+            self.scroll_line = int(actual_val)
+            self.scroll_line_frac = actual_val - self.scroll_line
+            self.scroll_line = max(0, min(self.scroll_line, self.buf.total() - 1))
+            
+            # Clamp fraction
+            if self.scroll_line_frac < 0:
+                self.scroll_line_frac = 0.0
+            if self.scroll_line_frac >= 1.0:
+                self.scroll_line_frac = 0.99
+                
+            if self.on_scroll_callback:
+                self.on_scroll_callback()
+            self.queue_draw()
+    
+    def on_hadj_changed(self, adj):
+        # When scrollbar moves → update internal scroll offset
+        new = int(adj.get_value())
+        if new != self.scroll_x:
+            self.scroll_x = new
+            self.queue_draw()
+                
+    def on_resize(self, widget, width, height):
+        """Resize handler."""
+        # 0. Capture current read position (approx chars into the line)
+        old_char_offset = 0
+        if hasattr(self, 'mapper') and self.mapper.enabled:
+            ln_width = 30
+            if self.show_line_numbers:
+                ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+            
+            old_viewport_chars = max(1, int((self.get_width() - ln_width - 20) / max(0.1, self.char_width)))
+            frac = getattr(self, 'scroll_line_frac', 0.0)
+            old_char_offset = (self.scroll_visual_offset + frac) * old_viewport_chars
+
+        # Update metrics first to ensure char_width is up to date
+        if hasattr(self, 'update_metrics'):
+             self.update_metrics()
+             
+        # Update mapper with new width
+        if hasattr(self, 'mapper'):
+            # subtract gutter width if needed
+            ln_width = 0
+            if self.show_line_numbers:
+                ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+            
+            # --- Two-pass layout strategy ---
+            # Pass 1: Try with NO scrollbar padding (optimistic), but with base padding 10px
+            # This allows us to see if content fits without wrapping unnecessarily
+            viewport_w = width - ln_width - 10
+            self.mapper.set_viewport_width(viewport_w, self.char_width)
+            
+            # Restore check is tricky if width changes 2nd time, but delta is small.
+            # Let's just do the check.
+            self.mapper.invalidate_all()
+            
+            # Check if scrollbar is needed with full width
+            # We must use update_scrollbar logic or call it directly.
+            # Calling it directly updates self.vscroll.get_visible()
+            self.update_scrollbar()
+            
+            if self.vscroll.get_visible():
+                # Pass 2: Scrollbar IS required. 
+                # Reduce viewport width by 20px to prevent text under scrollbar
+                viewport_w = width - ln_width - 20
+                self.mapper.set_viewport_width(viewport_w, self.char_width)
+                self.mapper.invalidate_all()
+                self.update_scrollbar() # Re-calc scrollbar limits with new height/lines
+                
+            # Restore scroll position logic
+            # Use the FINAL viewport_w_chars
+            if self.mapper.enabled and old_char_offset > 0:
+                 new_viewport_w_chars = self.mapper._viewport_width
+                 if new_viewport_w_chars < 1: new_viewport_w_chars = 1
+                 
+                 self.scroll_visual_offset = int(old_char_offset / new_viewport_w_chars)
+                 rem = old_char_offset - (self.scroll_visual_offset * new_viewport_w_chars)
+                 self.scroll_line_frac = rem / new_viewport_w_chars
+
+        # Debounce scrollbar update to ensure it settles correctly after resize
+        # (Already called above, but harmless to call again)
+        # self.update_scrollbar() 
+        
+        if hasattr(self, '_resize_timer') and self._resize_timer:
+            GLib.source_remove(self._resize_timer)
+            
+        self._resize_timer = GLib.timeout_add(100, self._delayed_resize_update)
+        
+        self.queue_draw()
+        return False
+        
+    def _delayed_resize_update(self):
+        """Final update after resize settles."""
+        self._resize_timer = None
+        self.update_scrollbar()
+        self.queue_draw()
+        return False
+
+    def file_loaded(self):
+        """Called after a new file is loaded"""
+        self.mapper.invalidate_all()
+        self.queue_draw()
+        self.update_scrollbar()
+        
+    def update_scrollbar(self):
+        """Update scrollbar values and visibility."""
+        width = self.get_width()
+        height = self.get_height()
+        if width <= 0 or height <= 0:
+            return
+            
+        self.scroll_update_pending = True # Lock
+        try:
+            line_h = self.line_h
+            visible_rows = max(1, height // line_h)
+            total_lines = self.buf.total()
+            
+            if self.mapper.enabled:
+                total_vis = self.mapper.get_total_visual_lines()
+                
+                # Use 10x resolution for ultra-smooth thumb dragging
+                scroll_resolution = 1.0
+                
+                self.vadj.set_lower(0)
+                self.vadj.set_upper(total_vis * scroll_resolution)
+                self.vadj.set_page_size(visible_rows * scroll_resolution)
+                self.vadj.set_step_increment(scroll_resolution)
+                self.vadj.set_page_increment(visible_rows * scroll_resolution)
+                
+                # Estimate current visual position based on BYTES for potential variable line heights
+                # val = (current_byte_offset / total_bytes) * total_vis
+                
+                total_bytes = 1
+                if hasattr(self.buf, 'total_size'):
+                     total_bytes = max(1, self.buf.total_size)
+                
+                # Get start byte of current line
+                start_byte = 0
+                line_info = self.buf.get_line_info(self.scroll_line)
+                if line_info:
+                    start_byte = line_info.offset
+                else:
+                    # Fallback for unindexed lines (e.g. newly inserted at end)
+                    # We estimate the byte offset linearly based on line number
+                    if self.buf.total() > 0:
+                         start_byte = int((self.scroll_line / self.buf.total()) * total_bytes)
+                
+                # Add offset from visual rows (approximate bytes)
+                # We assume 1 byte/char for smoothness calculation to allow sub-line granularity
+                # viewport_char_width * visual_offset
+                # viewport_char_width * visual_offset
+                # Use value from mapper which ensures consistency with total_vis
+                # (especially during resize where get_width() might be stale)
+                width_chars = self.mapper._viewport_width
+                if width_chars < 1: width_chars = 1
+                
+                # width = self.get_width()
+                # ln_width = 30 
+                # if self.show_line_numbers:
+                #    ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+                if self.show_line_numbers:
+                    ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+                else:
+                    ln_width = 0
+                
+                # Use reduced padding as requested (20px instead of 25px)
+                # The user requested "reduce the padding" (was 40, then 25, now 10, now 20 polish).
+                # User specifically asked for 10px for non-scrollbar mode.
+                padding = 20 if self.vscroll.get_visible() else 10
+                viewport_w = max(1, width - ln_width - padding)
+                # width_chars = max(1, int(viewport_w / max(0.1, self.char_width)))
+                
+                frac = getattr(self, 'scroll_line_frac', 0.0)
+                bytes_in_view = (self.scroll_visual_offset + frac) * width_chars
+                
+                curr_byte = start_byte + bytes_in_view
+                
+                # Ratio of TOTAL file
+                ratio = curr_byte / total_bytes
+                
+                # Use max realizable scroll value (upper - page_size) to match on_vadj_changed
+                upper = total_vis * scroll_resolution
+                page_sz = visible_rows * scroll_resolution
+                max_scroll = max(1.0, upper - page_sz)
+                
+                curr_val = ratio * max_scroll
+                
+                self.vadj.set_value(curr_val)
+                self.vscroll.set_visible(total_vis > visible_rows)
+                
+                # Horizontal scrollbar disabled/hidden in wrap mode usually
+                self.hscroll.set_visible(False)
+            else:
+                # No wrap - use 1.0 resolution (float) matches on_vadj_changed
+                scroll_resolution = 1.0
+                
+                self.vadj.set_lower(0)
+                self.vadj.set_upper(total_lines * scroll_resolution)
+                self.vadj.set_page_size(visible_rows * scroll_resolution)
+                self.vadj.set_value(self.scroll_line * scroll_resolution + getattr(self, 'scroll_line_frac', 0.0) * scroll_resolution)
+                self.vscroll.set_visible(total_lines > visible_rows)
+                
+                # Horizontal
+                # Need max line width.. rough estimate or scanning
+                # For now assume mostly visible or fixed large width
+                # Horizontal (NO-WRAP)
+                padding = 20 if self.vscroll.get_visible() else 10
+                viewport_w = width - padding
+                
+                # Compute line number gutter width (must match draw_view)
+                if self.show_line_numbers:
+                    ln_width = max(
+                        30,
+                        int(len(str(self.buf.total())) * self.char_width) + 10
+                    )
+                else:
+                    ln_width = 0
+
+                # Check active match to ensure it's within scrollable range
+                match_limit_w = 0
+                if self.current_match:
+                    try:
+                        # Match: (line, col, end_line, end_col)
+                        # Ensure we can scroll at least to the match + some margin
+                        m_col = self.current_match[1]
+                        cw = getattr(self, 'char_width', 10)
+                        # Allow scrolling a bit past the match start
+                        match_limit_w = (m_col + 50) * cw
+                    except:
+                        pass
+
+                content_w = max(
+                    viewport_w,
+                    int(self.max_line_width) + ln_width + 2,
+                    int(match_limit_w) + ln_width + 2
+                )
+
+                
+                self.hadj.set_lower(0)
+                self.hadj.set_upper(content_w)
+                self.hadj.set_page_size(viewport_w)
+                self.hadj.set_value(min(self.scroll_x, max(0, content_w - viewport_w)))
+                
+                self.hscroll.set_visible(content_w > viewport_w)
+
+                
+        finally:
+            self.scroll_update_pending = False
+
+    def start_cursor_blink(self):
+        """Start smooth cursor blinking with lightweight animation."""
+        self.cursor_visible = True
+        self.cursor_phase = 1.0
+
+        FPS = 60
+        INTERVAL = int(1000 / FPS)
+
+        def tick():
+            self.cursor_phase += 0.05 # Speed
+            if self.cursor_phase >= 2.0:
+                self.cursor_phase -= 2.0
+
+            if not self.calculating: # throttle if busy
+                 self.queue_draw()
+            return True
+
+        if self.cursor_blink_timeout:
+            GLib.source_remove(self.cursor_blink_timeout)
+
+        self.cursor_blink_timeout = GLib.timeout_add(INTERVAL, tick)
+
+    def stop_cursor_blink(self):
+        """Immediately stop blinking and show cursor solid."""
+        if self.cursor_blink_timeout:
+            GLib.source_remove(self.cursor_blink_timeout)
+            self.cursor_blink_timeout = None
+
+        self.cursor_visible = True
+        self.cursor_phase = 1.0
+        self.queue_draw()
+
+    def on_commit(self, im, text):
+        """Handle committed text from IM (finished composition)"""
+        if text:
+            self.buf.insert_text(text, overwrite=self.overwrite_mode)
+            self.keep_cursor_visible()
+            self.stop_cursor_blink()
+            self.restart_blink_after_idle()
+            self.queue_draw()
+            self.update_im_cursor_location()
+
+    def restart_blink_after_idle(self):
+        """Restart cursor blinking only once after user stops typing."""
+        if hasattr(self, "_idle_blink_timeout") and self._idle_blink_timeout:
+            GLib.source_remove(self._idle_blink_timeout)
+            self._idle_blink_timeout = None
+
+        def idle_blink():
+            self._idle_blink_timeout = None
+            self.start_cursor_blink()
+            return False
+
+        self._idle_blink_timeout = GLib.timeout_add(700, idle_blink)
+
+    def on_preedit_start(self, im):
+        self.queue_draw()
+
+    def on_preedit_end(self, im):
+        self.preedit_string = ""
+        self.preedit_cursor = 0
+        self.queue_draw()
+
+    def on_preedit_changed(self, im):
+        try:
+            preedit_str, attrs, cursor_pos = self.im.get_preedit_string()
+            self.preedit_string = preedit_str or ""
+            self.preedit_cursor = cursor_pos
+            self.queue_draw()
+        except Exception as e:
+            print(f"Preedit error: {e}")
+
+    def on_focus_in(self, controller):
+        self.im.focus_in()
+        self.im.set_client_widget(self)
+        self.update_im_cursor_location()
+        
+    def on_focus_out(self, controller):
+            self.im.focus_out()
+
+    def update_im_cursor_location(self):
+        try:
+            width = self.get_width()
+            height = self.get_height()
+            if width <= 0 or height <= 0: return
+            
+            cl, cc = self.buf.cursor_line, self.buf.cursor_col
+            
+            # Helper to calculate visual x,y
+            # We reuse the logic from draw_view or simplify it
+            
+            # Simple check if visible
+            if cl < self.scroll_line or cl > self.scroll_line + (height // self.line_h) + 1:
+                return 
+                
+            # Calculate Y
+            # If wrapped, complex...
+            # For IM, approximate is usually okay or just disable if complex.
+            # Let's try to be somewhat accurate
+            
+            # Approximate Y relative to top of viewport
+            rel_ln = cl - self.scroll_line
+            y = rel_ln * self.line_h 
+            
+            # Calculate X
+            # Get wrapped line segment for cursor
+            segments = self.mapper.get_line_segments(cl)
+            vis_off, col_off = self.mapper.column_to_visual_offset(cl, cc)
+            
+            # If line is wrapped and we are on a wrapped visual line, adjust Y
+            # This is tricky because we only know scroll_line (logical).
+            # If scroll_visual_offset > 0, we need to account for it.
+            
+            if cl == self.scroll_line:
+                if vis_off < self.scroll_visual_offset:
+                    return # Above view
+                y = (vis_off - self.scroll_visual_offset) * self.line_h
+            else:
+                 # Logic for cl > scroll_line
+                 # We need to know how many visual lines are between scroll_line and cl
+                 # This requires iterating... expensive.
+                 # Fallback: simple logical line difference * line_h
+                 # This will be wrong for wrapped text but better than nothing
+                 pass
+            
+            x = 0
+            if segments:
+                 # Find segment for current col
+                 # vis_off is the index of segment
+                 if vis_off < len(segments):
+                      seg_start, seg_end = segments[vis_off]
+                      seg_text = self.buf.get_line(cl)[seg_start:seg_end]
+                      
+                      # Calculate X offset in segment
+                      rel_col = cc - seg_start
+                      
+                      # Measure Width
+                      # Use temporary layout
+                      surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+                      cr = cairo.Context(surface)
+                      layout = self.create_text_layout(cr, seg_text)
+                      
+                      idx = self.visual_byte_index(seg_text, rel_col)
+                      pos = layout.get_cursor_pos(idx)[0]
+                      
+                      ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+                      base_x = ln_width + 2 - self.scroll_x
+                      
+                      x = base_x + (pos.x / Pango.SCALE)
+            
+            rect = Gdk.Rectangle()
+            rect.x = int(x)
+            rect.y = int(y)
+            rect.width = 2
+            rect.height = int(self.line_h)
+            
+            self.im.set_cursor_location(rect)
+            
+        except Exception:
+            pass
+    def xy_to_line_col(self, x, y):
+        """Convert widget coordinates to logical line/col."""
+        if self.show_line_numbers:
+            ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+        else:
+            ln_width = 0
+        text_x = x - ln_width - 2 + self.scroll_x
+        
+        if text_x < 0: text_x = 0
+            
+        target_y = y
+        
+        # Start at scroll_line
+        curr_ln = self.scroll_line
+        curr_vis_off = self.scroll_visual_offset
+        
+        curr_y = 0
+        found_ln = -1
+        found_col = 0
+        
+        total_lines = self.buf.total()
+        get_line = self.buf.get_line
+        
+        # Iterate until we find the line or go off screen
+        while curr_ln < total_lines:
+             segments = self.mapper.get_line_segments(curr_ln)
+             num_segs = len(segments)
+             
+             start_seg = 0
+             if curr_ln == self.scroll_line:
+                 start_seg = curr_vis_off
+             
+             if start_seg >= num_segs:
+                 # Should not happen typically unless scroll is stale, assume 0 lines height for safety or skip
+                 start_seg = 0
+                 
+             height_px = (num_segs - start_seg) * self.line_h
+             
+             if curr_y + height_px > target_y:
+                 # Found it
+                 seg_idx = int((target_y - curr_y) // self.line_h) + start_seg
+                 
+                 found_ln = curr_ln
+                 
+                 # Map text_x to column
+                 if segments:
+                     # Clamp seg_idx to valid range to prevent IndexError
+                     seg_idx = max(0, min(seg_idx, len(segments) - 1))
+                     s_start, s_end = segments[seg_idx]
+                     text = get_line(curr_ln)[s_start:s_end]
+                     
+                     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+                     cr = cairo.Context(surface)
+                     col_in_seg = self.pixel_to_column(cr, text, text_x)
+                     found_col = s_start + col_in_seg
+                 else:
+                     found_col = 0
+                     
+                 break
+             
+             curr_y += height_px
+             curr_ln += 1
+             
+             if curr_y > self.get_height():
+                 break
+                 
+        if found_ln == -1:
+             found_ln = max(0, total_lines - 1)
+             found_col = len(get_line(found_ln))
+             
+        return found_ln, found_col
+
+    def pixel_to_column(self, cr, text, px):
+        """Map pixel X to column in text segment."""
+        if not text: return 0
+        if px <= 0: return 0
+        
+        layout = self.create_text_layout(cr, text)
+        text_w = layout.get_pixel_size()[0]
+        if px >= text_w: return len(text)
+        
+        success, idx, trailing = layout.xy_to_index(int(px * Pango.SCALE), 0)
+        if not success: return len(text)
+        
+        # Check if ASCII optim
+        if len(text) == len(text.encode('utf-8')):
+             return idx + (1 if trailing else 0)
+
+        # Convert byte index to char index
+        byte_pos = 0
+        for i, ch in enumerate(text):
+             if byte_pos >= idx:
+                 return i
+             byte_pos += len(ch.encode('utf-8'))
+             
+        return len(text)
+
+        
+    def on_key(self, c, keyval, keycode, state):
+        event = c.get_current_event()
+        if event and self.im.filter_keypress(event):
+            return True
+
+        name = Gdk.keyval_name(keyval)
+        shift_pressed = (state & Gdk.ModifierType.SHIFT_MASK) != 0
+        ctrl_pressed = (state & Gdk.ModifierType.CONTROL_MASK) != 0
+        alt_pressed = (state & Gdk.ModifierType.ALT_MASK) != 0
+
+        # Undo (Ctrl+Z)
+        if ctrl_pressed and not shift_pressed and not alt_pressed and (name == "z" or name == "Z"):
+            pos = self.undo_manager.undo(self.buf)
+            if pos:
+                self.buf.set_cursor(pos.line, pos.col)
+            self.update_scrollbar()
+            self.keep_cursor_visible()
+            self.queue_draw()
+            return True
+            
+        # Redo (Ctrl+Y or Ctrl+Shift+Z)
+        if ctrl_pressed and \
+           ((not shift_pressed and (name == "y" or name == "Y")) or \
+            (shift_pressed and (name == "z" or name == "Z"))):
+            pos = self.undo_manager.redo(self.buf)
+            if pos:
+                self.buf.set_cursor(pos.line, pos.col)
+            self.update_scrollbar()
+            self.keep_cursor_visible()
+            self.queue_draw()
+            return True
+
+        # Alt+Z - Toggle word wrap
+        if alt_pressed and (name == "z" or name == "Z"):
+            # Calculate current byte/char position within the line before switching
+            current_char_offset = 0
+            width = self.get_width()
+            ln_width = 30
+            if self.show_line_numbers:
+                ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+            viewport_w_chars = max(1, int((width - ln_width - 40) / max(0.1, self.char_width)))
+
+            if self.mapper.enabled:
+                # Switching Wrap -> No Wrap
+                # Convert visual offset to horizontal scroll
+                frac = getattr(self, 'scroll_line_frac', 0.0)
+                current_char_offset = (self.scroll_visual_offset + frac) * viewport_w_chars
+                
+                self.wrap_enabled = False
+                self.scroll_visual_offset = 0
+                self.scroll_x = int(current_char_offset * self.char_width)
+            else:
+                # Switching No Wrap -> Wrap
+                # Convert horizontal scroll to visual offset
+                current_char_offset = self.scroll_x / max(0.1, self.char_width)
+                
+                # Ensure mapper has correct viewport width for accurate estimation!
+                self.mapper.set_viewport_width(width - ln_width - 40, self.char_width)
+                
+                self.wrap_enabled = True
+                self.scroll_x = 0
+                
+                # New visual offset
+                self.scroll_visual_offset = int(current_char_offset / viewport_w_chars)
+                # Remainder could be added to frac, but visual lines are integers for now in mapper
+                # We can update frac to include the horizontal position remainder? 
+                # Ideally, we start at the beginning of that visual line.
+                
+                # Update metrics will update viewport width in mapper
+                self.update_metrics() 
+                # Re-calculate with exact mapper width if changed
+                
+            self.update_metrics() # Ensure metrics up to date
+            self.queue_draw()
+            GLib.idle_add(self.update_scrollbar)
+            # self.keep_cursor_visible() # Don't force cursor visible, keep scroll pos?
+            # Actually user wants to see what they were looking at.
+            return True
+
+        # Alt+Arrow keys for text movement
+        if alt_pressed:
+            if name == "Left":
+                self.buf.move_word_left_with_text()
+            elif name == "Right":
+                self.buf.move_word_right_with_text()
+            elif name == "Up":
+                self.buf.move_line_up_with_text()
+            elif name == "Down":
+                self.buf.move_line_down_with_text()
+            else:
+                return False 
+            
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+
+        if keyval == Gdk.KEY_Tab:
+            if shift_pressed:
+                self.buf.unindent_selection()
+            elif self.buf.selection.has_selection() and \
+                 self.buf.selection.start_line != self.buf.selection.end_line:
+                self.buf.indent_selection()
+            else:
+                if getattr(self, "use_tabs", True):
+                    self.buf.insert_text("\t")
+                else:
+                    self.buf.insert_text(" " * self.tab_width)
+            self.queue_draw()
+            return True
+
+        if keyval == Gdk.KEY_ISO_Left_Tab:
+             self.buf.unindent_selection()
+             self.queue_draw()
+             return True
+
+        # Ctrl+A
+        if ctrl_pressed and name == "a":
+            self.buf.select_all()
+            self.queue_draw()
+            return True
+
+        # Clipboard
+        if ctrl_pressed:
+            if name == "c":
+                self.copy_to_clipboard()
+                return True
+            elif name == "x":
+                self.cut_to_clipboard()
+                return True
+            elif name == "v":
+                self.paste_from_clipboard()
+                return True
+
+        # Insert
+        if name == "Insert" and not ctrl_pressed and not shift_pressed:
+            self.overwrite_mode = not self.overwrite_mode
+            print(f"Overwrite mode: {'ON' if self.overwrite_mode else 'OFF'}")
+            self.queue_draw()
+            return True
+
+        # Editing keys
+        if name == "BackSpace":
+            if ctrl_pressed and shift_pressed:
+                self.buf.delete_to_line_start()
+            elif ctrl_pressed:
+                self.buf.delete_word_backward()
+            else:
+                self.buf.backspace()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+
+        if name == "Delete":
+            if ctrl_pressed and shift_pressed:
+                self.buf.delete_to_line_end()
+            elif ctrl_pressed:
+                self.buf.delete_word_forward()
+            else:
+                self.buf.delete_key()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+
+        if name == "Return":
+             self.buf.insert_newline()
+             if getattr(self, "auto_indent", True):
+                 ln = self.buf.cursor_line - 1
+                 if ln >= 0:
+                     text = self.buf.get_line(ln)
+                     indent = ""
+                     for ch in text:
+                         if ch in " \t": indent += ch
+                         else: break
+                     if indent: self.buf.insert_text(indent)
+             self.keep_cursor_visible()
+             self.update_im_cursor_location()
+             self.queue_draw()
+             return True
+
+        # Navigation
+        if name in ("Up", "Down", "Left", "Right", "Home", "End"):
+            if name == "Up": self.ctrl.move_up(extend_selection=shift_pressed)
+            elif name == "Down": self.ctrl.move_down(extend_selection=shift_pressed)
+            elif name == "Left": 
+                 if ctrl_pressed: self.ctrl.move_word_left(extend_selection=shift_pressed)
+                 else: self.ctrl.move_left(extend_selection=shift_pressed)
+            elif name == "Right":
+                 if ctrl_pressed: self.ctrl.move_word_right(extend_selection=shift_pressed)
+                 else: self.ctrl.move_right(extend_selection=shift_pressed)
+            elif name == "Home":
+                 if ctrl_pressed: self.ctrl.move_document_start(extend_selection=shift_pressed)
+                 else: self.ctrl.move_home(extend_selection=shift_pressed)
+            elif name == "End":
+                 if ctrl_pressed: self.ctrl.move_document_end(extend_selection=shift_pressed)
+                 else: self.ctrl.move_end(extend_selection=shift_pressed)
+            
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+            return True
+
+        # Page Up/Down
+        if name == "Page_Up" or name == "Page_Down":
+             visible_lines = max(1, self.get_height() // self.line_h)
+             steps = visible_lines
+             
+             if name == "Page_Up":
+                 for _ in range(steps): self.ctrl.move_up(extend_selection=shift_pressed)
+             else:
+                 for _ in range(steps): self.ctrl.move_down(extend_selection=shift_pressed)
+                 
+             self.keep_cursor_visible()
+             self.update_im_cursor_location()
+             self.queue_draw()
+             return True
+
+        return False
+
+    def copy_to_clipboard(self):
+        """Copy selected text to clipboard with progress indicator"""
+        self.show_busy("Copying...")
+        
+        # Defer execution to allow UI to render the busy overlay
+        def _do_copy():
+            try:
+                text = self.buf.get_selected_text()
+                if text:
+                    clipboard = self.get_clipboard()
+                    clipboard.set_content(Gdk.ContentProvider.new_for_value(text))
+            finally:
+                self.hide_busy()
+            return False
+            
+        GLib.timeout_add(20, _do_copy)
+
+    def cut_to_clipboard(self):
+        """Cut selected text to clipboard with progress indicator"""
+        self.show_busy("Cutting...")
+        
+        # Defer execution
+        def _do_cut():
+            try:
+                text = self.buf.get_selected_text()
+                if text:
+                    clipboard = self.get_clipboard()
+                    clipboard.set_content(Gdk.ContentProvider.new_for_value(text))
+                    # Pass the text we just fetched to delete_selection to avoid re-fetching it
+                    self.buf.delete_selection(provided_text=text)
+                    self.queue_draw()
+            finally:
+                self.hide_busy()
+            return False
+            
+        GLib.timeout_add(20, _do_cut)
+
+    def paste_from_clipboard(self):
+        """Paste text from clipboard with better error handling and progress"""
+        clipboard = self.get_clipboard()
+        
+        def paste_ready(clipboard, result):
+            try:
+                text = clipboard.read_text_finish(result)
+                if text:
+                    self.show_busy("Pasting...")
+                    
+                    # Defer insert to allow UI update
+                    def _do_paste():
+                        try:
+                            self.buf.insert_text(text)
+                            
+                            
+                            # After paste, invalidate layout
+                            if self.mapper.enabled:
+                                self.mapper.invalidate_all()
+                            self.update_scrollbar()
+                        finally:
+                            self.hide_busy()
+                            self.queue_draw()
+                        return False
+                    
+                    GLib.timeout_add(20, _do_paste)
+                    
+            except Exception as e:
+                # Handle finish error
+                error_msg = str(e)
+                if "No compatible transfer format" not in error_msg:
+                    print(f"Paste error: {e}")
+                self.try_paste_fallback()
+
+        clipboard.read_text_async(None, paste_ready)
+
+    def try_paste_fallback(self):
+        """Fallback method to try getting clipboard text"""
+        try:
+            clipboard = self.get_clipboard()
+            
+            # Try to get formats available
+            formats = clipboard.get_formats()
+            
+            # Check if text is available in any format
+            if formats.contain_mime_type("text/plain"):
+                # Try reading as plain text with UTF-8 encoding
+                def read_ready(clipboard, result):
+                    try:
+                        success, data = clipboard.read_finish(result)
+                        if success and data:
+                            # Try to decode as UTF-8
+                            text = data.decode('utf-8', errors='ignore')
+                            if text:
+                                self.buf.insert_text(text)
+                                
+                                # After paste, clear wrap cache and recalculate everything
+                                if self.renderer.wrap_enabled:
+                                    self.renderer.wrap_cache.clear()
+                                    self.renderer.total_visual_lines_cache = None
+                                    self.renderer.estimated_total_cache = None
+                                    self.renderer.visual_line_map = []
+                                    self.renderer.edits_since_cache_invalidation = 0
+                                
+                                self.keep_cursor_visible()
+                                self.update_scrollbar()  # Update scrollbar range after paste
+                                self.update_im_cursor_location()
+                                self.queue_draw()
+                    except Exception as e:
+                        # Silently fail - clipboard probably contains non-text data
+                        pass
+                
+                clipboard.read_async(["text/plain"], 0, None, read_ready)
+        except Exception as e:
+            # Silently fail - this is just a fallback attempt
+            pass
+
+    def install_keys(self):
+        key = Gtk.EventControllerKey()
+        key.connect("key-pressed", self.on_key)
+        key.connect("key-released", self.on_key_release)
+        self.add_controller(key)
+        
+    def on_key_release(self, c, keyval, keycode, state):
+        """Filter key releases for IM"""
+        event = c.get_current_event()
+        if event and self.im.filter_keypress(event):
+            return True
+        return False
+
+
+    def install_mouse(self):
+        drag = Gtk.GestureDrag()
+        drag.set_button(1)
+        drag.connect("drag-begin", self.on_drag_begin)
+        drag.connect("drag-update", self.on_drag_update)
+        drag.connect("drag-end", self.on_drag_end)
+        self.add_controller(drag)
+
+        click = Gtk.GestureClick()
+        click.set_button(1)
+        click.connect("pressed", self.on_click_pressed)
+        click.connect("released", self.on_click_released)
+        self.add_controller(click)
+        
+        # Middle-click paste
+        middle_click = Gtk.GestureClick()
+        middle_click.set_button(2)  # Middle mouse button
+        middle_click.connect("pressed", self.on_middle_click)
+        self.add_controller(middle_click)
+        
+        # Right-click menu
+        right_click = Gtk.GestureClick()
+        right_click.set_button(3)  # Right mouse button
+        right_click.connect("pressed", self.on_right_click)
+        self.add_controller(right_click)
+        
+        # Track last click time and position for multi-click detection
+        self.last_click_time = 0
+        self.last_click_line = -1
+        self.last_click_col = -1
+        self.click_count = 0
+        
+        # Track word selection mode for drag-to-select-words
+        self.word_selection_mode = False
+        
+        # Track the original anchor word boundaries (for stable bi-directional drag)
+        self.anchor_word_start_line = -1
+        self.anchor_word_start_col = -1
+        self.anchor_word_end_line = -1
+        self.anchor_word_end_col = -1
+        
+        # Track drag-and-drop mode for moving/copying selected text
+        self.drag_and_drop_mode = False
+        self.dragged_text = ""
+        self.drop_position_line = -1
+        self.drop_position_col = -1
+        self.ctrl_pressed_during_drag = False  # Track if Ctrl is pressed during drag
+        
+        # Track if we clicked inside a selection (to handle click-to-clear vs drag)
+        self._clicked_in_selection = False
+        
+        # Track if a drag might start (deferred until movement)
+        # Track if a drag might start (deferred until movement)
+        self._drag_pending = False
+        
+        # Auto-scroll on drag
+        self.autoscroll_timer_id = None
+        self.last_drag_x = 0
+        self.last_drag_y = 0
+
+    def on_middle_click(self, gesture, n_press, x, y):
+        """Paste from primary clipboard on middle-click"""
+        self.grab_focus()
+        
+        # Always use accurate xy_to_line_col
+        ln, col = self.xy_to_line_col(x, y)
+        
+        # Move cursor to click position
+        self.buf.set_cursor(ln, col)
+        
+        # Paste from PRIMARY clipboard (not CLIPBOARD)
+        display = self.get_display()
+        clipboard = display.get_primary_clipboard()
+        clipboard.read_text_async(None, self.on_primary_paste_ready)
+        
+        self.queue_draw()
+
+    def on_primary_paste_ready(self, clipboard, result):
+        """Callback when primary clipboard text is ready"""
+        try:
+            text = clipboard.read_text_finish(result)
+            if text:
+                # Delete selection if any
+                if self.buf.selection.has_selection():
+                    self.buf.delete_selection()
+                
+                # Insert text at cursor
+                self.buf.insert_text(text)
+                
+                # After paste, clear wrap cache and recalculate everything
+                if self.renderer.wrap_enabled:
+                    self.renderer.wrap_cache.clear()
+                    self.renderer.total_visual_lines_cache = None
+                    self.renderer.estimated_total_cache = None
+                    self.renderer.visual_line_map = []
+                    self.renderer.edits_since_cache_invalidation = 0
+                
+                self.keep_cursor_visible()
+                self.update_scrollbar()  # Update scrollbar range after paste
+                self.update_im_cursor_location()
+                self.queue_draw()
+        except Exception as e:
+            print(f"Primary paste error: {e}")
+
+    def on_right_click(self, gesture, n_press, x, y):
+        """Show context menu on right-click"""
+        self.grab_focus()
+        
+        # Create popover menu
+        menu = Gtk.PopoverMenu()
+        menu.set_parent(self)
+        menu.set_has_arrow(False)
+        
+        # Create menu model
+        menu_model = Gio.Menu()
+        
+        has_selection = self.buf.selection.has_selection()
+        
+        if has_selection:
+            # Menu items for when there's a selection
+            menu_model.append("Cut", "view.cut")
+            menu_model.append("Copy", "view.copy")
+            menu_model.append("Paste", "view.paste")
+            menu_model.append("Delete", "view.delete")
+        else:
+            # Menu items for when there's no selection
+            menu_model.append("Paste", "view.paste")
+        
+        # Always show these
+        menu_model.append("Select All", "view.select-all")
+        # Undo/Redo commented out until implemented
+        menu_model.append("Undo", "view.undo")
+        menu_model.append("Redo", "view.redo")
+        
+        menu.set_menu_model(menu_model)
+        
+        # Create action group if not exists
+        if not hasattr(self, 'action_group'):
+            self.action_group = Gio.SimpleActionGroup()
+            self.insert_action_group("view", self.action_group)
+            
+            # Create actions using a loop
+            actions = [
+                ("cut", self.cut_to_clipboard),
+                ("copy", self.copy_to_clipboard),
+                ("paste", self.paste_from_clipboard),
+                ("delete", self.on_delete_action),
+                ("select-all", lambda: self.buf.select_all()),
+                ("undo", self.on_undo_action),
+                ("redo", self.on_redo_action),
+            ]
+            
+            for action_name, callback in actions:
+                action = Gio.SimpleAction.new(action_name, None)
+                action.connect("activate", lambda a, p, cb=callback: cb())
+                self.action_group.add_action(action)
+        
+        # Position the menu at the click location with slight offset
+        rect = Gdk.Rectangle()
+        rect.x = int(x) + 60
+        rect.y = int(y) - 1
+        rect.width = 1
+        rect.height = 1
+        menu.set_pointing_to(rect)
+        
+        menu.popup()
+
+    def on_delete_action(self):
+        """Delete selected text"""
+        if self.buf.selection.has_selection():
+            self.buf.delete_selection()
+            self.keep_cursor_visible()
+            self.update_im_cursor_location()
+            self.queue_draw()
+
+    def on_undo_action(self):
+        """Undo action handler"""
+        pos = self.undo_manager.undo(self.buf)
+        if pos:
+            self.buf.set_cursor(pos.line, pos.col)
+        self.update_scrollbar()
+        self.keep_cursor_visible()
+        self.queue_draw()
+
+    def on_redo_action(self):
+        """Redo action handler"""
+        pos = self.undo_manager.redo(self.buf)
+        if pos:
+            self.buf.set_cursor(pos.line, pos.col)
+        self.update_scrollbar()
+        self.keep_cursor_visible()
+        self.queue_draw()
+
+    def find_word_boundaries(self, line, col):
+        """Find word boundaries at the given position. Words include alphanumeric and underscore."""
+        import unicodedata
+        
+        if not line:
+            return 0, 0
+        
+        # Check if character is a word character (letter, number, underscore, or combining mark)
+        def is_word_char(ch):
+            if ch == '_':
+                return True
+            cat = unicodedata.category(ch)
+            # Letter categories: Lu, Ll, Lt, Lm, Lo
+            # Number categories: Nd, Nl, No
+            # Mark categories: Mn, Mc, Me (for combining characters like Devanagari vowel signs)
+            return cat[0] in ('L', 'N', 'M')
+        
+        # If clicking beyond line or on whitespace/punctuation, select just that position
+        if col >= len(line) or not is_word_char(line[col]):
+            return col, min(col + 1, len(line))
+        
+        # Find start of word
+        start = col
+        while start > 0 and is_word_char(line[start - 1]):
+            start -= 1
+        
+        # Find end of word
+        end = col
+        while end < len(line) and is_word_char(line[end]):
+            end += 1
+        
+        return start, end
+
+    def on_click_pressed(self, g, n_press, x, y):
+        """Handle mouse click."""
+        print(f"DEBUG: Click Pressed. Count={n_press}")
+        self.grab_focus()
+
+        # Always use accurate xy_to_line_col
+        ln, col = self.xy_to_line_col(x, y)
+
+        mods = g.get_current_event_state()
+        shift = bool(mods & Gdk.ModifierType.SHIFT_MASK)
+
+        import time
+        current_time = time.time()
+        time_diff = current_time - self.last_click_time
+
+        if time_diff > 0.5 or ln != self.last_click_line or abs(col - self.last_click_col) > 3:
+            self.click_count = 0
+
+        self.click_count += 1
+        self.last_click_time = current_time
+        self.last_click_line = ln
+        self.last_click_col = col
+
+        line_text = self.buf.get_line(ln)
+        line_len = len(line_text)
+
+        # SHIFT-extend remains unchanged
+        if shift:
+            if not self.buf.selection.active:
+                self.buf.selection.set_start(self.buf.cursor_line, self.buf.cursor_col)
+            self.buf.selection.set_end(ln, col)
+            self.buf.set_cursor(ln, col, extend_selection=True)
+            self.update_matching_brackets()
+            self.queue_draw()
+            return
+
+        # TRIPLE CLICK
+        if self.click_count == 3:
+            # Check if we are clicking inside an established selection (from double-click)
+            # If so, defer the triple click action until release, in case user drags instead.
+            if self.buf.selection.has_selection():
+                s_line, s_col, e_line, e_col = self.buf.selection.get_bounds()
+                is_inside = False
+                if s_line == e_line:
+                    if ln == s_line and s_col <= col < e_col:
+                        is_inside = True
+                else:
+                    # Multi-line word selection? Possible.
+                    if s_line <= ln <= e_line: # simplified check
+                         is_inside = True
+                
+                if is_inside:
+                    self._pending_triple_click = True
+                    self._triple_click_ln = ln
+                    self._triple_click_line_len = line_len
+                    return # DEFER
+            
+            self.buf.selection.set_start(ln, 0)
+            self.buf.selection.set_end(ln, line_len)
+            self.buf.cursor_line = ln
+            self.buf.cursor_col = line_len
+            self.update_matching_brackets()
+            self.queue_draw()
+            return
+
+        # DOUBLE CLICK - Context-aware selection (handles empty lines and end-of-line)
+        if self.click_count == 2:
+
+            # Case 1: empty line → context-aware selection
+            if line_len == 0:
+                # Check what comes next
+                next_line_text = None
+                if ln < self.buf.total() - 1:
+                    next_line_text = self.buf.get_line(ln + 1)
+                
+                if next_line_text is not None and len(next_line_text) == 0:
+                    # Next line is also empty: select only current empty line
+                    self.buf.selection.set_start(ln, 0)
+                    self.buf.selection.set_end(ln, 1)
+                    self.buf.cursor_line = ln
+                    self.buf.cursor_col = 0
+                    # Set anchor points for drag extension
+                    self.anchor_word_start_line = ln
+                    self.anchor_word_start_col = 0
+                    self.anchor_word_end_line = ln
+                    self.anchor_word_end_col = 1
+                elif next_line_text is not None and len(next_line_text) > 0:
+                    # Next line has text: select current empty line + next line's text
+                    self.buf.selection.set_start(ln, 0)
+                    self.buf.selection.set_end(ln + 1, len(next_line_text))
+                    self.buf.cursor_line = ln + 1
+                    self.buf.cursor_col = len(next_line_text)
+                    # Set anchor points for drag extension
+                    self.anchor_word_start_line = ln
+                    self.anchor_word_start_col = 0
+                    self.anchor_word_end_line = ln + 1
+                    self.anchor_word_end_col = len(next_line_text)
+                else:
+                    # Last line (empty): don't select anything
+                    self.buf.selection.clear()
+                    self.buf.cursor_line = ln
+                    self.buf.cursor_col = 0
+                
+                # Enable word selection mode for drag (treat empty lines as "words")
+                self.word_selection_mode = True
+                
+                self.update_matching_brackets()
+                self.queue_draw()
+                return
+
+            # Case 2: double-click at or beyond end of text (context-aware like empty lines)
+            if col >= line_len:
+                # Check if this line has a newline (not the last line)
+                has_newline = ln < self.buf.total() - 1
+                
+                if has_newline:
+                    # Check what comes next (similar to empty line logic)
+                    next_line_text = self.buf.get_line(ln + 1)
+                    
+                    if len(next_line_text) == 0:
+                        # Next line is empty: select just the newline area (EOL to viewport)
+                        self.buf.selection.set_start(ln, line_len)
+                        self.buf.selection.set_end(ln, line_len + 1)
+                        self.buf.cursor_line = ln
+                        self.buf.cursor_col = line_len
+                        # Set anchor points for drag extension
+                        self.anchor_word_start_line = ln
+                        self.anchor_word_start_col = line_len
+                        self.anchor_word_end_line = ln
+                        self.anchor_word_end_col = line_len + 1
+                    else:
+                        # Next line has text: select newline + next line's text
+                        self.buf.selection.set_start(ln, line_len)
+                        self.buf.selection.set_end(ln + 1, len(next_line_text))
+                        self.buf.cursor_line = ln + 1
+                        self.buf.cursor_col = len(next_line_text)
+                        # Set anchor points for drag extension
+                        self.anchor_word_start_line = ln
+                        self.anchor_word_start_col = line_len
+                        self.anchor_word_end_line = ln + 1
+                        self.anchor_word_end_col = len(next_line_text)
+                else:
+                    # Last line (no newline): select trailing content
+                    # Find what's at the end: word or spaces
+                    if line_text and line_text[-1] == ' ':
+                        # Find start of trailing spaces
+                        start = line_len - 1
+                        while start > 0 and line_text[start - 1] == ' ':
+                            start -= 1
+                        self.buf.selection.set_start(ln, start)
+                        self.buf.selection.set_end(ln, line_len)
+                        self.buf.cursor_line = ln
+                        self.buf.cursor_col = line_len
+                        # Set anchor points for drag extension
+                        self.anchor_word_start_line = ln
+                        self.anchor_word_start_col = start
+                        self.anchor_word_end_line = ln
+                        self.anchor_word_end_col = line_len
+                    else:
+                        # Select the last word
+                        start_col, end_col = self.find_word_boundaries(line_text, line_len - 1)
+                        self.buf.selection.set_start(ln, start_col)
+                        self.buf.selection.set_end(ln, end_col)
+                        self.buf.cursor_line = ln
+                        self.buf.cursor_col = end_col
+                        # Set anchor points for drag extension
+                        self.anchor_word_start_line = ln
+                        self.anchor_word_start_col = start_col
+                        self.anchor_word_end_line = ln
+                        self.anchor_word_end_col = end_col
+                
+                # Enable word selection mode for drag
+                self.word_selection_mode = True
+                
+                self.queue_draw()
+                return
+
+            # Case 3: normal double-click → word selection
+            start_col, end_col = self.find_word_boundaries(line_text, col)
+            self.buf.selection.set_start(ln, start_col)
+            self.buf.selection.set_end(ln, end_col)
+            self.buf.cursor_line = ln
+            self.buf.cursor_col = end_col
+            
+            # Enable word selection mode for drag AND store anchor word
+            self.word_selection_mode = True
+            self.anchor_word_start_line = ln
+            self.anchor_word_start_col = start_col
+            self.anchor_word_end_line = ln
+            self.anchor_word_end_col = end_col
+            
+            self.queue_draw()
+            return
+
+        # SINGLE CLICK unchanged
+        if self.buf.selection.has_selection():
+            bounds = self.buf.selection.get_bounds()
+            if bounds and bounds[0] is not None:
+                start_line, start_col, end_line, end_col = bounds
+                click_in_selection = False
+
+                if start_line == end_line:
+                    if ln == start_line and start_col <= col < end_col:
+                        click_in_selection = True
+                else:
+                    if ln == start_line and col >= start_col:
+                        click_in_selection = True
+                    elif ln == end_line and col < end_col:
+                        click_in_selection = True
+                    elif start_line < ln < end_line:
+                        click_in_selection = True
+
+                if click_in_selection:
+                    self.buf.cursor_line = ln
+                    self.buf.cursor_col = col
+                    self._clicked_in_selection = True
+                    self.queue_draw()
+                    return
+
+        # Check if we are clicking inside an established selection
+        # If so, do NOT clear selection yet (wait for drag or release)
+        if self.buf.selection.has_selection():
+            s_line, s_col, e_line, e_col = self.buf.selection.get_bounds()
+            is_inside = False
+            if s_line == e_line:
+                if ln == s_line and s_col <= col < e_col:
+                    is_inside = True
+            else:
+                if ln == s_line and col >= s_col:
+                    is_inside = True
+                elif ln == e_line and col < e_col:
+                    is_inside = True
+                elif s_line < ln < e_line:
+                    is_inside = True
+            
+            if is_inside:
+                self._clicked_in_selection = True
+                self._click_ln = ln
+                self._click_col = col
+                self._pending_click = True
+                print("DEBUG: Clicked INSIDE selection. Pending Click Set. Returning.")
+                self.queue_draw()
+                return
+
+        print("DEBUG: Clicked OUTSIDE selection. Clearing selection.")
+        self._clicked_in_selection = False
+        self.buf.selection.clear()
+        self.ctrl.start_drag(ln, col)
+
+        self._pending_click = True
+        self._click_ln = ln
+        self._click_col = col
+
+        self.update_matching_brackets()
+        self.queue_draw()
+
+
+    def on_click(self, g, n, x, y):
+        self.grab_focus()
+
+        # Get modifiers
+        modifiers = g.get_current_event_state()
+        shift_pressed = (modifiers & Gdk.ModifierType.SHIFT_MASK) != 0
+
+        # Create temporary cr for measurements
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surface)
+        
+        # Use cached line number width if available to ensure consistency with rendering
+        if hasattr(self.renderer, 'last_ln_width') and self.renderer.last_ln_width is not None and self.renderer.last_ln_width > 0:
+            ln_width = self.renderer.last_ln_width
+        else:
+            ln_width = self.renderer.calculate_line_number_width(cr, self.buf.total())
+            
+        # Adjust for scroll
+        base_x_check = x + self.scroll_x
+        ln = self.scroll_line + int(y // self.renderer.line_h)
+        ln = max(0, min(ln, self.buf.total() - 1))
+
+        # Calculate column position
+        
+        text = self.buf.get_line(ln)
+        
+        # Create layout for this line
+        layout = self.create_text_layout(cr, text if text else " ")
+        
+        is_rtl = detect_rtl_line(text)
+        text_w, _ = layout.get_pixel_size()
+        view_w = self.get_width()
+        
+        # Calculate base_x matching the renderer
+        base_x = self.renderer.calculate_text_base_x(is_rtl, text_w, view_w, ln_width, self.scroll_x)
+        
+        # Calculate relative pixel position from base
+        col_pixels = x - base_x
+        col_pixels = max(0, col_pixels)
+
+        # Convert pixel to column
+        col = self.pixel_to_column(cr, text, col_pixels)
+        col = max(0, min(col, len(text)))
+
+        # Handle shift-click for selection
+        if shift_pressed:
+            # Extend selection from current cursor position
+            if not self.buf.selection.active:
+                self.buf.selection.set_start(self.buf.cursor_line, self.buf.cursor_col)
+            self.buf.selection.set_end(ln, col)
+            self.buf.set_cursor(ln, col, extend_selection=True)
+        else:
+        # Normal click - clear selection and move cursor
+            self.ctrl.click(ln, col)
+        
+        self.queue_draw()
+
+    def on_release(self, g, n, x, y):
+        """Handle mouse button release"""
+        self.stop_autoscroll()  # Stop auto-scroll on release
+        self.ctrl.end_drag()
+
+
+
+    def on_drag_begin(self, g, x, y):
+        """Handle drag begin event."""
+        print(f"DEBUG: Drag Begin at {x},{y}")
+        # Always use accurate xy_to_line_col
+        ln, col = self.xy_to_line_col(x, y)
+        
+        # Check if clicking on selected text
+        if self.buf.selection.has_selection():
+            start_line, start_col, end_line, end_col = self.buf.selection.get_bounds()
+            
+            # Check if click is within selection
+            click_in_selection = False
+            if start_line == end_line:
+                # Single line selection
+                if ln == start_line and start_col <= col < end_col:
+                    click_in_selection = True
+            else:
+                # Multi-line selection
+                if ln == start_line and col >= start_col:
+                    click_in_selection = True
+                elif ln == end_line and col < end_col:
+                    click_in_selection = True
+                elif start_line < ln < end_line:
+                    click_in_selection = True
+            
+            if click_in_selection:
+                # We might be starting a drag, but wait for actual movement
+                self._drag_pending = True
+                # Don't set drag_and_drop_mode yet - wait for on_drag_update
+                self.drag_and_drop_mode = False
+                
+                # Store the selected text (just in case)
+                self.dragged_text = self.buf.get_selected_text()
+                
+                # Don't start normal selection drag - this preserves the selection
+                # Don't call ctrl.start_drag() to keep selection visible
+                return
+        
+        # Normal drag behavior
+    
+        # Check for Shift key (Extend Selection Drag)
+        mods = g.get_current_event_state()
+        shift_pressed = (mods & Gdk.ModifierType.SHIFT_MASK) != 0
+        
+        if shift_pressed:
+            # Shift+Drag: Extend selection
+            self.drag_and_drop_mode = False
+            self._drag_pending = False
+            self._pending_click = False
+            self._pending_triple_click = False # Cancel triple click if dragging with shift
+            
+            # Manually set dragging state to allow update_drag to work
+            # But DO NOT call ctrl.start_drag() because that clears the selection!
+            self.ctrl.dragging = True
+            self.ctrl.drag_start_line = ln
+            self.ctrl.drag_start_col = col
+            
+            # Ensure we are NOT in word selection mode unless we were already
+            if self.click_count <= 1:
+                self.word_selection_mode = False
+                
+            self.queue_draw()
+            return
+
+        self.drag_and_drop_mode = False
+        self._drag_pending = False
+        self._pending_click = False  # We are dragging, so cancel pending click
+        
+        if self.word_selection_mode:
+            # In word selection mode (after double-click), we want to KEEP the current selection
+            # and just start dragging from here.
+            # So we manually set dragging state without clearing selection via start_drag()
+            self.ctrl.dragging = True
+            self.ctrl.drag_start_line = ln
+            self.ctrl.drag_start_col = col
+        else:
+            # Normal selection drag - starts new selection
+            self.ctrl.start_drag(ln, col)
+        
+        # Clear word selection mode only if this is a single-click drag
+        # (click_count will be 1 for single-click, 2+ for multi-click)
+        if self.click_count <= 1:
+            self.word_selection_mode = False
+        
+        self.queue_draw()
+
+
+
+
+    def start_autoscroll(self):
+        """Start the auto-scroll timer if not already running"""
+        if self.autoscroll_timer_id is None:
+            self.autoscroll_timer_id = GLib.timeout_add(50, self.autoscroll_tick)
+    
+    def stop_autoscroll(self):
+        """Stop the auto-scroll timer"""
+        if self.autoscroll_timer_id is not None:
+            try:
+                GLib.source_remove(self.autoscroll_timer_id)
+            except Exception:
+                pass
+            self.autoscroll_timer_id = None
+            
+    def autoscroll_tick(self):
+        """Called periodically during drag to perform auto-scrolling"""
+        if not self.ctrl.dragging and not self.drag_and_drop_mode:
+            self.stop_autoscroll()
+            return False
+            
+        viewport_height = self.get_height()
+        viewport_width = self.get_width()
+        edge_size = 30
+        scroll_amount = 0
+        hscroll_amount = 0
+        
+        # Vertical scrolling calculation
+        if self.last_drag_y < edge_size:
+            scroll_amount = -max(1, int((edge_size - self.last_drag_y) / 10) + 1)
+        elif self.last_drag_y > viewport_height - edge_size:
+            scroll_amount = max(1, int((self.last_drag_y - (viewport_height - edge_size)) / 10) + 1)
+            
+        # Horizontal scrolling calculation (disabled if wrapped)
+        if not self.mapper.enabled:
+             # Approximate gutter width
+             gutter = 50 
+             if self.last_drag_x < gutter + edge_size:
+                 hscroll_amount = -max(5, int((gutter + edge_size - self.last_drag_x)/5)+5)
+             elif self.last_drag_x > viewport_width - edge_size:
+                 hscroll_amount = max(5, int((self.last_drag_x - (viewport_width - edge_size))/5)+5)
+        
+        did_scroll = False
+        
+        if scroll_amount != 0:
+            if self.mapper.enabled:
+                # Scroll by visual lines
+                if scroll_amount < 0:
+                     # Up
+                     steps = abs(scroll_amount)
+                     for _ in range(steps):
+                         if self.scroll_visual_offset > 0:
+                             self.scroll_visual_offset -= 1
+                         elif self.scroll_line > 0:
+                             self.scroll_line -= 1
+                             count = self.mapper.get_visual_line_count(self.scroll_line)
+                             self.scroll_visual_offset = max(0, count - 1)
+                         else:
+                             break
+                     did_scroll = True
+                else:
+                     # Down
+                     steps = scroll_amount
+                     total = self.buf.total()
+                     for _ in range(steps):
+                         count = self.mapper.get_visual_line_count(self.scroll_line)
+                         if self.scroll_visual_offset < count - 1:
+                             self.scroll_visual_offset += 1
+                         elif self.scroll_line < total - 1:
+                             self.scroll_line += 1
+                             self.scroll_visual_offset = 0
+                         else:
+                             break
+                     did_scroll = True
+                
+                if did_scroll: self.update_scrollbar()
+            else:
+                 # Logical
+                 new_line = self.scroll_line + scroll_amount
+                 new_line = max(0, min(new_line, self.buf.total() - 1))
+                 if new_line != self.scroll_line:
+                     self.scroll_line = new_line
+                     did_scroll = True
+                     self.update_scrollbar()
+            
+        if hscroll_amount != 0:
+             self.scroll_x += hscroll_amount
+             if self.scroll_x < 0: self.scroll_x = 0
+             self.hadj.set_value(self.scroll_x)
+             did_scroll = True
+             
+        if did_scroll:
+             self.queue_draw()
+             if self.ctrl.dragging:
+                 self.ctrl.drag_to(self.last_drag_x, self.last_drag_y)
+             elif self.drag_and_drop_mode:
+                 # In DND, we don't call drag_to explicitly unless handling selection DND?
+                 # But we need queue_draw.
+                 pass
+             return True
+             
+        return True
+    def on_drag_update(self, g, dx, dy):
+        ok, sx, sy = g.get_start_point()
+        if not ok:
+            return
+
+        # Check if we have a pending drag that needs to be activated
+        if self._drag_pending:
+            # We moved! Activate drag-and-drop mode
+            self.drag_and_drop_mode = True
+            self._drag_pending = False
+            # Now we know it's a drag, so it's NOT a click-to-clear
+            print("DEBUG: Drag Update. Mode Active. Clearing Pending Click.")
+            self._clicked_in_selection = False
+            self._pending_click = False # Cancel pending click
+            self._pending_triple_click = False # failsafe
+            self.queue_draw()
+
+        # Store current drag position for auto-scroll
+        self.last_drag_x = sx + dx
+        self.last_drag_y = sy + dy
+        
+        # Check if we're near edges and start auto-scroll if needed
+        viewport_height = self.get_height()
+        viewport_width = self.get_width()
+        edge_size = 30
+        
+        near_edge = (
+            self.last_drag_y < edge_size or 
+            self.last_drag_y > viewport_height - edge_size or
+            (not self.renderer.wrap_enabled and (
+                self.last_drag_x < edge_size or 
+                self.last_drag_x > viewport_width - edge_size
+            ))
+        )
+        
+        if near_edge:
+            self.start_autoscroll()
+        else:
+            self.stop_autoscroll()
+
+        # Always use accurate xy_to_line_col - Pango's hit-testing is fast enough
+        ln, col = self.xy_to_line_col(sx + dx, sy + dy)
+
+        # In drag-and-drop mode, track drop position for visual feedback
+        # Do NOT extend selection in drag-and-drop mode
+        if self.drag_and_drop_mode:
+            self.drop_position_line = ln
+            self.drop_position_col = col
+            
+            # Check if Ctrl is pressed for copy vs move visual feedback
+            event = g.get_current_event()
+            if event:
+                state = event.get_modifier_state()
+                self.ctrl_pressed_during_drag = (state & Gdk.ModifierType.CONTROL_MASK) != 0
+            
+            self.queue_draw()
+            return
+        
+        if self.word_selection_mode:
+            # Word-by-word selection mode
+            line_text = self.buf.get_line(ln)
+            
+            # Get selection anchor point (start of initially selected word)
+            sel_start_line = self.buf.selection.start_line if self.buf.selection.active else ln
+            sel_start_col = self.buf.selection.start_col if self.buf.selection.active else col
+            
+            # Also track the end of original selection to determine drag direction
+            sel_end_line = self.buf.selection.end_line if self.buf.selection.active else ln
+            sel_end_col = self.buf.selection.end_col if self.buf.selection.active else col
+            
+            # Handle empty lines
+            if len(line_text) == 0:
+                # Empty line - check if it's the last line (skip it)
+                if ln == self.buf.total() - 1:
+                    # Last empty line: don't extend to it, stay at previous position
+                    return
+                else:
+                    # Empty line not at EOF: treat entire line as one "word"
+                    # Use anchor points for direction detection (same as word selection)
+                    anchor_start_line = self.anchor_word_start_line
+                    anchor_start_col = self.anchor_word_start_col
+                    anchor_end_line = self.anchor_word_end_line
+                    anchor_end_col = self.anchor_word_end_col
+                    
+                    # Determine drag direction based on anchor
+                    is_forward = False
+                    if ln > anchor_start_line:
+                        is_forward = True
+                    elif ln == anchor_start_line and 0 >= anchor_start_col:
+                        is_forward = True
+                    
+                    if is_forward:
+                        # Dragging Forward: anchor at start, extend from empty line newline
+                        self.buf.selection.set_start(anchor_start_line, anchor_start_col)
+                        self.ctrl.update_drag(ln, 1)  # Select empty line + newline
+                    else:
+                        # Dragging Backward: anchor at end, extend to empty line start
+                        self.buf.selection.set_start(anchor_end_line, anchor_end_col)
+                        self.ctrl.update_drag(ln, 0)  # Select from start of empty line
+            elif line_text and 0 <= col <= len(line_text):
+                # Line with text: snap to word boundaries
+                start_col, end_col = self.find_word_boundaries(line_text, min(col, len(line_text) - 1))
+                
+                # Use the ANCHOR word (originally double-clicked word) for direction detection
+                # This prevents flickering by keeping the reference point stable
+                anchor_start_line = self.anchor_word_start_line
+                anchor_start_col = self.anchor_word_start_col
+                anchor_end_line = self.anchor_word_end_line
+                anchor_end_col = self.anchor_word_end_col
+                
+                # Compare current position with anchor word start to determine direction
+                # If we are at or after the start of the anchor word, we treat it as a forward drag
+                # (even if we are inside the anchor word itself)
+                is_forward = False
+                if ln > anchor_start_line:
+                    is_forward = True
+                elif ln == anchor_start_line and col >= anchor_start_col:
+                    is_forward = True
+                
+                if is_forward:
+                    # Dragging Forward (LTR):
+                    # Anchor point should be the START of the original word
+                    self.buf.selection.set_start(anchor_start_line, anchor_start_col)
+                    # Cursor (end point) should be the END of the current word
+                    self.ctrl.update_drag(ln, end_col)
+                else:
+                    # Dragging Backward (RTL):
+                    # Anchor point should be the END of the original word
+                    self.buf.selection.set_start(anchor_end_line, anchor_end_col)
+                    # Cursor (end point) should be the START of the current word
+                    self.ctrl.update_drag(ln, start_col)
+            else:
+                # Beyond text
+                self.ctrl.update_drag(ln, col)
+        else:
+            # Normal character-by-character selection
+            self.ctrl.update_drag(ln, col)
+        
+        self.queue_draw()
+
+
+    # --------------------------------------------------------
+    # Busy Indicator Control
+    # --------------------------------------------------------
+    def show_busy(self, message="Processing..."):
+        """Show the busy overlay with a message."""
+        if self._busy_overlay:
+            self._busy_label.set_text(message)
+            self._busy_spinner.start()
+            self._busy_overlay.set_visible(True)
+            # Force UI update if possible, though usually handled by loop return
+            
+    def hide_busy(self):
+        """Hide the busy overlay."""
+        if self._busy_overlay:
+            self._busy_spinner.stop()
+            self._busy_overlay.set_visible(False)
+
+    def on_click_released(self, g, n, x, y):
+        print(f"DEBUG: Released. PendingClick={self._pending_click}. PendingTriple={self._pending_triple_click}")
+        if self._pending_click:
+            print("DEBUG: Executing Pending Click (Clear/Move)")
+            self.ctrl.click(self._click_ln, self._click_col)
+        self._pending_click = False
+        
+        if self._pending_triple_click:
+            # Execute deferred triple click
+            ln = self._triple_click_ln
+            line_len = self._triple_click_line_len
+            self.buf.selection.set_start(ln, 0)
+            self.buf.selection.set_end(ln, line_len)
+            self.buf.cursor_line = ln
+            self.buf.cursor_col = line_len
+            self._pending_triple_click = False
+            self.queue_draw()
+            
+        self.queue_draw()
+
+    def on_drag_end(self, g, dx, dy):
+        # Stop auto-scrolling
+        self.stop_autoscroll()
+        
+        # If we clicked in selection but didn't actually drag (drag_and_drop_mode wasn't set),
+        # then we should clear the selection now
+        if self._clicked_in_selection and not self.drag_and_drop_mode:
+            self.buf.selection.clear()
+            self._clicked_in_selection = False
+            self.queue_draw()
+            
+        self._drag_pending = False
+        
+        if self.drag_and_drop_mode:
+            # Drag-and-drop mode: move or copy text
+            ok, sx, sy = g.get_start_point()
+            if ok:
+                # Always use accurate xy_to_line_col
+                drop_ln, drop_col = self.xy_to_line_col(sx + dx, sy + dy)
+                
+                # Get current event to check for Ctrl key
+                event = g.get_current_event()
+                ctrl_pressed = False
+                if event:
+                    state = event.get_modifier_state()
+                    ctrl_pressed = (state & Gdk.ModifierType.CONTROL_MASK) != 0
+                
+                # Get original selection bounds
+                bounds = self.buf.selection.get_bounds()
+                if not bounds or bounds[0] is None:
+                    # No valid selection, exit drag mode
+                    self.drag_and_drop_mode = False
+                    self.dragged_text = ""
+                    self.queue_draw()
+                    return
+                
+                start_line, start_col, end_line, end_col = bounds
+                
+                # Check if dropping inside the original selection (no-op)
+                drop_in_selection = False
+                if start_line == end_line:
+                    if drop_ln == start_line and start_col <= drop_col <= end_col:
+                        drop_in_selection = True
+                else:
+                    if drop_ln == start_line and drop_col >= start_col:
+                        drop_in_selection = True
+                    elif drop_ln == end_line and drop_col <= end_col:
+                        drop_in_selection = True
+                    elif start_line < drop_ln < end_line:
+                        drop_in_selection = True
+                
+                if not drop_in_selection and self.dragged_text:
+                    if ctrl_pressed:
+                        # Copy: insert at drop position, keep original
+                        self.buf.set_cursor(drop_ln, drop_col)
+                        self.buf.insert_text(self.dragged_text)
+                    else:
+                        # Move: delete original, insert at drop position
+                        # Delete first
+                        self.buf.delete_selection()
+                        # Recalculate drop position if it's after the deleted text
+                        if drop_ln > end_line or (drop_ln == end_line and drop_col > end_col):
+                            # Adjust for deleted text
+                            if start_line == end_line:
+                                # Single line deletion
+                                chars_deleted = end_col - start_col
+                                if drop_ln == start_line:
+                                    drop_col -= chars_deleted
+                            else:
+                                # Multi-line deletion
+                                lines_deleted = end_line - start_line
+                                if drop_ln > end_line:
+                                    drop_ln -= lines_deleted
+                        
+                        # Insert at adjusted position
+                        self.buf.set_cursor(drop_ln, drop_col)
+                        self.buf.insert_text(self.dragged_text)
+                    
+                    # Select the inserted text (Move/Copy should leave text selected)
+                    lines = self.dragged_text.split('\n')
+                    new_lines_count = len(lines) - 1
+                    select_start_ln = drop_ln
+                    select_start_col = drop_col
+                    
+                    if new_lines_count == 0:
+                         select_end_ln = drop_ln
+                         select_end_col = drop_col + len(lines[0])
+                    else:
+                         select_end_ln = drop_ln + new_lines_count
+                         select_end_col = len(lines[-1])
+                    
+                    self.buf.selection.set_start(select_start_ln, select_start_col)
+                    self.buf.selection.set_end(select_end_ln, select_end_col)
+                    self.buf.cursor_line = select_end_ln
+                    self.buf.cursor_col = select_end_col
+                    print(f"DEBUG: Drag End. Selected text: {select_start_ln},{select_start_col} - {select_end_ln},{select_end_col}")
+                
+                self.keep_cursor_visible()
+            
+            # Exit drag-and-drop mode
+            self.drag_and_drop_mode = False
+            self.dragged_text = ""
+        else:
+            # Normal drag end
+            self.ctrl.end_drag()
+            
+            # Copy selection to PRIMARY clipboard for middle-click paste
+            if self.buf.selection.has_selection():
+                start_ln, start_col, end_ln, end_col = self.buf.selection.get_bounds()
+                
+                # Extract selected text
+                if start_ln == end_ln:
+                    # Single line selection
+                    line = self.buf.get_line(start_ln)
+                    selected_text = line[start_col:end_col]
+                else:
+                    # Multi-line selection
+                    lines = []
+                    for ln in range(start_ln, end_ln + 1):
+                        line = self.buf.get_line(ln)
+                        if ln == start_ln:
+                            lines.append(line[start_col:])
+                        elif ln == end_ln:
+                            lines.append(line[:end_col])
+                        else:
+                            lines.append(line)
+                    selected_text = '\n'.join(lines)
+                
+                # Copy to PRIMARY clipboard
+                if selected_text:
+                    display = self.get_display()
+                    clipboard = display.get_primary_clipboard()
+                    clipboard.set(selected_text)
+        
+        # Clear word selection mode
+        self.word_selection_mode = False
+        
+        self.queue_draw()
+
+
+    def update_matching_brackets(self):
+        """Find matching brackets and update highlight state."""
+        if not getattr(self, 'highlight_brackets', True):
+            self.matching_brackets = []
+            return
+
+        cursor_ln = self.buf.cursor_line
+        cursor_col = self.buf.cursor_col
+        line_text = self.buf.get_line(cursor_ln)
+        
+        matches = []
+        
+        # Check char at cursor (or char before cursor if at end of line/word)
+        chars_to_check = []
+        if cursor_col < len(line_text):
+            chars_to_check.append((cursor_ln, cursor_col, line_text[cursor_col]))
+        if cursor_col > 0 and (cursor_col - 1) < len(line_text):
+            chars_to_check.append((cursor_ln, cursor_col - 1, line_text[cursor_col - 1]))
+            
+        params = {
+            '(': (')', 1), ')': ('(', -1),
+            '[': (']', 1), ']': ('[', -1),
+            '{': ('}', 1), '}': ('{', -1),
+            '<': ('>', 1), '>': ('<', -1)
+        }
+        
+        for ln, col, char in chars_to_check:
+            if char in params:
+                target, direction = params[char]
+                start_match = (ln, col)
+                
+                # Scan
+                depth = 1
+                curr_ln = ln
+                curr_col = col + direction
+                
+                total_lines = self.buf.total()
+                scan_limit = 2000
+                lines_scanned = 0
+                
+                while 0 <= curr_ln < total_lines and lines_scanned < scan_limit:
+                    text = self.buf.get_line(curr_ln)
+                    
+                    if direction == 1:
+                        start_c = curr_col if curr_ln == ln else 0
+                        range_iter = range(start_c, len(text))
+                    else:
+                        start_c = curr_col if curr_ln == ln else len(text) - 1
+                        range_iter = range(start_c, -1, -1)
+                        
+                    for c_idx in range_iter:
+                        c = text[c_idx]
+                        if c == char:
+                            depth += 1
+                        elif c == target:
+                            depth -= 1
+                            if depth == 0:
+                                matches = [start_match, (curr_ln, c_idx)]
+                                break
+                    
+                    if matches: break
+                        
+                    curr_ln += direction
+                    lines_scanned += 1
+                
+                if matches: break
+        
+        self.matching_brackets = matches
+        if matches:
+            self.queue_draw()
+
+    # Compatibility methods for legacy renderer users
+    @property
+    def wrap_enabled(self):
+        return self.mapper.enabled
+        
+    @wrap_enabled.setter
+    def wrap_enabled(self, value):
+        self.mapper.enabled = value
+        self.mapper.invalidate_all()
+        self.highlight_cache = {} # Clear highlight cache as positions change
+        self.update_metrics()
+        self.update_scrollbar() # Force scrollbar update
+        self.queue_draw()
+        
+    def set_font(self, font_desc):
+        self.font_desc = font_desc
+        self.update_metrics()
+        self.queue_draw()
+        
+    def hex_to_rgba_floats(self, hex_str, alpha=1.0):
+        hex_str = hex_str.lstrip('#')
+        r = int(hex_str[0:2], 16) / 255.0
+        g = int(hex_str[2:4], 16) / 255.0
+        b = int(hex_str[4:6], 16) / 255.0
+        return r, g, b, alpha
+
+    def update_colors_for_theme(self, is_dark=None):
+        """Update colors based on current theme (GTK4)."""
+        
+        # Determine theme mode unless explicitly given
+        if is_dark is None:
+            style_manager = Adw.StyleManager.get_default()
+            is_dark = style_manager.get_dark()
+            
+        self.is_dark = is_dark
+        self.syntax.set_theme("dark" if is_dark else "light")
+        
+        # Use theme-appropriate background colors
+        if is_dark:
+            r, g, b, a = self.hex_to_rgba_floats("#191919")
+            self.editor_background_color = (r, g, b, a)
+        else:
+            r, g, b, a = self.hex_to_rgba_floats("#fafafa")
+            self.editor_background_color = (r, g, b, a)
+
+        # Helper for Pango colors
+        def hex_to_pango(hex_str):
+            r, g, b, a = self.hex_to_rgba_floats(hex_str)
+            return (r, g, b)
+
+        if is_dark:
+            self.text_foreground_color = (0.90, 0.90, 0.90)
+            self.linenumber_foreground_color = (0.60, 0.60, 0.60)
+            self.selection_background_color = (0.2, 0.4, 0.6)
+            self.selection_foreground_color = (1.0, 1.0, 1.0)
+            
+            # Syntax Colors (Atom One Dark)
+            self.syntax_colors = {
+                'keywords': hex_to_pango("#c678dd"),     # Purple
+                'builtins': hex_to_pango("#56b6c2"),     # Cyan
+                'string': hex_to_pango("#98c379"),       # Green
+                'comment': hex_to_pango("#5c6370"),      # Grey
+                'number': hex_to_pango("#d19a66"),       # Orange
+                'function': hex_to_pango("#61afef"),     # Blue
+                'class': hex_to_pango("#e5c07b"),        # Yellow/Gold
+                'decorator': hex_to_pango("#56b6c2"),    # Cyan
+                'personal': hex_to_pango("#e06c75"),     # Red
+                'tag': hex_to_pango("#e06c75"),          # Red
+                'attribute': hex_to_pango("#d19a66"),    # Orange
+                'property': hex_to_pango("#56b6c2"),     # Cyan
+                'selector': hex_to_pango("#c678dd"),     # Purple
+                'macro': hex_to_pango("#e5c07b"),        # Yellow
+                'preprocessor': hex_to_pango("#c678dd"), # Purple
+                'types': hex_to_pango("#56b6c2"),        # Cyan
+                'entity': hex_to_pango("#d19a66"),       # Orange
+                'bool_ops': hex_to_pango("#d19a66"),     # Orange
+                'brackets': hex_to_pango("#c678dd"),     # Pink (Changed from Orange)
+                'raw_prefix': hex_to_pango("#c678dd"),   # Pink/Purple
+                'operators': hex_to_pango("#c678dd"),    # Pink/Purple
+                'docstring': hex_to_pango("#98c379"),    # Green
+                'helpers': hex_to_pango("#e06c75"),     # Red
+                'argument': hex_to_pango("#d19a66"),     # Orange (New)
+                'byte_string': hex_to_pango("#56b6c2"),  # Cyan
+                'raw_string': hex_to_pango("#98c379"),   # Green
+                'f_string': hex_to_pango("#98c379"),     # Green
+                'string': hex_to_pango("#98c379"),       # Green
+
+                # String Delimiters
+                'triple_start': hex_to_pango("#98c379"),
+                'string_start': hex_to_pango("#98c379"),
+                'f_triple_start': hex_to_pango("#98c379"),
+                'f_string_start': hex_to_pango("#98c379"),
+                'b_triple_start': hex_to_pango("#56b6c2"),
+                'b_string_start': hex_to_pango("#56b6c2"),
+                'r_triple_start': hex_to_pango("#98c379"),
+                'r_string_start': hex_to_pango("#98c379"),
+                'u_triple_start': hex_to_pango("#98c379"),
+                'u_string_start': hex_to_pango("#98c379"),
+
+                'byte_string_content': hex_to_pango("#56b6c2"), 
+                'raw_string_content': hex_to_pango("#98c379"),
+                'f_string_content': hex_to_pango("#98c379"),
+                'string_content': hex_to_pango("#98c379"),
+                
+                # DSL-specific colors (minimal - just muted tags)
+                'header': hex_to_pango("#c678dd"),          # Purple for header directives
+                'tag_bracket': hex_to_pango("#5c6370"),     # Muted grey
+                'color_tag': hex_to_pango("#5c6370"),       # Muted grey
+                'attr_tag': hex_to_pango("#5c6370"),        # Muted grey
+                'phonetic': hex_to_pango("#5c6370"),        # Muted grey
+                'pos_label': hex_to_pango("#5c6370"),       # Muted grey
+                'zone': hex_to_pango("#5c6370"),            # Muted grey
+                'stress': hex_to_pango("#5c6370"),          # Muted grey
+                'link': hex_to_pango("#5c6370"),            # Muted grey
+                'color_name': hex_to_pango("#5c6370"),      # Muted grey
+                'file_ref': hex_to_pango("#5c6370"),        # Muted grey
+                'escape': hex_to_pango("#5c6370"),          # Muted grey
+                'tilde': hex_to_pango("#5c6370"),           # Muted grey
+                'at_sign': hex_to_pango("#5c6370"),         # Muted grey
+            }
+        else:
+            self.text_foreground_color = (0.2, 0.2, 0.2)
+            self.linenumber_foreground_color = (0.6, 0.6, 0.6)
+            self.selection_background_color = (0.8, 0.9, 1.0)
+            self.selection_foreground_color = (0.0, 0.0, 0.0)
+            
+            # Syntax Colors (Atom One Light)
+            self.syntax_colors = {
+                'keywords': hex_to_pango("#a626a4"),
+                'builtins': hex_to_pango("#0184bc"),
+                'string': hex_to_pango("#50a14f"),
+                'comment': hex_to_pango("#a0a1a7"),
+                'number': hex_to_pango("#986801"),
+                'function': hex_to_pango("#4078f2"),
+                'class': hex_to_pango("#c18401"),
+                'decorator': hex_to_pango("#a626a4"),
+                'personal': hex_to_pango("#e45649"),
+                'tag': hex_to_pango("#e45649"),
+                'attribute': hex_to_pango("#986801"),
+                'property': hex_to_pango("#0184bc"),
+                'selector': hex_to_pango("#a626a4"),
+                'macro': hex_to_pango("#c18401"),
+                'preprocessor': hex_to_pango("#a626a4"),
+                'types': hex_to_pango("#0184bc"),
+                'entity': hex_to_pango("#986801"),
+                'bool_ops': hex_to_pango("#986801"),
+                'brackets': hex_to_pango("#986801"),
+                'operators': hex_to_pango("#0184bc"),
+                'regex': hex_to_pango("#50a14f"),
+                'namespace': hex_to_pango("#c18401"),
+                'special': hex_to_pango("#0184bc"),
+                'file_ref': hex_to_pango("#a0a1a7"),        # Muted grey
+                'escape': hex_to_pango("#a0a1a7"),          # Muted grey
+                'tilde': hex_to_pango("#a0a1a7"),           # Muted grey
+                'at_sign': hex_to_pango("#a0a1a7"),         # Muted grey
+                'docstring': hex_to_pango("#50a14f"),    # Green
+                'helpers': hex_to_pango("#e45649"),     # Red
+                'argument': hex_to_pango("#986801"),     # Orange (New)
+                'byte_string': hex_to_pango("#0184bc"),  # Cyan
+                'raw_string': hex_to_pango("#50a14f"),   # Green
+                'f_string': hex_to_pango("#50a14f"),     # Green
+                'string': hex_to_pango("#50a14f"),       # Green
+                'raw_prefix': hex_to_pango("#a626a4"),   # Pink
+
+                # String Delimiters
+                'triple_start': hex_to_pango("#50a14f"),
+                'string_start': hex_to_pango("#50a14f"),
+                'f_triple_start': hex_to_pango("#50a14f"),
+                'f_string_start': hex_to_pango("#50a14f"),
+                'b_triple_start': hex_to_pango("#0184bc"),
+                'b_string_start': hex_to_pango("#0184bc"),
+                'r_triple_start': hex_to_pango("#50a14f"),
+                'r_string_start': hex_to_pango("#50a14f"),
+                'u_triple_start': hex_to_pango("#50a14f"),
+                'u_string_start': hex_to_pango("#50a14f"),
+
+                'byte_string_content': hex_to_pango("#0184bc"), 
+                'raw_string_content': hex_to_pango("#50a14f"),
+                'f_string_content': hex_to_pango("#50a14f"),
+                'string_content': hex_to_pango("#50a14f"),
+            }
+        
+        self.queue_draw()
+
+
+    def keep_cursor_visible(self):
+        """Keep cursor visible by scrolling if necessary."""
+        self.update_matching_brackets()
+        
+        cl = self.buf.cursor_line
+        cc = self.buf.cursor_col
+        
+        width = self.get_width()
+        height = self.get_height()
+        if width <= 0 or height <= 0: return
+
+        visible_lines = max(1, height // self.line_h)
+        
+        if self.mapper.enabled:
+            # Get visual offset for connection
+            vis_off, _ = self.mapper.column_to_visual_offset(cl, cc)
+            
+            # Simple scrolling logic
+            if cl < self.scroll_line:
+                self.scroll_line = cl
+                self.scroll_visual_offset = vis_off
+                self.scroll_line_frac = 0.0 # Reset fractional scroll
+                self.queue_draw()
+                self.update_scrollbar()
+                return
+
+            if cl == self.scroll_line:
+                if vis_off < self.scroll_visual_offset:
+                     self.scroll_visual_offset = vis_off
+                     self.queue_draw()
+                     self.update_scrollbar()
+                     return
+            
+            # Check bottom visibility logic (approximation for speed)
+            # If current line is far below scroll line (> visible_lines), definitely scroll
+            if cl > self.scroll_line + visible_lines + 5:
+                diff = cl - (self.scroll_line + visible_lines) + 5
+                self.scroll_line += diff
+                self.scroll_visual_offset = 0 # reset offset
+                self.scroll_line_frac = 0.0 # Reset fractional scroll
+                self.queue_draw()
+                self.update_scrollbar()
+                # Refine
+                self.keep_cursor_visible() 
+                return
+
+            # Precise check by iterating visual lines
+            ln = self.scroll_line
+            curr_vis = 0
+            
+            found = False
+            
+            while ln <= cl:
+                 start_off = 0
+                 if ln == self.scroll_line: start_off = self.scroll_visual_offset
+                 
+                 lines_in_ln = self.mapper.get_visual_line_count(ln)
+                 
+                 if ln == cl:
+                     curr_vis += (vis_off - start_off)
+                     found = True
+                     break
+                 
+                 curr_vis += (lines_in_ln - start_off)
+                 ln += 1
+            
+            if found:
+                 if curr_vis >= visible_lines:
+                     # Need to scroll down
+                     # We need to advance scroll_line until curr_vis < visible_lines
+                     # Simplest approach: set scroll to put cursor at bottom
+                     # But accurately calculating THAT is hard without reverse iteration.
+                     # So let's just increment scroll line by 1 until visible?
+                     # Slow but robust.
+                     while curr_vis >= visible_lines:
+                         # Advance scroll
+                         s_inc = 1
+                         # If we are in middle of line?
+                         # Just resetting visual offset or advancing line
+                         s_lines = self.mapper.get_visual_line_count(self.scroll_line)
+                         rem = s_lines - self.scroll_visual_offset
+                         
+                         if curr_vis - rem < visible_lines:
+                             # Advancing past this line fixes it?
+                             # We can just advance scroll_visual_offset
+                             needed = curr_vis - (visible_lines - 1)
+                             if needed < rem:
+                                 self.scroll_visual_offset += needed
+                                 curr_vis -= needed
+                             else:
+                                 self.scroll_visual_offset = 0
+                                 self.scroll_line += 1
+                                 curr_vis -= rem
+                         else:
+                             self.scroll_visual_offset = 0
+                             self.scroll_line += 1
+                             curr_vis -= rem
+                             
+                     self.scroll_line_frac = 0.0 # Reset fractional scroll
+                     self.queue_draw()
+                     self.update_scrollbar()
+
+        else:
+            # No wrap
+            if cl < self.scroll_line:
+                self.scroll_line = cl
+                self.scroll_visual_offset = 0
+                self.scroll_line_frac = 0.0
+            elif cl >= self.scroll_line + visible_lines:
+                self.scroll_line = max(0, cl - visible_lines + 1)
+                self.scroll_visual_offset = 0
+                self.scroll_line_frac = 0.0
+                
+            # Horizontal scrolling
+            ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+            
+            # Calculate cursor X position
+            line_text = self.buf.get_line(cl)
+            
+            # Precise calculation using Pango
+            # We create a temporary layout just like in draw_view/hit_test
+            # This ensures we account for variable char widths, tabs, etc.
+            temp_surface = cairo.ImageSurface(cairo.FORMAT_RGB24, 1, 1)
+            temp_cr = cairo.Context(temp_surface)
+            layout = self.create_text_layout(temp_cr, line_text)
+            
+            b_idx = self.visual_byte_index(line_text, cc)
+            pos = layout.get_cursor_pos(b_idx)[0]
+            cursor_x_precise = pos.x / Pango.SCALE
+            
+            # Use precise value everywhere
+            cursor_x_approx = cursor_x_precise
+            
+            # Fix oscillation: immediately update max_line_width if we found a longer line
+            # This prevents update_scrollbar from clamping us back if it thinks content is smaller
+            if hasattr(self, 'max_line_width'):
+                 self.max_line_width = max(self.max_line_width, cursor_x_precise)
+            
+            visible_w = width - ln_width
+            scrolled_x = self.scroll_x
+            
+            # Left edge
+            if cursor_x_approx < scrolled_x + 10: # Add 10px safe margin for left edge visibility
+                self.scroll_x = int(max(0, cursor_x_approx - 20))
+                self.queue_draw()
+                self.update_scrollbar()
+            # Right edge
+            else:
+                 padding = 20 if self.vscroll.get_visible() else 10
+                 visible_w = width - ln_width - padding
+                 # Check right edge with 10px margin to ensure cursor (1-2px) is strictly visible
+                 if cursor_x_approx + 10 > scrolled_x + visible_w:
+                     self.scroll_x = int(cursor_x_approx - visible_w + 20)
+                     self.queue_draw()
+                     self.update_scrollbar()
+            
+            # Precise Pango fallback calculation could go here if needed
+
+    def install_scroll(self):
+        sc = Gtk.EventControllerScroll.new(
+            Gtk.EventControllerScrollFlags.VERTICAL |
+            Gtk.EventControllerScrollFlags.HORIZONTAL
+        )
+        sc.connect("scroll", self.on_scroll)
+        self.add_controller(sc)
+
+    def on_scroll(self, c, dx, dy):
+        """Handle mouse wheel scroll with pixel-wise precision."""
+        if dy:
+             # dy is typically 1.0 per click, or smaller for touchpads
+             # We want smooth scrolling, so we map dy to a fraction of a line
+             # Sensitivity: 1.0 dy = 3 lines roughly in old code
+             # Let's try 1.0 dy = 1.0 lines (or adjustable)
+             # For pixel-wise, we want direct mapping if possible, but dy is unit-less steps usually.
+             
+             scroll_speed = 3.0  # lines per scroll unit
+             
+             if not hasattr(self, 'scroll_line_frac'):
+                 self.scroll_line_frac = 0.0
+                 
+             self.scroll_line_frac += dy * scroll_speed
+             
+             total_lines = self.buf.total()
+             
+             # Normalize fraction to keep it between 0.0 and 1.0 by moving visual lines
+             while self.scroll_line_frac >= 1.0:
+                 # Move down 1 visual line
+                 segments = self.mapper.get_line_segments(self.scroll_line)
+                 if self.scroll_visual_offset < len(segments) - 1:
+                     self.scroll_visual_offset += 1
+                     self.scroll_line_frac -= 1.0
+                 else:
+                     if self.scroll_line < total_lines - 1:
+                         self.scroll_line += 1
+                         self.scroll_visual_offset = 0
+                         self.scroll_line_frac -= 1.0
+                     else:
+                         # End of file, clamp
+                         self.scroll_line_frac = min(1.0, self.scroll_line_frac) # Allow some bounce? No.
+                         self.scroll_line_frac = 0.99 
+                         break
+                         
+             while self.scroll_line_frac < 0.0:
+                 # Move up 1 visual line
+                 if self.scroll_visual_offset > 0:
+                     self.scroll_visual_offset -= 1
+                     self.scroll_line_frac += 1.0
+                 else:
+                     if self.scroll_line > 0:
+                         self.scroll_line -= 1
+                         segments = self.mapper.get_line_segments(self.scroll_line)
+                         self.scroll_visual_offset = max(0, len(segments) - 1)
+                         self.scroll_line_frac += 1.0
+                     else:
+                         # Start of file, clamp
+                         self.scroll_line_frac = 0.0
+                         break
+             
+             self.update_scrollbar()
+             self.queue_draw()
+             
+        if dx and not self.mapper.enabled:
+            self.scroll_x = max(0, self.scroll_x + int(dx * 40))
+            self.queue_draw()
+
+        return True
+    def visual_byte_index(self, text, col):
+        """Convert character index to byte index."""
+        # Optimization: Slicing + len(encode) is faster in Python than looping char by char
+        return len(text[:col].encode("utf-8"))
+
+    def get_color_for_token(self, token_type):
+        """Get color for syntax token type."""
+        # Use pre-calculated syntax colors map
+        if hasattr(self, 'syntax_colors'):
+            # Check direct match
+            if token_type in self.syntax_colors:
+                return self.syntax_colors[token_type]
+            
+            # Fallback for string variants
+            # Fallback for string variants
+            if 'string' in token_type:
+                return self.syntax_colors.get('string')
+            
+            # Fallback for other variants (e.g. function_definition -> function)
+            # This handles cases where mapping might be missed or subtle differences
+            if 'function' in token_type: return self.syntax_colors.get('function')
+            if 'class' in token_type: return self.syntax_colors.get('class')
+            if 'keyword' in token_type: return self.syntax_colors.get('keywords')
+                
+        return None
+
+
+    def _process_syntax_queue(self):
+        """Idle callback to process syntax highlighting."""
+        import time
+        start_t = time.time()
+        
+        if not self.syntax_queue:
+            self.syntax_idle_id = None
+            return False
+            
+        # Sort by proximity to center of screen (approx scroll_line)
+        # to prioritize visible area
+        center = self.scroll_line + (self.get_height() // self.line_h // 2)
+        sorted_q = sorted(list(self.syntax_queue), key=lambda x: abs(x - center))
+        
+        to_remove = set()
+        processed = 0
+        budget = 0.010 # 10ms budget
+        
+        for ln in sorted_q:
+            if (time.time() - start_t) > budget:
+                break
+                
+            if 0 <= ln < self.buf.total():
+                self.syntax.tokenize(ln, self.buf.get_line(ln))
+            
+            to_remove.add(ln)
+            processed += 1
+            
+        self.syntax_queue -= to_remove
+        
+        if processed > 0:
+            self.queue_draw()
+            
+        if not self.syntax_queue:
+            self.syntax_idle_id = None
+            return False
+            
+        return True
+
+    def draw_view(self, area, cr, w, h):
+        import time
+        draw_start = time.time()
+
+        is_dark = getattr(self, 'is_dark', True)
+        cr.set_source_rgb(0.10, 0.10, 0.10 if is_dark else 1.0)
+        cr.rectangle(0, 0, w, h)
+        cr.fill()
+
+        show_cursor = (
+            self.cursor_visible
+            and not self.buf.selection.has_selection()
+            and self.has_focus()
+        )
+
+        cr.select_font_face("Monospace", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
+        cr.set_font_size(11)
+
+        # --- gutter ---
+        if self.show_line_numbers:
+            ln_width = max(30, int(len(str(self.buf.total())) * self.char_width) + 10)
+        else:
+            ln_width = 0
+
+        padding = 20 if self.vscroll.get_visible() else 10
+        viewport_w = w - ln_width - padding
+        self.mapper.set_viewport_width(viewport_w, self.char_width)
+
+        visible_lines = int(h / self.line_h) + 2
+
+        current_y = -int(getattr(self, "scroll_line_frac", 0) * self.line_h)
+        current_log_line = self.scroll_line
+        start_vis_offset = self.scroll_visual_offset
+
+        layout = self.create_text_layout(cr, "")
+
+        sel_start_ln = sel_start_col = sel_end_ln = sel_end_col = -1
+        if self.buf.selection.has_selection():
+            sel_start_ln, sel_start_col, sel_end_ln, sel_end_col = (
+                self.buf.selection.get_bounds()
+            )
+
+        visual_lines_drawn = 0
+        total_lines = self.buf.total()
+        max_line_px = 0
