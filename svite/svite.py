@@ -4049,7 +4049,7 @@ class VirtualTextView(Gtk.DrawingArea):
              # Let's try 1.0 dy = 1.0 lines (or adjustable)
              # For pixel-wise, we want direct mapping if possible, but dy is unit-less steps usually.
              
-             scroll_speed = 1.0  # lines per scroll unit
+             scroll_speed = 3.0  # lines per scroll unit
              
              if not hasattr(self, 'scroll_line_frac'):
                  self.scroll_line_frac = 0.0
