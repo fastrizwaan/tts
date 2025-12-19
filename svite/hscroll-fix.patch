@@ -1,0 +1,53 @@
+diff --git a/svite/svite.py b/svite/svite.py
+index db52592..db52592 100755
+--- a/svite/svite.py
++++ b/svite/svite.py
+@@ -4141,6 +4141,10 @@ class VirtualTextView(Gtk.DrawingArea):
+         visual_lines_drawn = 0
+         total_lines = self.buf.total()
+ 
++        # --- HORIZONTAL SCROLL MEASUREMENT (NO-WRAP ONLY) ---
++        max_line_px = 0
++
+         while visual_lines_drawn < visible_lines and current_log_line < total_lines:
+             line_text = self.buf.get_line(current_log_line)
+             segments = self.mapper.get_line_segments(current_log_line)
+@@ -4204,6 +4208,13 @@ class VirtualTextView(Gtk.DrawingArea):
+                 seg_text = line_text[seg_start:seg_end]
+                 # Set text ONCE for reused layout to avoid expensive re-analysis (triples performance)
+                 layout.set_text(seg_text, -1)
++
++                # --- HORIZONTAL SCROLL MEASURE (NO WRAP) ---
++                if not self.mapper.enabled:
++                    _, logical = layout.get_extents()
++                    w_px = logical.width / Pango.SCALE
++                    if w_px > max_line_px:
++                        max_line_px = w_px
+ 
+                 # Draw Line Number (only on first segment)
+                 if i == 0 and self.show_line_numbers:
+@@ -4477,6 +4488,25 @@ class VirtualTextView(Gtk.DrawingArea):
+ 
+         elapsed = time.time() - draw_start
+ 
++        # --- APPLY HORIZONTAL ADJUSTMENT SAFELY (GTK4 SNAPSHOT-SAFE) ---
++        if w > 0 and h > 0:
++            def _apply_hadj():
++                if not self.get_realized():
++                    return False
++
++                if not self.mapper.enabled:
++                    self.max_line_width = max_line_px
++                    self.update_hadjustment(viewport_w)
++                else:
++                    self.hadj.set_upper(viewport_w)
++                    self.hadj.set_page_size(viewport_w)
++
++                return False
++
++            GLib.idle_add(_apply_hadj, priority=GLib.PRIORITY_LOW)
++
+         # Update scrollbar after first draw when file is loaded
+         if self.needs_scrollbar_init:
+             if w > 0 and h > 0:
+
