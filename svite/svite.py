@@ -5743,8 +5743,8 @@ class FindReplaceBar(Gtk.Box):
         self.find_entry = Gtk.SearchEntry()
         self.find_entry.set_hexpand(True)
         self.find_entry.set_placeholder_text("Find")
-        # Search on typing - uses debounced on_search_changed
-        self.find_entry.connect("search-changed", self.on_search_changed)
+        # Search on typing - uses debounced on_find_field_changed with auto-jump
+        self.find_entry.connect("search-changed", self.on_find_field_changed)
         self.find_entry.connect("activate", self.on_find_next)
         
         self.find_overlay.set_child(self.find_entry)
@@ -5955,7 +5955,8 @@ class FindReplaceBar(Gtk.Box):
         """Handle Search button click - perform search with auto-scroll."""
         self._perform_search(auto_scroll=True)
 
-    def on_search_changed(self, *args):
+    def on_find_field_changed(self, *args):
+        """Called when the find entry text changes - searches and jumps to first match."""
         # 🔒 Do not re-search while replacing
         if self._in_replace:
             return False
@@ -5967,14 +5968,31 @@ class FindReplaceBar(Gtk.Box):
 
         self._search_timeout_id = GLib.timeout_add(
             200,
-            self._perform_search
+            lambda: self._perform_search(auto_scroll=True, auto_jump=True)
         )
         return False
 
-        
-    def _perform_search(self, auto_scroll=True):
+    def on_search_changed(self, *args):
+        """Called when document changes or options toggle - refreshes search without jumping."""
+        # 🔒 Do not re-search while replacing
+        if self._in_replace:
+            return False
+
+        # Debounce to prevent excessive searches while typing
+        if self._search_timeout_id:
+            GLib.source_remove(self._search_timeout_id)
+            self._search_timeout_id = None
+
+        self._search_timeout_id = GLib.timeout_add(
+            200,
+            lambda: self._perform_search(auto_scroll=False, auto_jump=False)
+        )
+        return False
+
+    def _perform_search(self, auto_scroll=True, auto_jump=False):
         self._search_timeout_id = None
         self._auto_scroll = auto_scroll  # Store for use in callbacks
+        self._auto_jump = auto_jump  # Store for use in callbacks
         
         # Reset progressive search state for new search
         self._search_last_line = 0
@@ -6021,6 +6039,9 @@ class FindReplaceBar(Gtk.Box):
         if total_lines < 50000:
             matches, max_len = self.editor.buf.search(query, case_sensitive, is_regex, max_matches=-1)
             self.editor.view.set_search_results(matches, max_len, auto_scroll=self._auto_scroll)
+            # Auto-jump to first match only when triggered from find field
+            if matches and self._auto_jump:
+                self.editor.view.next_match()
             self.update_match_label()
             return False
             
@@ -6036,6 +6057,9 @@ class FindReplaceBar(Gtk.Box):
             def on_complete(matches, max_len):
                 self._cancel_search = None
                 self.editor.view.set_search_results(matches, max_len, preserve_current=True, auto_scroll=self._auto_scroll)
+                # Auto-jump to first match only when triggered from find field
+                if matches and self._auto_jump:
+                    self.editor.view.next_match()
                 self.update_match_label()
                 # self.find_entry.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, None) # Not supported on SearchEntry
                 
