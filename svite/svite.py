@@ -389,6 +389,33 @@ CSS_OVERLAY_SCROLLBAR = """
     border-bottom: 1px solid alpha(@window_fg_color, 0.15);
     padding: 0px;
 }}
+
+/* Progress Bar Widget Styling */
+.progress-bar-widget {{
+    background-color: @headerbar_bg_color;
+    border-bottom: 1px solid alpha(@window_fg_color, 0.15);
+    min-height: 28px;
+}}
+
+/* Status Bar Styling */
+.status-bar {{
+    background-color: @headerbar_bg_color;
+    min-height: 28px;
+    font-size: 0.9em;
+}}
+
+.status-bar button {{
+    min-height: 20px;
+    padding: 2px 8px;
+}}
+
+.status-bar checkbutton {{
+    min-height: 20px;
+}}
+
+.status-bar label {{
+    font-size: 0.9em;
+}}
 """
 
 
@@ -4431,6 +4458,346 @@ class VirtualTextView(Gtk.DrawingArea):
 
 
 # ============================================================
+#   PROGRESS BAR WIDGET
+# ============================================================
+
+class ProgressBarWidget(Gtk.Box):
+    """Compact progress bar with cancel button for file loading"""
+    
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.set_margin_start(12)
+        self.set_margin_end(12)
+        self.set_margin_top(2)
+        self.set_margin_bottom(2)
+        self.add_css_class("progress-bar-widget")
+        
+        # Progress bar
+        self.progress_bar = Gtk.ProgressBar()
+        self.progress_bar.set_hexpand(True)
+        self.progress_bar.set_show_text(True)
+        self.progress_bar.set_text("Loading...")
+        self.append(self.progress_bar)
+        
+        # Cancel button
+        self.cancel_button = Gtk.Button(label="Cancel")
+        self.cancel_button.add_css_class("flat")
+        self.append(self.cancel_button)
+        
+        # Initially hidden
+        self.set_visible(False)
+        
+        # Cancellation flag
+        self.cancelled = False
+    
+    def start_loading(self, callback=None):
+        """Start showing progress bar"""
+        self.cancelled = False
+        self.progress_bar.set_fraction(0.0)
+        self.progress_bar.set_text("Loading...")
+        self.set_visible(True)
+        
+        if callback:
+            self.cancel_button.connect("clicked", callback)
+    
+    def update_progress(self, fraction):
+        """Update progress (0.0 to 1.0)"""
+        self.progress_bar.set_fraction(fraction)
+        self.progress_bar.set_text(f"{int(fraction * 100)}%")
+    
+    def finish_loading(self):
+        """Hide progress bar"""
+        self.set_visible(False)
+        self.cancelled = False
+
+
+# ============================================================
+#   STATUS BAR
+# ============================================================
+
+class StatusBar(Gtk.Box):
+    """Comprehensive status bar with file type, tab width, encoding, line feed, cursor position, and INS/OVR indicator"""
+    
+    def __init__(self, editor_window):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self.editor_window = editor_window
+        self.add_css_class("status-bar")
+        self.set_margin_start(6)
+        self.set_margin_end(6)
+        self.set_margin_top(2)
+        self.set_margin_bottom(2)
+        
+        # File type dropdown
+        self.file_type_button = Gtk.MenuButton()
+        self.file_type_label = Gtk.Label(label="Plain Text")
+        self.file_type_button.set_child(self.file_type_label)
+        self.file_type_button.add_css_class("flat")
+        self.file_type_button.set_tooltip_text("File Type")
+        self._create_file_type_menu()
+        self.append(self.file_type_button)
+        
+        self.append(self._create_separator())
+        
+        # Tab width dropdown
+        self.tab_width_button = Gtk.MenuButton()
+        self.tab_width_label = Gtk.Label(label="Tab Width: 4")
+        self.tab_width_button.set_child(self.tab_width_label)
+        self.tab_width_button.add_css_class("flat")
+        self.tab_width_button.set_tooltip_text("Tab Width")
+        self._create_tab_width_menu()
+        self.append(self.tab_width_button)
+        
+        self.append(self._create_separator())
+        
+        # Use spaces checkbox
+        self.use_spaces_check = Gtk.CheckButton(label="Use Spaces")
+        self.use_spaces_check.set_active(True)
+        self.use_spaces_check.connect("toggled", self._on_use_spaces_toggled)
+        self.append(self.use_spaces_check)
+        
+        self.append(self._create_separator())
+        
+        # Encoding dropdown
+        self.encoding_button = Gtk.MenuButton()
+        self.encoding_label = Gtk.Label(label="UTF-8")
+        self.encoding_button.set_child(self.encoding_label)
+        self.encoding_button.add_css_class("flat")
+        self.encoding_button.set_tooltip_text("Encoding")
+        self._create_encoding_menu()
+        self.append(self.encoding_button)
+        
+        self.append(self._create_separator())
+        
+        # Line feed dropdown
+        self.line_feed_button = Gtk.MenuButton()
+        self.line_feed_label = Gtk.Label(label="Unix/Linux (LF)")
+        self.line_feed_button.set_child(self.line_feed_label)
+        self.line_feed_button.add_css_class("flat")
+        self.line_feed_button.set_tooltip_text("Line Ending")
+        self._create_line_feed_menu()
+        self.append(self.line_feed_button)
+        
+        # Spacer to push cursor position to the right
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        self.append(spacer)
+        
+        # Cursor position
+        self.cursor_pos_label = Gtk.Label(label="Ln 1, Col 1")
+        self.cursor_pos_label.set_margin_start(8)
+        self.cursor_pos_label.set_margin_end(8)
+        self.append(self.cursor_pos_label)
+        
+        self.append(self._create_separator())
+        
+        # INS/OVR indicator
+        self.ins_ovr_label = Gtk.Label(label="INS")
+        self.ins_ovr_label.set_margin_start(8)
+        self.ins_ovr_label.set_margin_end(8)
+        self.append(self.ins_ovr_label)
+    
+    def _create_separator(self):
+        """Create a vertical separator"""
+        sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        sep.set_margin_top(4)
+        sep.set_margin_bottom(4)
+        sep.set_margin_start(4)
+        sep.set_margin_end(4)
+        return sep
+    
+    def _create_file_type_menu(self):
+        """Create file type dropdown with search"""
+        # Create a popover with search
+        popover = Gtk.Popover()
+        
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
+        box.set_margin_start(6)
+        box.set_margin_end(6)
+        
+        # Search entry
+        search_entry = Gtk.SearchEntry()
+        search_entry.set_placeholder_text("Search file types...")
+        box.append(search_entry)
+        
+        # Scrolled window for file types
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_min_content_height(200)
+        scrolled.set_min_content_width(200)
+        
+        # List box for file types
+        self.file_type_listbox = Gtk.ListBox()
+        self.file_type_listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.file_type_listbox.add_css_class("boxed-list")
+        
+        # File types
+        file_types = [
+            "Plain Text", "Python", "JavaScript", "Shell", "C", "C++", "Rust",
+            "HTML", "CSS", "JSON", "XML", "Markdown", "YAML", "TOML",
+            "Java", "Go", "Ruby", "PHP", "TypeScript", "SQL"
+        ]
+        
+        for ft in file_types:
+            row = Gtk.ListBoxRow()
+            label = Gtk.Label(label=ft)
+            label.set_xalign(0)
+            label.set_margin_start(8)
+            label.set_margin_end(8)
+            label.set_margin_top(4)
+            label.set_margin_bottom(4)
+            row.set_child(label)
+            row._file_type = ft
+            self.file_type_listbox.append(row)
+        
+        self.file_type_listbox.connect("row-activated", self._on_file_type_selected)
+        
+        # Search filter
+        def filter_func(row):
+            search_text = search_entry.get_text().lower()
+            if not search_text:
+                return True
+            return search_text in row._file_type.lower()
+        
+        self.file_type_listbox.set_filter_func(filter_func)
+        search_entry.connect("search-changed", lambda e: self.file_type_listbox.invalidate_filter())
+        
+        scrolled.set_child(self.file_type_listbox)
+        box.append(scrolled)
+        
+        popover.set_child(box)
+        self.file_type_button.set_popover(popover)
+    
+    def _on_file_type_selected(self, listbox, row):
+        """Handle file type selection"""
+        file_type = row._file_type
+        self.file_type_label.set_text(file_type)
+        self.file_type_button.get_popover().popdown()
+        
+        # Apply to current editor
+        editor = self.editor_window.get_current_page()
+        if editor:
+            # Map display name to language ID
+            lang_map = {
+                "Plain Text": None,
+                "Python": "python",
+                "JavaScript": "javascript",
+                "Shell": "sh",
+                "C": "c",
+                "C++": "cpp",
+                "Rust": "rust",
+                "HTML": "html",
+                "CSS": "css",
+                "JSON": "json",
+                "XML": "xml",
+                "Markdown": "markdown",
+                "YAML": "yaml",
+                "TOML": "toml",
+                "Java": "java",
+                "Go": "go",
+                "Ruby": "ruby",
+                "PHP": "php",
+                "TypeScript": "typescript",
+                "SQL": "sql"
+            }
+            lang = lang_map.get(file_type)
+            editor.view.buf.set_language(lang)
+            editor.view.syntax = editor.view.buf.syntax_engine
+            editor.view.queue_draw()
+    
+    def _create_tab_width_menu(self):
+        """Create tab width dropdown with radio buttons"""
+        menu = Gio.Menu()
+        
+        menu.append("2", "win.set_tab_width::2")
+        menu.append("4", "win.set_tab_width::4")
+        menu.append("8", "win.set_tab_width::8")
+        
+        popover = Gtk.PopoverMenu.new_from_model(menu)
+        self.tab_width_button.set_popover(popover)
+    
+    def _create_encoding_menu(self):
+        """Create encoding dropdown"""
+        menu = Gio.Menu()
+        
+        menu.append("UTF-8", "win.set_encoding::utf-8")
+        menu.append("UTF-16 LE", "win.set_encoding::utf-16le")
+        menu.append("UTF-16 BE", "win.set_encoding::utf-16be")
+        
+        popover = Gtk.PopoverMenu.new_from_model(menu)
+        self.encoding_button.set_popover(popover)
+    
+    def _create_line_feed_menu(self):
+        """Create line feed dropdown"""
+        menu = Gio.Menu()
+        
+        menu.append("Unix/Linux (LF)", "win.set_line_feed::lf")
+        menu.append("Windows (CRLF)", "win.set_line_feed::crlf")
+        menu.append("Mac OS (CR)", "win.set_line_feed::cr")
+        
+        popover = Gtk.PopoverMenu.new_from_model(menu)
+        self.line_feed_button.set_popover(popover)
+    
+    def _on_use_spaces_toggled(self, check_button):
+        """Handle use spaces toggle"""
+        # Apply to current editor
+        editor = self.editor_window.get_current_page()
+        if editor:
+            editor.use_spaces = check_button.get_active()
+    
+    def update_cursor_position(self, line, col):
+        """Update cursor position display"""
+        self.cursor_pos_label.set_text(f"Ln {line + 1}, Col {col + 1}")
+    
+    def update_insert_mode(self, is_insert):
+        """Update INS/OVR indicator"""
+        self.ins_ovr_label.set_text("INS" if is_insert else "OVR")
+    
+    def update_for_editor(self, editor):
+        """Update status bar for current editor"""
+        if not editor:
+            return
+        
+        # Update cursor position
+        self.update_cursor_position(editor.buf.cursor_line, editor.buf.cursor_col)
+        
+        # Update encoding
+        encoding = getattr(editor, 'current_encoding', 'utf-8')
+        encoding_display = {
+            'utf-8': 'UTF-8',
+            'utf-8-sig': 'UTF-8',
+            'utf-16le': 'UTF-16 LE',
+            'utf-16be': 'UTF-16 BE'
+        }.get(encoding, encoding.upper())
+        self.encoding_label.set_text(encoding_display)
+        
+        # Update file type based on file extension
+        if editor.current_file_path:
+            ext = os.path.splitext(editor.current_file_path)[1].lower()
+            type_map = {
+                '.py': 'Python',
+                '.js': 'JavaScript',
+                '.sh': 'Shell',
+                '.c': 'C',
+                '.cpp': 'C++',
+                '.rs': 'Rust',
+                '.html': 'HTML',
+                '.css': 'CSS',
+                '.json': 'JSON',
+                '.xml': 'XML',
+                '.md': 'Markdown',
+                '.yaml': 'YAML',
+                '.yml': 'YAML',
+                '.toml': 'TOML'
+            }
+            file_type = type_map.get(ext, 'Plain Text')
+            self.file_type_label.set_text(file_type)
+        else:
+            self.file_type_label.set_text('Plain Text')
+
+
+# ============================================================
 #   LOADING DIALOG
 # ============================================================
 
@@ -5950,6 +6317,13 @@ class EditorPage:
         self.current_file_path = None
         self.untitled_title = untitled_title  # Store custom Untitled title
         self.find_bar = None
+        
+        # Status bar properties
+        self.tab_width = 4
+        self.use_spaces = True
+        self.line_feed = "lf"  # Unix/Linux default
+        self.insert_mode = True  # INS mode by default
+
 
         
     def get_title(self):
@@ -6511,6 +6885,10 @@ class EditorWindow(Adw.ApplicationWindow):
         self.tab_bar = ChromeTabBar()
         self.tab_bar.connect('tab-reordered', self.on_tab_reordered)
         toolbar_view.add_top_bar(self.tab_bar)
+        
+        # Progress bar widget (shown during file loading)
+        self.progress_bar_widget = ProgressBarWidget()
+        toolbar_view.add_top_bar(self.progress_bar_widget)
 
         # Tab View (Content)
         self.tab_view = Adw.TabView()
@@ -6518,6 +6896,10 @@ class EditorWindow(Adw.ApplicationWindow):
         self.tab_view.set_hexpand(True)
         self.tab_view.connect("notify::selected-page", self.on_page_selection_changed)
         toolbar_view.set_content(self.tab_view)
+        
+        # Status bar at bottom
+        self.status_bar = StatusBar(self)
+        toolbar_view.add_bottom_bar(self.status_bar)
 
         self.set_content(toolbar_view)
         
@@ -6546,6 +6928,10 @@ class EditorWindow(Adw.ApplicationWindow):
         # Connect to theme changes
         style_manager = Adw.StyleManager.get_default()
         style_manager.connect("notify::dark", self.on_theme_changed)
+        
+        # Start periodic cursor position update (every 100ms)
+        GLib.timeout_add(100, self.update_status_bar_cursor_position)
+
 
     def _setup_drop_targets(self):
         """Setup drop targets for various drag-and-drop operations"""
@@ -6801,6 +7187,15 @@ class EditorWindow(Adw.ApplicationWindow):
         if page:
             return page.get_child()._editor
         return None
+    
+    def update_status_bar_cursor_position(self):
+        """Periodically update cursor position in status bar"""
+        editor = self.get_current_page()
+        if editor:
+            self.status_bar.update_cursor_position(editor.buf.cursor_line, editor.buf.cursor_col)
+            self.status_bar.update_insert_mode(editor.insert_mode)
+        return True  # Continue calling
+
 
     def on_new_tab(self, btn):
         self.add_tab()
@@ -7045,6 +7440,8 @@ class EditorWindow(Adw.ApplicationWindow):
         editor = self.get_current_page()
         if editor:
             editor.view.grab_focus()
+            # Update status bar for new editor
+            self.status_bar.update_for_editor(editor)
 
     def on_tab_close_requested(self, tab):
         if hasattr(tab, '_page'):
@@ -7928,6 +8325,23 @@ class EditorWindow(Adw.ApplicationWindow):
         clear_recent_action = Gio.SimpleAction.new("clear_recent", None)
         clear_recent_action.connect("activate", self.on_clear_recent)
         self.add_action(clear_recent_action)
+        
+        # Status bar actions
+        # Tab width action
+        tab_width_action = Gio.SimpleAction.new("set_tab_width", GLib.VariantType.new("s"))
+        tab_width_action.connect("activate", self.on_set_tab_width)
+        self.add_action(tab_width_action)
+        
+        # Encoding action for status bar
+        encoding_sb_action = Gio.SimpleAction.new("set_encoding", GLib.VariantType.new("s"))
+        encoding_sb_action.connect("activate", self.on_set_encoding)
+        self.add_action(encoding_sb_action)
+        
+        # Line feed action
+        line_feed_action = Gio.SimpleAction.new("set_line_feed", GLib.VariantType.new("s"))
+        line_feed_action.connect("activate", self.on_set_line_feed)
+        self.add_action(line_feed_action)
+
 
 
     def add_simple_action(self, name, callback):
@@ -8113,6 +8527,43 @@ class EditorWindow(Adw.ApplicationWindow):
                 # Focus the editor view
                 editor = tab._page.get_child()._editor
                 editor.view.grab_focus()
+    
+    def on_set_tab_width(self, action, parameter):
+        """Handle tab width change from status bar"""
+        width = parameter.get_string()
+        editor = self.get_current_page()
+        if editor:
+            editor.tab_width = int(width)
+            self.status_bar.tab_width_label.set_text(f"Tab Width: {width}")
+    
+    def on_set_encoding(self, action, parameter):
+        """Handle encoding change from status bar"""
+        encoding = parameter.get_string()
+        editor = self.get_current_page()
+        if editor:
+            editor.current_encoding = encoding
+            # Update status bar display
+            encoding_display = {
+                'utf-8': 'UTF-8',
+                'utf-16le': 'UTF-16 LE',
+                'utf-16be': 'UTF-16 BE'
+            }.get(encoding, encoding.upper())
+            self.status_bar.encoding_label.set_text(encoding_display)
+    
+    def on_set_line_feed(self, action, parameter):
+        """Handle line feed change from status bar"""
+        line_feed = parameter.get_string()
+        editor = self.get_current_page()
+        if editor:
+            editor.line_feed = line_feed
+            # Update status bar display
+            line_feed_display = {
+                'lf': 'Unix/Linux (LF)',
+                'crlf': 'Windows (CRLF)',
+                'cr': 'Mac OS (CR)'
+            }.get(line_feed, line_feed.upper())
+            self.status_bar.line_feed_label.set_text(line_feed_display)
+
     
     def on_save_as(self, action, parameter):
         """Handle Save As menu action"""
@@ -8383,16 +8834,25 @@ class EditorWindow(Adw.ApplicationWindow):
             
             return
 
-        loading_dialog = LoadingDialog(self)
-        loading_dialog.present()
+        # Show progress bar widget
+        def on_cancel(button):
+            self.progress_bar_widget.cancelled = True
+        
+        self.progress_bar_widget.start_loading(on_cancel)
         
         idx = IndexedFile(path)
         
         def progress_callback(fraction):
-            loading_dialog.update_progress(fraction)
+            if self.progress_bar_widget.cancelled:
+                return False
+            self.progress_bar_widget.update_progress(fraction)
             return False
         
         def index_complete():
+            if self.progress_bar_widget.cancelled:
+                self.progress_bar_widget.finish_loading()
+                return False
+                
             editor.buf.load(idx, emit_changed=False)
 
             editor.view.scroll_line = 0
@@ -8439,7 +8899,11 @@ class EditorWindow(Adw.ApplicationWindow):
             self.recent_files_manager.add(path)
             self.update_recent_files_menu()
             
-            loading_dialog.close()
+            # Hide progress bar
+            self.progress_bar_widget.finish_loading()
+            
+            # Update status bar
+            self.status_bar.update_for_editor(editor)
             
             # Focus the editor
             editor.view.grab_focus()
