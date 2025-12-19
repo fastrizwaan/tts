@@ -5743,7 +5743,8 @@ class FindReplaceBar(Gtk.Box):
         self.find_entry = Gtk.SearchEntry()
         self.find_entry.set_hexpand(True)
         self.find_entry.set_placeholder_text("Find")
-        # NOTE: No search-changed handler - search only runs on Enter/button click
+        # Search on typing - uses debounced on_search_changed
+        self.find_entry.connect("search-changed", self.on_search_changed)
         self.find_entry.connect("activate", self.on_find_next)
         
         self.find_overlay.set_child(self.find_entry)
@@ -5770,12 +5771,6 @@ class FindReplaceBar(Gtk.Box):
         self.find_entry.add_controller(key_ctrl)
         
         find_box.append(self.find_overlay)
-        
-        # Search button - explicit trigger for search
-        self.search_btn = Gtk.Button(icon_name="edit-find-symbolic")
-        self.search_btn.set_tooltip_text("Search (Enter)")
-        self.search_btn.connect("clicked", self.on_search_clicked)
-        find_box.append(self.search_btn)
         
         # Navigation Box (linked)
         nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
