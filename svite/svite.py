@@ -3831,9 +3831,9 @@ class VirtualTextView(Gtk.DrawingArea):
         
         # Use theme-appropriate background colors
         if is_dark:
-            r, g, b, a = self.hex_to_rgba_floats("#191919")
+            r, g, b, a = self.hex_to_rgba_floats("#1d1d20")
             self.editor_background_color = (r, g, b, a)
-            self.current_line_background_color = (1.0, 1.0, 1.0, 0.05) # 8% white tint for dark theme
+            self.current_line_background_color = (1.0, 1.0, 1.0, 0.03) # 8% white tint for dark theme
         else:
             r, g, b, a = self.hex_to_rgba_floats("#fafafa")
             self.editor_background_color = (r, g, b, a)
