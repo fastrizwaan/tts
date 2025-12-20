@@ -5447,12 +5447,22 @@ class ChromeTabBar(Adw.WrapBox):
         tab.tab_bar = self
         tab.separator = new_sep
 
-        # setup hover handlers - REMOVED (handled by ChromeTab now)
-        # self._connect_hover(tab)
-
-        GLib.timeout_add(50,self.update_separators)
-        # Update tab sizes immediately with a small delay to ensure layout is complete
-        self.update_tab_sizes()
+        # Immediate update of separators and sizes
+        self.update_separators()
+        
+        # Pre-calculate and apply size immediately to avoid "pop"
+        # Use last known width if current allocation is 0 (e.g. during init)
+        current_width = self.get_allocated_width()
+        if current_width <= 0 and hasattr(self, '_last_allocated_width'):
+            current_width = self._last_allocated_width
+            
+        if current_width > 0:
+            # Re-run full update logic immediately, passing known width
+            self.update_tab_sizes(allocated_width=current_width)
+        else:
+            # Fallback for very first render if no width known yet
+            # forcing a reasonable default based on window size guess or just allow layout to happen
+            GLib.idle_add(self.update_tab_sizes)
         
         # Update window UI state (visibility of tab bar)
         window = self.get_ancestor(Adw.ApplicationWindow)
@@ -5566,13 +5576,14 @@ class ChromeTabBar(Adw.WrapBox):
             if tab.has_css_class("active"):
                 self._hide_pair(i)
     
-    def update_tab_sizes(self):
+    def update_tab_sizes(self, allocated_width=None):
         """Update tab sizes to fill the window width perfectly with no gaps"""
         if not self.tabs:
             return False
         
-        # Get the actual allocated width of the tab bar
-        allocated_width = self.get_allocated_width()
+        # Get the actual allocated width of the tab bar if not provided
+        if allocated_width is None:
+            allocated_width = self.get_allocated_width()
         
         if allocated_width <= 0:
             return False
