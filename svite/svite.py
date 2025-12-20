@@ -568,14 +568,17 @@ class IndexedFile:
         # Use mmap.find() to scan for newlines
         pos = 0
         last_report = 0
-        report_interval = 50_000_000  # Report every 50MB for less overhead
+        
+        # Dynamic report interval: at least 100 updates, but cap at 1MB min and 10MB max for efficiency
+        # Small files: frequent updates. Large files: throttled to avoid UI lag.
+        report_interval = max(1_000_000, min(total_size // 100, 10_000_000))
         
         while pos < total_size:
-            # Report progress less frequently (every 50MB instead of 10MB)
+            # Report progress
             if progress_callback and pos - last_report > report_interval:
                 last_report = pos
                 progress = pos / total_size
-                GLib.idle_add(progress_callback, progress)
+                GLib.timeout_add(0, progress_callback, progress, priority=GLib.PRIORITY_HIGH)
             
             # Find next newline directly in mmap (fast C-level search)
             newline_pos = mm.find(b'\n', pos)
@@ -593,7 +596,7 @@ class IndexedFile:
             self.index.append(total_size)
         
         if progress_callback:
-            GLib.idle_add(progress_callback, 1.0)
+            GLib.timeout_add(0, progress_callback, 1.0, priority=GLib.PRIORITY_HIGH)
 
     def _index_utf16(self, progress_callback=None):
         """Fast UTF-16 indexing using mmap.find() directly - no memory copies"""
@@ -634,14 +637,16 @@ class IndexedFile:
         
         pos = start_pos
         last_report = 0
-        report_interval = 50 * 1024 * 1024  # 50MB
+        
+        # Dynamic report interval: at least 100 updates, but cap at 1MB min and 10MB max for efficiency
+        report_interval = max(1_000_000, min(total_size // 100, 10_000_000))
         
         while pos < total_size:
-            # Report progress less frequently (every 50MB instead of 10MB)
+            # Report progress
             if progress_callback and pos - last_report > report_interval:
                 last_report = pos
                 progress = pos / total_size
-                GLib.idle_add(progress_callback, progress)
+                GLib.timeout_add(0, progress_callback, progress, priority=GLib.PRIORITY_HIGH)
             
             # Find next newline directly in mmap (fast C-level search)
             newline_pos = mm.find(newline_bytes, pos)
@@ -659,7 +664,7 @@ class IndexedFile:
             self.index.append(total_size)
         
         if progress_callback:
-            GLib.idle_add(progress_callback, 1.0) 
+            GLib.timeout_add(0, progress_callback, 1.0, priority=GLib.PRIORITY_HIGH) 
     def total_lines(self):
         return len(self.index) - 1
 
