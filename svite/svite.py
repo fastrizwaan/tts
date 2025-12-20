@@ -5011,73 +5011,54 @@ class ChromeTab(Gtk.Box):
     }
    
     def __init__(self, title="Untitled 1", closeable=True):
-        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         FIXED_H = 32
         self.set_hexpand(False)
-        self.set_halign(Gtk.Align.START)
-        self.add_css_class("chrome-tab")
         self.set_vexpand(False)
+        self.set_halign(Gtk.Align.START)  # Don't fill - use exact size from set_size_request
         self.set_valign(Gtk.Align.CENTER)
-        self.set_halign(Gtk.Align.CENTER)
-        self.set_size_request(120, FIXED_H)
-        self.set_hexpand(False)       
-        overlay = Gtk.Overlay()
-
-        # Title label container
-        # We use a box to hold label + close button together for centering
-        label_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        label_box.set_hexpand(True)
-        label_box.set_halign(Gtk.Align.CENTER) # Center the group
-        label_box.set_valign(Gtk.Align.CENTER)
+        self.add_css_class("chrome-tab")
+        self.set_size_request(160, FIXED_H)
         
-        # Title label
+        # Title label - directly in the tab
         self.label = Gtk.Label()
         self.label.set_text(title)
-        # Remove margin_end as we now have spacing in the box
-        #self.label.set_margin_end(30) 
-        self.label.set_max_width_chars(20)
         self.label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.label.set_single_line_mode(True)
-        self.label.set_hexpand(True) # Don't expand, let box center it
+        self.label.set_hexpand(True)  # Label expands to fill available space
         self.label.set_halign(Gtk.Align.CENTER)
-
-        label_box.append(self.label)
+        self.label.set_xalign(0.5)
+        # Constrain label width strictly
+        self.label.set_max_width_chars(12)
+        self.label.set_width_chars(1)
+        
+        self.append(self.label)
         
         # State tracking
         self._is_modified = False
         self._is_hovered = False
         
-        # Close button (now inside label_box)
+        # Close button
         if closeable:
             self.close_button = Gtk.Button()
-            # Default state: cross-small-symbolic (will be updated by _update_close_button_state)
             self.close_button.set_icon_name("cross-small-symbolic")
             self.close_button.add_css_class("flat")
             self.close_button.add_css_class("chrome-tab-close-button")
-            self.close_button.set_halign(Gtk.Align.CENTER)
+            self.close_button.set_halign(Gtk.Align.END)
             self.close_button.set_valign(Gtk.Align.CENTER)
+            self.close_button.set_hexpand(False)
             self.close_button.connect('clicked', self._on_close_clicked)
             
-            # Hover controller for the button/tab interaction
-            # We want the hover effect when hovering the *tab*, not just the button
-            # So we add the controller to self (the tab)
+            # Hover controller for the tab
             hover_controller = Gtk.EventControllerMotion()
             hover_controller.connect("enter", self._on_hover_enter)
             hover_controller.connect("leave", self._on_hover_leave)
             self.add_controller(hover_controller)
             
-            label_box.append(self.close_button)
+            self.append(self.close_button)
             
             # Initial state update
             self._update_close_button_state()
-        
-        # We don't use overlay for the content anymore, just the box directly
-        # But keeping overlay structure if we need other overlays later is fine, 
-        # or we can just append label_box to self if we want.
-        # The original code used overlay.set_child(label_box).
-        overlay.set_child(label_box)
-       
-        self.append(overlay)
        
         self._is_active = False
         self._original_title = title
@@ -5436,6 +5417,14 @@ class ChromeTabBar(Adw.WrapBox):
         drop_target.connect('motion', self._on_tab_bar_motion)
         drop_target.connect('leave', self._on_tab_bar_leave)
         self.add_controller(drop_target)
+        
+        # Connect to size allocation to update tab widths dynamically
+        self.connect('notify::visible', self._on_visibility_changed)
+        
+        # Connect to size-allocate to update tabs when layout changes
+        # This ensures tabs recalculate when the tab bar is resized
+        self._size_allocate_handler_id = None
+        self._setup_size_allocate_handler()
 
     def add_tab(self, tab):
         idx = len(self.tabs)
@@ -5463,6 +5452,9 @@ class ChromeTabBar(Adw.WrapBox):
 
         self.update_separators()
         
+        # Update tab sizes immediately with a small delay to ensure layout is complete
+        GLib.timeout_add(50, self.update_tab_sizes)
+        
         # Update window UI state (visibility of tab bar)
         window = self.get_ancestor(Adw.ApplicationWindow)
         if window and hasattr(window, 'update_ui_state'):
@@ -5488,6 +5480,9 @@ class ChromeTabBar(Adw.WrapBox):
         self.tabs.remove(tab)
 
         self.update_separators()
+        
+        # Update tab sizes immediately with a small delay
+        GLib.timeout_add(50, self.update_tab_sizes)
     
         # Update window UI state (visibility of tab bar)
         window = self.get_ancestor(Adw.ApplicationWindow)
@@ -5572,6 +5567,95 @@ class ChromeTabBar(Adw.WrapBox):
         for i, tab in enumerate(self.tabs):
             if tab.has_css_class("active"):
                 self._hide_pair(i)
+    
+    def update_tab_sizes(self):
+        """Update tab sizes to fill the window width perfectly with no gaps"""
+        if not self.tabs:
+            return False
+        
+        # Get the actual allocated width of the tab bar
+        allocated_width = self.get_allocated_width()
+        
+        if allocated_width <= 0:
+            return False
+        
+        # Calculate available width for tabs
+        # Account for margin_start only - use all available space
+        margin_start = 6
+        buffer = 0  # No buffer - use all available space
+        available_width = allocated_width - margin_start - buffer
+        
+        if available_width <= 0:
+            return False
+        
+        # Set min and max constraints for tab width
+        min_tab_width = 160  # Increased from 120 for better visibility
+        max_tab_width = 300
+        separator_width = 1
+        
+        # Calculate how many tabs can fit per row at minimum width (Theoretical Capacity)
+        capacity_per_row = (available_width + separator_width) // (min_tab_width + separator_width)
+        if capacity_per_row < 1:
+            capacity_per_row = 1
+            
+        # Determine effective columns: use actual tab count, but don't exceed capacity
+        num_tabs = len(self.tabs)
+        effective_cols = min(num_tabs, capacity_per_row)
+        if effective_cols < 1: 
+            effective_cols = 1
+        
+        # Now calculate the exact width needed to fill the row using effective_cols
+        # Formula: N tabs + N-1 separators (visible). 
+        # But we previously hide first/last. Let's assume N-1 separators consume space.
+        # separator overhead = (effective_cols - 1) * separator_width
+        # But for safety, let's subtract ample buffer to prevent subpixel wrapping issues.
+        
+        layout_buffer = 4  # Increase buffer to absorb separator/border variances
+        
+        total_separator_width = (effective_cols - 1) * separator_width
+        available_for_tabs = available_width - total_separator_width - layout_buffer
+        
+        tab_width = available_for_tabs // effective_cols
+        
+        # Final clamp to constraints
+        tab_width = max(min_tab_width, min(tab_width, max_tab_width))
+        
+        # Calculate approximation of max characters that fit
+        # usage: ~11px per char (Conservative Avg), + ~38px for close button & padding (safe estimate)
+        reserved_inner_width = 38
+        available_text_width = max(1, tab_width - reserved_inner_width)
+        max_chars = int(available_text_width / 11) # increased divisor to be safer against expansion
+        
+        # Apply the same fixed width to all tabs
+        for tab in self.tabs:
+            # set_size_request sets minimum size
+            # Combined with hexpand=False, and limiting label chars, this enforces exact width
+            tab.set_size_request(tab_width, 32)
+            if hasattr(tab, 'label'):
+                tab.label.set_max_width_chars(max_chars)
+        
+        return False
+    
+    def _on_visibility_changed(self, widget, param):
+        """Handle visibility changes to update tab sizes"""
+        if self.get_visible():
+            GLib.idle_add(self.update_tab_sizes)
+    
+    def _setup_size_allocate_handler(self):
+        """Setup periodic monitoring of tab bar width"""
+        self._last_allocated_width = 0
+        # Check tab bar width every 200ms and update if changed
+        GLib.timeout_add(200, self._check_tab_bar_width)
+        
+    def _check_tab_bar_width(self):
+        """Periodically check if tab bar width changed and update tab sizes"""
+        current_width = self.get_allocated_width()
+        
+        if current_width != self._last_allocated_width and current_width > 0:
+            self._last_allocated_width = current_width
+            self.update_tab_sizes()
+        
+        return True  # Continue periodic checks
     
     def _calculate_drop_position(self, x, y):
         """Calculate the drop position based on mouse X and Y coordinates"""
@@ -7141,12 +7225,16 @@ class EditorWindow(Adw.ApplicationWindow):
         style_manager = Adw.StyleManager.get_default()
         style_manager.connect("notify::dark", self.on_theme_changed)
         
+        # Track last window width for resize detection
+        self._last_window_width = 0
+        
+        # Use a periodic check for window resize (more reliable than signals)
+        GLib.timeout_add(200, self._check_window_resize)
+        
         # Start periodic cursor position update (every 100ms)
         GLib.timeout_add(100, self.update_status_bar_cursor_position)
 
-
     def _setup_drop_targets(self):
-        """Setup drop targets for various drag-and-drop operations"""
         
         # Tab view drop target for files only
         file_drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
@@ -7321,8 +7409,6 @@ class EditorWindow(Adw.ApplicationWindow):
                     self.destroy()
             
             self.show_save_changes_dialog(modified_editors, on_response)
-            return True  # Prevent default close
-        
         return False  # Allow close
     
     def on_theme_changed(self, style_manager, pspec):
@@ -7345,6 +7431,18 @@ class EditorWindow(Adw.ApplicationWindow):
                 app.update_scrollbar_css(0.10, 0.10, 0.10, 1.0)
             else:
                 app.update_scrollbar_css(0.98, 0.98, 0.98, 1.0)
+    
+    def _check_window_resize(self):
+        """Periodically check if window has been resized and update tab sizes"""
+        current_width = self.get_width()
+        
+        # Only update if width actually changed
+        if current_width != self._last_window_width and current_width > 0:
+            self._last_window_width = current_width
+            if self.tab_bar:
+                self.tab_bar.update_tab_sizes()
+        
+        return True  # Continue periodic checks
     
     def update_recent_files_menu(self):
         """Update the recent files dropdown menu"""
