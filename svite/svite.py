@@ -1184,6 +1184,10 @@ class InputController:
         last_line = total - 1
         last_line_text = b.get_line(last_line)
         b.set_cursor(last_line, len(last_line_text), extend_selection)
+        
+        # Force precise visual scroll to bottom
+        if hasattr(self, 'view') and hasattr(self.view, 'scroll_to_bottom'):
+            self.view.scroll_to_bottom()
 
 class VirtualTextView(Gtk.DrawingArea):
 
@@ -1989,7 +1993,18 @@ class VirtualTextView(Gtk.DrawingArea):
                 page_sz = visible_rows * scroll_resolution
                 max_scroll = max(1.0, upper - page_sz)
                 
-                curr_val = ratio * max_scroll
+                # Check if we are at the bottom limit
+                limit_line, limit_offset = self._get_bottom_scroll_limit()
+                is_at_bottom = False
+                if self.scroll_line > limit_line:
+                    is_at_bottom = True
+                elif self.scroll_line == limit_line and self.scroll_visual_offset >= limit_offset:
+                    is_at_bottom = True
+                
+                if is_at_bottom:
+                    curr_val = max_scroll
+                else:
+                    curr_val = ratio * max_scroll
                 
                 self.vadj.set_value(curr_val)
                 self.vscroll.set_visible(total_vis > visible_rows)
@@ -4118,6 +4133,67 @@ class VirtualTextView(Gtk.DrawingArea):
         sc.connect("scroll", self.on_scroll)
         self.add_controller(sc)
 
+    def _get_bottom_scroll_limit(self):
+        """Calculate the scroll limits to align the last line to the bottom of the viewport."""
+        total_lines = self.buf.total()
+        visible_lines = max(1, self.get_height() // self.line_h)
+        
+        if self.mapper.enabled:
+            # Word Wrap Logic
+            last_line = max(0, total_lines - 1)
+            limit_line = last_line
+            limit_offset = 0
+            
+            # Backtrack 'visible_lines' from end to find the start position
+            needed = visible_lines
+            
+            # First, handle the last line itself
+            vis_height_last = self.mapper.get_visual_line_count(last_line)
+            needed -= vis_height_last
+            
+            if needed < 0:
+                # Last line is taller than viewport
+                limit_line = last_line
+                limit_offset = max(0, vis_height_last - visible_lines)
+            else:
+                # Backtrack loop
+                prev = last_line - 1
+                limit_offset = 0
+                limit_line = last_line # Fallback
+                
+                curr_back = last_line
+                while prev >= 0 and needed > 0:
+                    h_p = self.mapper.get_visual_line_count(prev)
+                    needed -= h_p
+                    curr_back = prev
+                    prev -= 1
+                
+                limit_line = curr_back
+                if needed < 0:
+                    # We went back too far (line at Top is cut off)
+                    limit_offset = abs(needed)
+                else:
+                    limit_offset = 0
+                    if prev < 0:
+                        limit_line = 0
+                        limit_offset = 0
+                        
+            return limit_line, limit_offset
+            
+        else:
+            # No Wrap Logic
+            max_scroll_line = max(0, total_lines - visible_lines + 0)
+            return max_scroll_line, 0
+
+    def scroll_to_bottom(self):
+        """Scroll to the very end of the document, aligning last line to bottom."""
+        limit_line, limit_offset = self._get_bottom_scroll_limit()
+        self.scroll_line = limit_line
+        self.scroll_visual_offset = limit_offset
+        self.scroll_line_frac = 0.0
+        self.update_scrollbar()
+        self.queue_draw()
+
     def on_scroll(self, c, dx, dy):
         """Handle mouse wheel scroll."""
         if dy:
@@ -4125,77 +4201,27 @@ class VirtualTextView(Gtk.DrawingArea):
             
             if self.mapper.enabled:
                 # --- Word Wrap Enabled ---
-                # Manual visual line scrolling to avoid sub-optimal global approximation in on_vadj_changed
+                # Manual visual line scrolling 
                 total_vis = self.mapper.get_total_visual_lines()
                 if total_vis <= visible_lines:
                     return
 
-                # Scroll speed: 3 visual lines per scroll unit
                 scroll_speed = 3
                 delta = int(dy * scroll_speed)
                 
-                # 1. Calculate the 'Bottom-Aligned' Limit (Maximum valid scroll position)
-                # We want the last line of the file to be at the bottom of the viewport
-                total_lines = self.buf.total()
-                last_line = max(0, total_lines - 1)
-                
-                limit_line = last_line
-                limit_offset = 0
-                
-                # Backtrack 'visible_lines' from end to find the start position
-                needed = visible_lines
-                
-                # First, handle the last line itself
-                vis_height_last = self.mapper.get_visual_line_count(last_line)
-                needed -= vis_height_last
-                
-                if needed < 0:
-                    # Last line is taller than viewport
-                    limit_line = last_line
-                    limit_offset = max(0, vis_height_last - visible_lines)
-                else:
-                    # Backtrack loop
-                    prev = last_line - 1
-                    limit_offset = 0
-                    limit_line = last_line # Fallback
-                    
-                    # We start at last_line (offset 0) and go back
-                    # The limit position is where we START rendering to fill the screen
-                    # So if last lines fit fully, limit is just before them
-                    
-                    curr_back = last_line
-                    while prev >= 0 and needed > 0:
-                        h_p = self.mapper.get_visual_line_count(prev)
-                        needed -= h_p
-                        curr_back = prev
-                        prev -= 1
-                    
-                    limit_line = curr_back
-                    if needed < 0:
-                        # We went back too far (line at Top is cut off)
-                        # We need to skip 'abs(needed)' visual lines of 'limit_line'
-                        limit_offset = abs(needed)
-                    else:
-                        limit_offset = 0
-                        # If needed > 0 here, it means file is smaller than viewport 
-                        # (handled by total_vis check above usually, but safe fallback is 0,0)
-                        if prev < 0:
-                            limit_line = 0
-                            limit_offset = 0
+                # 1. Get Limit
+                limit_line, limit_offset = self._get_bottom_scroll_limit()
 
                 # 2. Step Current Position
-                # We simply simulate moving 'delta' steps visually
                 curr_line = self.scroll_line
                 curr_offset = self.scroll_visual_offset
+                total_lines = self.buf.total()
                 
                 steps = abs(delta)
                 direction = 1 if delta > 0 else -1
                 
                 for _ in range(steps):
                     if direction > 0: # Down
-                        # Check against limit first? No, step then clamp.
-                        # Actually iterating is slow if delta is huge, but delta is small (~3)
-                        
                         h = self.mapper.get_visual_line_count(curr_line)
                         if curr_offset < h - 1:
                             curr_offset += 1
@@ -4212,14 +4238,12 @@ class VirtualTextView(Gtk.DrawingArea):
                         else:
                             if curr_line > 0:
                                 curr_line -= 1
-                                # Go to last visual segment of prev line
                                 h_prev = self.mapper.get_visual_line_count(curr_line)
                                 curr_offset = h_prev - 1
                             else:
                                 break # BOF
                 
                 # 3. Clamp to Limit
-                # Check if (curr_line, curr_offset) > (limit_line, limit_offset)
                 is_past_limit = False
                 if curr_line > limit_line:
                     is_past_limit = True
@@ -4230,35 +4254,28 @@ class VirtualTextView(Gtk.DrawingArea):
                     curr_line = limit_line
                     curr_offset = limit_offset
                     
-                # Apply
                 self.scroll_line = curr_line
                 self.scroll_visual_offset = curr_offset
                 self.scroll_line_frac = 0.0
                 
-                # Update scrollbar (updates vadj, blocks signal)
                 self.update_scrollbar()
                 self.queue_draw()
             
             else:
-                # --- No Wrap (Original Logic) ---
+                # --- No Wrap ---
                 total_lines = self.buf.total()
-                
-                # Safety Check
                 if total_lines <= visible_lines:
                     return
 
-                # Scroll speed: 3 lines per scroll unit
                 scroll_speed = 3
                 delta = int(dy * scroll_speed)
                 
-                # BALANCED LIMIT:
-                # "total_lines - visible_lines" puts the last line exactly at the bottom.
-                max_scroll_line = max(0, total_lines - visible_lines + 0)
+                # Use shared limit logic
+                max_scroll_line, _ = self._get_bottom_scroll_limit()
                 
                 new_line = self.scroll_line + delta
                 self.scroll_line = max(0, min(new_line, max_scroll_line))
                 
-                # Reset fractional scroll
                 self.scroll_line_frac = 0.0
                 
                 self.update_scrollbar()
