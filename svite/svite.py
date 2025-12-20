@@ -5571,11 +5571,45 @@ class ChromeTabBar(Adw.WrapBox):
             if len(self.separators) > 1:
                 self.separators[-1].add_css_class("hidden")
 
+        # Hide separator at the end of every row
+        allocated_width = self.get_allocated_width()
+        if allocated_width > 0:
+            margin_start = 6
+            available_width = allocated_width - margin_start
+            cols, _, _, _ = self._calculate_grid_cols(available_width)
+            
+            # If we have multiple rows, hide the separator at the end of each row
+            # Separators are indexed such that separators[i+1] is after tab[i]
+            # So if a row has 'cols' tabs, the separator after tab[cols-1] is index cols
+            if cols > 0:
+                for i in range(cols, len(self.separators), cols):
+                    if i < len(self.separators):
+                        self.separators[i].add_css_class("hidden")
+
         # Hide around active tab
         for i, tab in enumerate(self.tabs):
             if tab.has_css_class("active"):
                 self._hide_pair(i)
     
+    def _calculate_grid_cols(self, available_width):
+        """Calculate number of effective columns based on available width"""
+        min_tab_width = 130
+        max_tab_width = 4000
+        separator_width = 1
+        
+        # Calculate how many tabs can fit per row at minimum width (Theoretical Capacity)
+        capacity_per_row = (available_width + separator_width) // (min_tab_width + separator_width)
+        if capacity_per_row < 1:
+            capacity_per_row = 1
+            
+        # Determine effective columns: use actual tab count, but don't exceed capacity
+        num_tabs = len(self.tabs)
+        effective_cols = min(num_tabs, capacity_per_row)
+        if effective_cols < 1: 
+            effective_cols = 1
+            
+        return effective_cols, separator_width, min_tab_width, max_tab_width
+
     def update_tab_sizes(self, allocated_width=None):
         """Update tab sizes to fill the window width perfectly with no gaps"""
         if not self.tabs:
@@ -5597,21 +5631,7 @@ class ChromeTabBar(Adw.WrapBox):
         if available_width <= 0:
             return False
         
-        # Set min and max constraints for tab width
-        min_tab_width = 130  # Increased from 130 for better visibility
-        max_tab_width = 4000
-        separator_width = 1
-        
-        # Calculate how many tabs can fit per row at minimum width (Theoretical Capacity)
-        capacity_per_row = (available_width + separator_width) // (min_tab_width + separator_width)
-        if capacity_per_row < 1:
-            capacity_per_row = 1
-            
-        # Determine effective columns: use actual tab count, but don't exceed capacity
-        num_tabs = len(self.tabs)
-        effective_cols = min(num_tabs, capacity_per_row)
-        if effective_cols < 1: 
-            effective_cols = 1
+        effective_cols, separator_width, min_tab_width, max_tab_width = self._calculate_grid_cols(available_width)
         
         # Now calculate the exact width needed to fill the row using effective_cols
         # Formula: N tabs + N-1 separators (visible). 
@@ -5619,7 +5639,7 @@ class ChromeTabBar(Adw.WrapBox):
         # separator overhead = (effective_cols - 1) * separator_width
         # But for safety, let's subtract ample buffer to prevent subpixel wrapping issues.
         
-        layout_buffer = 4  # Increase buffer to absorb separator/border variances
+        layout_buffer = 0  # Increase buffer to absorb separator/border variances
         
         total_separator_width = (effective_cols - 1) * separator_width
         available_for_tabs = available_width - total_separator_width - layout_buffer
@@ -5642,7 +5662,10 @@ class ChromeTabBar(Adw.WrapBox):
             tab.set_size_request(tab_width, 32)
             if hasattr(tab, 'label'):
                 tab.label.set_max_width_chars(max_chars)
-
+        
+        # Ensure separators are updated (e.g. if columns changed)
+        self.update_separators()
+        
         return False
     
     def _on_visibility_changed(self, widget, param):
