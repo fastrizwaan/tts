@@ -5011,14 +5011,14 @@ class ChromeTab(Gtk.Box):
     }
    
     def __init__(self, title="Untitled 1", closeable=True):
-        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         FIXED_H = 32
         self.set_hexpand(False)
         self.set_vexpand(False)
         self.set_halign(Gtk.Align.START)  # Don't fill - use exact size from set_size_request
         self.set_valign(Gtk.Align.CENTER)
         self.add_css_class("chrome-tab")
-        self.set_size_request(160, FIXED_H)
+        self.set_size_request(390, FIXED_H)
         
         # Title label - directly in the tab
         self.label = Gtk.Label()
@@ -5425,7 +5425,7 @@ class ChromeTabBar(Adw.WrapBox):
         # This ensures tabs recalculate when the tab bar is resized
         self._size_allocate_handler_id = None
         self._setup_size_allocate_handler()
-
+        
     def add_tab(self, tab):
         idx = len(self.tabs)
 
@@ -5450,16 +5450,16 @@ class ChromeTabBar(Adw.WrapBox):
         # setup hover handlers - REMOVED (handled by ChromeTab now)
         # self._connect_hover(tab)
 
-        self.update_separators()
-        
+        GLib.timeout_add(50,self.update_separators)
         # Update tab sizes immediately with a small delay to ensure layout is complete
-        GLib.timeout_add(50, self.update_tab_sizes)
+        self.update_tab_sizes()
         
         # Update window UI state (visibility of tab bar)
         window = self.get_ancestor(Adw.ApplicationWindow)
         if window and hasattr(window, 'update_ui_state'):
             window.update_ui_state()
 
+        GLib.timeout_add(50, self.update_tab_sizes)
 
 
     def remove_tab(self, tab):
@@ -5488,8 +5488,6 @@ class ChromeTabBar(Adw.WrapBox):
         window = self.get_ancestor(Adw.ApplicationWindow)
         if window and hasattr(window, 'update_ui_state'):
             window.update_ui_state()
-
-    # _connect_hover REMOVED - logic moved to ChromeTab
 
     def set_tab_active(self, tab):
         for t in self.tabs:
@@ -5589,8 +5587,8 @@ class ChromeTabBar(Adw.WrapBox):
             return False
         
         # Set min and max constraints for tab width
-        min_tab_width = 160  # Increased from 120 for better visibility
-        max_tab_width = 300
+        min_tab_width = 130  # Increased from 130 for better visibility
+        max_tab_width = 4000
         separator_width = 1
         
         # Calculate how many tabs can fit per row at minimum width (Theoretical Capacity)
@@ -5625,7 +5623,7 @@ class ChromeTabBar(Adw.WrapBox):
         reserved_inner_width = 36
         available_text_width = max(1, tab_width - reserved_inner_width)
         max_chars = int(available_text_width / 9.5) # Allow more text visibility
-        
+
         # Apply the same fixed width to all tabs
         for tab in self.tabs:
             # set_size_request sets minimum size
@@ -5633,7 +5631,7 @@ class ChromeTabBar(Adw.WrapBox):
             tab.set_size_request(tab_width, 32)
             if hasattr(tab, 'label'):
                 tab.label.set_max_width_chars(max_chars)
-        
+
         return False
     
     def _on_visibility_changed(self, widget, param):
