@@ -4540,7 +4540,9 @@ class StatusBar(Gtk.Box):
         
         # File type dropdown
         self.file_type_button = Gtk.MenuButton()
-        self.file_type_label = Gtk.Label(label="Plain Text")
+        self.file_type_label = Gtk.Label()
+        self.file_type_label.set_markup("<span font_weight='normal'>Plain Text</span>")
+        self.file_type_label.set_use_markup(True)
         self.file_type_button.set_child(self.file_type_label)
         self.file_type_button.add_css_class("flat")
         self.file_type_button.set_tooltip_text("File Type")
@@ -4551,7 +4553,9 @@ class StatusBar(Gtk.Box):
         
         # Tab width dropdown
         self.tab_width_button = Gtk.MenuButton()
-        self.tab_width_label = Gtk.Label(label="Tab Width: 4")
+        self.tab_width_label = Gtk.Label()
+        self.tab_width_label.set_markup("<span font_weight='normal'>Tab Width: 4</span>")
+        self.tab_width_label.set_use_markup(True)
         self.tab_width_button.set_child(self.tab_width_label)
         self.tab_width_button.add_css_class("flat")
         self.tab_width_button.set_tooltip_text("Tab Width")
@@ -4560,17 +4564,11 @@ class StatusBar(Gtk.Box):
         
         self.append(self._create_separator())
         
-        # Use spaces checkbox
-        self.use_spaces_check = Gtk.CheckButton(label="Use Spaces")
-        self.use_spaces_check.set_active(True)
-        self.use_spaces_check.connect("toggled", self._on_use_spaces_toggled)
-        self.append(self.use_spaces_check)
-        
-        self.append(self._create_separator())
-        
         # Encoding dropdown
         self.encoding_button = Gtk.MenuButton()
-        self.encoding_label = Gtk.Label(label="UTF-8")
+        self.encoding_label = Gtk.Label()
+        self.encoding_label.set_markup("<span font_weight='normal'>UTF-8</span>")
+        self.encoding_label.set_use_markup(True)
         self.encoding_button.set_child(self.encoding_label)
         self.encoding_button.add_css_class("flat")
         self.encoding_button.set_tooltip_text("Encoding")
@@ -4581,7 +4579,9 @@ class StatusBar(Gtk.Box):
         
         # Line feed dropdown
         self.line_feed_button = Gtk.MenuButton()
-        self.line_feed_label = Gtk.Label(label="Unix/Linux (LF)")
+        self.line_feed_label = Gtk.Label()
+        self.line_feed_label.set_markup("<span font_weight='normal'>Unix/Linux (LF)</span>")
+        self.line_feed_label.set_use_markup(True)
         self.line_feed_button.set_child(self.line_feed_label)
         self.line_feed_button.add_css_class("flat")
         self.line_feed_button.set_tooltip_text("Line Ending")
@@ -4683,12 +4683,19 @@ class StatusBar(Gtk.Box):
     def _on_file_type_selected(self, listbox, row):
         """Handle file type selection"""
         file_type = row._file_type
-        self.file_type_label.set_text(file_type)
-        self.file_type_button.get_popover().popdown()
         
         # Apply to current editor
         editor = self.editor_window.get_current_page()
         if editor:
+            # Update label with bold if changed from default
+            is_changed = file_type != editor.default_file_type
+            if is_changed:
+                self.file_type_label.set_markup(f"<b>{file_type}</b>")
+            else:
+                self.file_type_label.set_markup(f"<span font_weight='normal'>{file_type}</span>")
+            
+            self.file_type_button.get_popover().popdown()
+            
             # Map display name to language ID
             lang_map = {
                 "Plain Text": None,
@@ -4719,14 +4726,133 @@ class StatusBar(Gtk.Box):
     
     def _create_tab_width_menu(self):
         """Create tab width dropdown with radio buttons"""
-        menu = Gio.Menu()
+        # Create a custom popover
+        popover = Gtk.Popover()
         
-        menu.append("2", "win.set_tab_width::2")
-        menu.append("4", "win.set_tab_width::4")
-        menu.append("8", "win.set_tab_width::8")
+        # Main container
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        box.set_margin_top(3)
+        box.set_margin_bottom(3)
+        box.set_margin_start(3)
+        box.set_margin_end(3)
         
-        popover = Gtk.PopoverMenu.new_from_model(menu)
+        # Store current tab width (default is 4)
+        self.current_tab_width = 4
+        
+        # Create radio buttons for tab widths
+        tab_widths = [2, 4, 8]
+        first_radio = None
+        self.tab_width_radios = {}
+        
+        for width in tab_widths:
+            # Create a button that acts as the clickable row
+            row_button = Gtk.Button()
+            row_button.add_css_class("flat")
+            row_button.set_has_frame(False)
+            
+            # Create horizontal box for each option
+            row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            row_box.set_margin_top(3)
+            row_box.set_margin_bottom(3)
+            row_box.set_margin_start(6)
+            row_box.set_margin_end(6)
+            
+            # Label on the left
+            label = Gtk.Label(label=str(width))
+            label.set_xalign(0)
+            label.set_hexpand(True)
+            row_box.append(label)
+            
+            # Radio button on the right
+            if first_radio is None:
+                radio = Gtk.CheckButton()
+                first_radio = radio
+            else:
+                radio = Gtk.CheckButton()
+                radio.set_group(first_radio)
+            
+            # Set active if this is the default width (4)
+            if width == 4:
+                radio.set_active(True)
+            
+            # Store reference
+            self.tab_width_radios[width] = radio
+            
+            # Connect signal
+            radio.connect("toggled", self._on_tab_width_radio_toggled, width)
+            
+            row_box.append(radio)
+            row_button.set_child(row_box)
+            
+            # Make the entire row clickable
+            row_button.connect("clicked", lambda btn, r=radio: r.set_active(True))
+            
+            box.append(row_button)
+        
+        # Add horizontal separator
+        separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        separator.set_margin_top(6)
+        separator.set_margin_bottom(6)
+        box.append(separator)
+        
+        # Add "Use Spaces" checkbox row
+        use_spaces_button = Gtk.Button()
+        use_spaces_button.add_css_class("flat")
+        use_spaces_button.set_has_frame(False)
+        
+        use_spaces_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        use_spaces_row.set_margin_top(3)
+        use_spaces_row.set_margin_bottom(3)
+        use_spaces_row.set_margin_start(6)
+        use_spaces_row.set_margin_end(6)
+        
+        use_spaces_label = Gtk.Label(label="Use Spaces")
+        use_spaces_label.set_xalign(0)
+        use_spaces_label.set_hexpand(True)
+        use_spaces_row.append(use_spaces_label)
+        
+        self.tab_width_use_spaces_check = Gtk.CheckButton()
+        self.tab_width_use_spaces_check.set_active(True)
+        self.tab_width_use_spaces_check.connect("toggled", self._on_tab_width_use_spaces_toggled)
+        use_spaces_row.append(self.tab_width_use_spaces_check)
+        
+        use_spaces_button.set_child(use_spaces_row)
+        
+        # Make the entire row clickable to toggle checkbox
+        use_spaces_button.connect("clicked", lambda btn: self.tab_width_use_spaces_check.set_active(not self.tab_width_use_spaces_check.get_active()))
+        
+        box.append(use_spaces_button)
+        
+        popover.set_child(box)
         self.tab_width_button.set_popover(popover)
+    
+    def _on_tab_width_radio_toggled(self, radio, width):
+        """Handle tab width radio button toggle"""
+        if radio.get_active():
+            self.current_tab_width = width
+            
+            # Apply to current editor
+            editor = self.editor_window.get_current_page()
+            if editor:
+                editor.tab_width = width
+                editor.view.tab_width = width
+                
+                # Update label with bold if changed from default
+                is_changed = width != editor.default_tab_width
+                if is_changed:
+                    self.tab_width_label.set_markup(f"<b>Tab Width: {width}</b>")
+                else:
+                    self.tab_width_label.set_markup(f"<span font_weight='normal'>Tab Width: {width}</span>")
+                
+                editor.view.queue_draw()
+    
+    def _on_tab_width_use_spaces_toggled(self, check_button):
+        """Handle use spaces toggle from tab width popover"""
+        # Apply to current editor
+        editor = self.editor_window.get_current_page()
+        if editor:
+            editor.use_spaces = check_button.get_active()
+
     
     def _create_encoding_menu(self):
         """Create encoding dropdown"""
@@ -4750,12 +4876,6 @@ class StatusBar(Gtk.Box):
         popover = Gtk.PopoverMenu.new_from_model(menu)
         self.line_feed_button.set_popover(popover)
     
-    def _on_use_spaces_toggled(self, check_button):
-        """Handle use spaces toggle"""
-        # Apply to current editor
-        editor = self.editor_window.get_current_page()
-        if editor:
-            editor.use_spaces = check_button.get_active()
     
     def update_cursor_position(self, line, col):
         """Update cursor position display"""
@@ -4773,7 +4893,7 @@ class StatusBar(Gtk.Box):
         # Update cursor position
         self.update_cursor_position(editor.buf.cursor_line, editor.buf.cursor_col)
         
-        # Update encoding
+        # Update encoding with bold if changed
         encoding = getattr(editor, 'current_encoding', 'utf-8')
         encoding_display = {
             'utf-8': 'UTF-8',
@@ -4781,9 +4901,13 @@ class StatusBar(Gtk.Box):
             'utf-16le': 'UTF-16 LE',
             'utf-16be': 'UTF-16 BE'
         }.get(encoding, encoding.upper())
-        self.encoding_label.set_text(encoding_display)
+        is_encoding_changed = encoding != editor.default_encoding
+        if is_encoding_changed:
+            self.encoding_label.set_markup(f"<b>{encoding_display}</b>")
+        else:
+            self.encoding_label.set_markup(f"<span font_weight='normal'>{encoding_display}</span>")
         
-        # Update file type based on file extension
+        # Update file type based on file extension with bold if changed
         if editor.current_file_path:
             ext = os.path.splitext(editor.current_file_path)[1].lower()
             type_map = {
@@ -4803,9 +4927,34 @@ class StatusBar(Gtk.Box):
                 '.toml': 'TOML'
             }
             file_type = type_map.get(ext, 'Plain Text')
-            self.file_type_label.set_text(file_type)
+            is_file_type_changed = file_type != editor.default_file_type
+            if is_file_type_changed:
+                self.file_type_label.set_markup(f"<b>{file_type}</b>")
+            else:
+                self.file_type_label.set_markup(f"<span font_weight='normal'>{file_type}</span>")
         else:
-            self.file_type_label.set_text('Plain Text')
+            self.file_type_label.set_markup("<span font_weight='normal'>Plain Text</span>")
+        
+        # Update tab width with bold if changed
+        tab_width = getattr(editor, 'tab_width', 4)
+        is_tab_width_changed = tab_width != editor.default_tab_width
+        if is_tab_width_changed:
+            self.tab_width_label.set_markup(f"<b>Tab Width: {tab_width}</b>")
+        else:
+            self.tab_width_label.set_markup(f"<span font_weight='normal'>Tab Width: {tab_width}</span>")
+        
+        # Update line feed with bold if changed
+        line_feed = getattr(editor, 'line_feed', 'lf')
+        line_feed_display = {
+            'lf': 'Unix/Linux (LF)',
+            'crlf': 'Windows (CRLF)',
+            'cr': 'Mac OS (CR)'
+        }.get(line_feed, 'Unix/Linux (LF)')
+        is_line_feed_changed = line_feed != editor.default_line_feed
+        if is_line_feed_changed:
+            self.line_feed_label.set_markup(f"<b>{line_feed_display}</b>")
+        else:
+            self.line_feed_label.set_markup(f"<span font_weight='normal'>{line_feed_display}</span>")
 
 
 # ============================================================
@@ -6379,6 +6528,13 @@ class EditorPage:
         self.use_spaces = True
         self.line_feed = "lf"  # Unix/Linux default
         self.insert_mode = True  # INS mode by default
+        
+        # Track default values for bold styling
+        self.default_file_type = "Plain Text"
+        self.default_tab_width = 4
+        self.default_encoding = "utf-8"
+        self.default_line_feed = "lf"
+
 
 
         
@@ -8598,13 +8754,17 @@ class EditorWindow(Adw.ApplicationWindow):
         editor = self.get_current_page()
         if editor:
             editor.current_encoding = encoding
-            # Update status bar display
+            # Update status bar display with bold if changed
             encoding_display = {
                 'utf-8': 'UTF-8',
                 'utf-16le': 'UTF-16 LE',
                 'utf-16be': 'UTF-16 BE'
             }.get(encoding, encoding.upper())
-            self.status_bar.encoding_label.set_text(encoding_display)
+            is_changed = encoding != editor.default_encoding
+            if is_changed:
+                self.status_bar.encoding_label.set_markup(f"<b>{encoding_display}</b>")
+            else:
+                self.status_bar.encoding_label.set_markup(f"<span font_weight='normal'>{encoding_display}</span>")
     
     def on_set_line_feed(self, action, parameter):
         """Handle line feed change from status bar"""
@@ -8612,13 +8772,17 @@ class EditorWindow(Adw.ApplicationWindow):
         editor = self.get_current_page()
         if editor:
             editor.line_feed = line_feed
-            # Update status bar display
+            # Update status bar display with bold if changed
             line_feed_display = {
                 'lf': 'Unix/Linux (LF)',
                 'crlf': 'Windows (CRLF)',
                 'cr': 'Mac OS (CR)'
             }.get(line_feed, line_feed.upper())
-            self.status_bar.line_feed_label.set_text(line_feed_display)
+            is_changed = line_feed != editor.default_line_feed
+            if is_changed:
+                self.status_bar.line_feed_label.set_markup(f"<b>{line_feed_display}</b>")
+            else:
+                self.status_bar.line_feed_label.set_markup(f"<span font_weight='normal'>{line_feed_display}</span>")
 
     
     def on_save_as(self, action, parameter):
