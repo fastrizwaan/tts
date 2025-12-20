@@ -3349,29 +3349,42 @@ class VirtualTextView(Gtk.DrawingArea):
                              break
                      did_scroll = True
                 else:
-                     # Down
-                     steps = scroll_amount
-                     total = self.buf.total()
-                     for _ in range(steps):
-                         count = self.mapper.get_visual_line_count(self.scroll_line)
-                         if self.scroll_visual_offset < count - 1:
-                             self.scroll_visual_offset += 1
-                         elif self.scroll_line < total - 1:
-                             self.scroll_line += 1
-                             self.scroll_visual_offset = 0
-                         else:
-                             break
-                     did_scroll = True
-                
-                if did_scroll: self.update_scrollbar()
-            else:
-                 # Logical
-                 new_line = self.scroll_line + scroll_amount
-                 new_line = max(0, min(new_line, self.buf.total() - 1))
-                 if new_line != self.scroll_line:
-                     self.scroll_line = new_line
-                     did_scroll = True
-                     self.update_scrollbar()
+                 # Down
+                 steps = scroll_amount
+                 total = self.buf.total()
+                 # Get precise limit
+                 limit_line, limit_offset = self._get_bottom_scroll_limit()
+                 
+                 for _ in range(steps):
+                     # Check if we are already at or past limit
+                     if self.scroll_line > limit_line:
+                         break
+                     if self.scroll_line == limit_line and self.scroll_visual_offset >= limit_offset:
+                         break
+                         
+                     count = self.mapper.get_visual_line_count(self.scroll_line)
+                     if self.scroll_visual_offset < count - 1:
+                         self.scroll_visual_offset += 1
+                     elif self.scroll_line < total - 1:
+                         self.scroll_line += 1
+                         self.scroll_visual_offset = 0
+                     else:
+                         break
+                 did_scroll = True
+            
+            if did_scroll: self.update_scrollbar()
+        else:
+             # Logical
+             new_line = self.scroll_line + scroll_amount
+             
+             # Use precise limit for consistency
+             max_scroll_line, _ = self._get_bottom_scroll_limit()
+             
+             new_line = max(0, min(new_line, max_scroll_line))
+             if new_line != self.scroll_line:
+                 self.scroll_line = new_line
+                 did_scroll = True
+                 self.update_scrollbar()
             
         if hscroll_amount != 0:
              self.scroll_x += hscroll_amount
