@@ -4109,6 +4109,7 @@ class VirtualTextView(Gtk.DrawingArea):
             
             # Precise Pango fallback calculation could go here if needed
 
+
     def install_scroll(self):
         sc = Gtk.EventControllerScroll.new(
             Gtk.EventControllerScrollFlags.VERTICAL |
@@ -4118,78 +4119,23 @@ class VirtualTextView(Gtk.DrawingArea):
         self.add_controller(sc)
 
     def on_scroll(self, c, dx, dy):
-        """Handle mouse wheel scroll with pixel-wise precision."""
+        """Handle mouse wheel scroll by updating scrollbar value."""
         if dy:
-             # Calculate total visual lines (including wrapped lines)
-             total_lines = self.buf.total()
-             h = self.get_height()
-             visible_lines = max(1, int(h / self.line_h)) if self.line_h > 0 else 1
-             
-             # Calculate total visual lines (accounting for word wrap)
-             total_visual_lines = 0
-             for i in range(total_lines):
-                 segments = self.mapper.get_line_segments(i)
-                 total_visual_lines += len(segments)
-             
-             # If all content fits in viewport, don't allow scrolling
-             if total_visual_lines <= visible_lines:
-                 # Reset scroll position to top
-                 self.scroll_line = 0
-                 self.scroll_visual_offset = 0
-                 if hasattr(self, 'scroll_line_frac'):
-                     self.scroll_line_frac = 0.0
-                 return True
-             
-             # dy is typically 1.0 per click, or smaller for touchpads
-             # We want smooth scrolling, so we map dy to a fraction of a line
-             # Sensitivity: 1.0 dy = 3 lines roughly in old code
-             # Let's try 1.0 dy = 1.0 lines (or adjustable)
-             # For pixel-wise, we want direct mapping if possible, but dy is unit-less steps usually.
-             
-             scroll_speed = 3.0  # lines per scroll unit
-             
-             if not hasattr(self, 'scroll_line_frac'):
-                 self.scroll_line_frac = 0.0
-                 
-             self.scroll_line_frac += dy * scroll_speed
-             
-             
-             # Normalize fraction to keep it between 0.0 and 1.0 by moving visual lines
-             while self.scroll_line_frac >= 1.0:
-                 # Move down 1 visual line
-                 segments = self.mapper.get_line_segments(self.scroll_line)
-                 if self.scroll_visual_offset < len(segments) - 1:
-                     self.scroll_visual_offset += 1
-                     self.scroll_line_frac -= 1.0
-                 else:
-                     if self.scroll_line < total_lines - 1:
-                         self.scroll_line += 1
-                         self.scroll_visual_offset = 0
-                         self.scroll_line_frac -= 1.0
-                     else:
-                         # End of file, clamp
-                         self.scroll_line_frac = min(1.0, self.scroll_line_frac) # Allow some bounce? No.
-                         self.scroll_line_frac = 0.99 
-                         break
-                         
-             while self.scroll_line_frac < 0.0:
-                 # Move up 1 visual line
-                 if self.scroll_visual_offset > 0:
-                     self.scroll_visual_offset -= 1
-                     self.scroll_line_frac += 1.0
-                 else:
-                     if self.scroll_line > 0:
-                         self.scroll_line -= 1
-                         segments = self.mapper.get_line_segments(self.scroll_line)
-                         self.scroll_visual_offset = max(0, len(segments) - 1)
-                         self.scroll_line_frac += 1.0
-                     else:
-                         # Start of file, clamp
-                         self.scroll_line_frac = 0.0
-                         break
-             
-             self.update_scrollbar()
-             self.queue_draw()
+            # Scroll speed: 3 lines per scroll unit
+            scroll_speed = 3.0
+            delta = dy * scroll_speed
+            
+            # Update scrollbar value - on_vadj_changed will handle position update
+            current_val = self.vadj.get_value()
+            new_val = current_val + delta
+            
+            # Clamp to valid range
+            upper = self.vadj.get_upper()
+            page_size = self.vadj.get_page_size()
+            max_val = max(0, upper - page_size)
+            new_val = max(0, min(new_val, max_val))
+            
+            self.vadj.set_value(new_val)
              
         if dx and not self.mapper.enabled:
             self.scroll_x = max(0, self.scroll_x + int(dx * 40))
