@@ -4120,23 +4120,25 @@ class VirtualTextView(Gtk.DrawingArea):
         self.add_controller(sc)
 
     def on_scroll(self, c, dx, dy):
-        """Handle mouse wheel scroll by updating scrollbar value."""
+        """Handle mouse wheel scroll by updating scroll_line directly."""
         if dy:
             # Scroll speed: 3 lines per scroll unit
-            scroll_speed = 3.0
-            delta = dy * scroll_speed
+            scroll_speed = 3
+            delta = int(dy * scroll_speed)
             
-            # Update scrollbar value - on_vadj_changed will handle position update
-            current_val = self.vadj.get_value()
-            new_val = current_val + delta
+            # Update scroll_line directly to avoid jumps from imprecise vadj reading
+            total_lines = self.buf.total()
+            visible_lines = max(1, self.get_height() // self.line_h)
+            max_scroll_line = max(0, total_lines - 1)
             
-            # Clamp to valid range
-            upper = self.vadj.get_upper()
-            page_size = self.vadj.get_page_size()
-            max_val = max(0, upper - page_size)
-            new_val = max(0, min(new_val, max_val))
+            new_line = self.scroll_line + delta
+            self.scroll_line = max(0, min(new_line, max_scroll_line))
             
-            self.vadj.set_value(new_val)
+            # Reset fractional scroll for now as we are doing line-based scrolling
+            self.scroll_line_frac = 0.0
+            
+            self.update_scrollbar()
+            self.queue_draw()
              
         if dx and not self.mapper.enabled:
             self.scroll_x = max(0, self.scroll_x + int(dx * 40))
