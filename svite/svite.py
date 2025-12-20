@@ -165,7 +165,7 @@ CSS_OVERLAY_SCROLLBAR = """
     background: transparent;
     color: alpha(@window_fg_color, 0.85);
     min-height: 32px;
-    padding-left: 10px;
+    padding-left: 6px;
     padding-right: 6px;
     border-radius: 9px 9px 9px 9px;
     margin-bottom: 1px;
@@ -5621,10 +5621,10 @@ class ChromeTabBar(Adw.WrapBox):
         tab_width = max(min_tab_width, min(tab_width, max_tab_width))
         
         # Calculate approximation of max characters that fit
-        # usage: ~11px per char (Conservative Avg), + ~38px for close button & padding (safe estimate)
-        reserved_inner_width = 38
+        # usage: ~9.5px per char (Optimized), + ~36px for close button & padding (tighter bounds)
+        reserved_inner_width = 36
         available_text_width = max(1, tab_width - reserved_inner_width)
-        max_chars = int(available_text_width / 11) # increased divisor to be safer against expansion
+        max_chars = int(available_text_width / 9.5) # Allow more text visibility
         
         # Apply the same fixed width to all tabs
         for tab in self.tabs:
