@@ -9318,8 +9318,18 @@ class EditorWindow(Adw.ApplicationWindow):
             # 1. Write to a temporary file first
             # We use the same directory to ensure atomic move (rename) is possible
             import tempfile
+            import stat
             dirname, basename = os.path.split(path)
             
+            # Capture original permissions if file exists
+            original_mode = None
+            if os.path.exists(path):
+                try:
+                    st = os.stat(path)
+                    original_mode = stat.S_IMODE(st.st_mode)
+                except Exception as e:
+                    print(f"Warning: Could not read file permissions: {e}")
+
             # Create temp file
             with tempfile.NamedTemporaryFile(mode='w', dir=dirname, delete=False, encoding=editor.current_encoding, newline='') as tf:
                 temp_path = tf.name
@@ -9328,6 +9338,13 @@ class EditorWindow(Adw.ApplicationWindow):
                 # This bypasses the slow Python loop for unmodified chunks
                 editor.buf.save_optimized(temp_path)
             
+            # Apply original permissions to temp file
+            if original_mode is not None:
+                try:
+                    os.chmod(temp_path, original_mode)
+                except Exception as e:
+                    print(f"Warning: Could not restore file permissions: {e}")
+
             # 2. Atomic replacement
             os.replace(temp_path, path)
             print(f"File saved atomically to {path} with encoding {editor.current_encoding}")
