@@ -5186,7 +5186,7 @@ class ChromeTab(Gtk.Box):
         # Title label - main child of overlay
         self.label = Gtk.Label()
         self.label.set_text(title)
-        self.label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.label.set_ellipsize(Pango.EllipsizeMode.END)
         self.label.set_single_line_mode(True)
         self.label.set_hexpand(True)
         self.label.set_halign(Gtk.Align.CENTER)
