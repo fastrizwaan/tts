@@ -105,7 +105,7 @@ class LineIndexer:
         self._total_size = total_size
         self.use_implicit_lengths(newline_len)
 
-    def build_from_file(self, filepath: str, encoding: str = 'utf-8', check_cancel: Optional[callable] = None) -> None:
+    def build_from_file(self, filepath: str, encoding: str = 'utf-8', check_cancel: Optional[callable] = None, progress_callback: Optional[callable] = None) -> None:
         """Build line index from a file using mmap for efficiency."""
         file_size = os.path.getsize(filepath)
         self._total_size = file_size
@@ -140,6 +140,11 @@ class LineIndexer:
         newline_len = len(newline_seq)
         
         current_pos = 0
+        last_report_pos = 0
+        last_report_time = 0
+        # Check time every 1MB or so to avoid excessive syscalls
+        check_interval = 1024 * 512
+        
         try:
             with open(filepath, 'rb') as f:
                 with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
@@ -152,6 +157,18 @@ class LineIndexer:
                     
                     while current_pos < file_size:
                         next_newline = mm.find(newline_seq, current_pos)
+                        
+                        # Progress reporting with Time Throttling
+                        # First check byte interval (cheap), then check time (expensive syscall)
+                        if progress_callback and (current_pos - last_report_pos > check_interval):
+                            now = time.time()
+                            # YIELD MORE AGGRESSIVELY: Check every ~8ms (120Hz)
+                            if now - last_report_time > 0.006: 
+                                time.sleep(0.003) # Sleep 3ms (gives ~30% duty cycle to UI thread)
+                                now = time.time() # Update time after sleep
+                                progress_callback(current_pos / file_size)
+                                last_report_time = now
+                                last_report_pos = current_pos
                         
                         # Cancellation check
                         if check_cancel and check_cancel():
@@ -855,56 +872,94 @@ class VirtualBuffer:
         self.syntax_engine.invalidate_from(0)
 
     def load_file(self, filepath: str, encoding: Optional[str] = None, progress_callback: Optional[callable] = None, check_cancel: Optional[callable] = None) -> None:
-        """Load a file using lazy index. Patched to detect encoding BEFORE indexing."""
-        # For thread safety, do not close() here if running in background thread implicitly? 
-        # But this function mutates self state significantly.
-        # It is expected to be called from a worker thread but updates internal references cleanly.
-        # However, accessing self.close() which might clear buffers used by UI is risky?
-        # The 'safe' way is for this function to build NEW state and only apply it at end.
-        # But for now, we follow the Plan: direct call, relying on UI disabled/loading state.
-        self.close()
-        
-        self._filepath = filepath
-        file_size = os.path.getsize(filepath)
-        
-        # 1. Handle Empty Files (Preserved)
-        if file_size == 0:
-            self._lines = SegmentedLineMap(1) # One empty line
-            self._modified_cache = {0: ""}
-            self._size_delta = 0
-            self._is_modified = False 
-            self._notify_observers()
+        """Load a file safely by building state detached and swapping on main thread."""
+        try:
+            file_size = os.path.getsize(filepath)
+        except OSError:
+            # File might not exist or permission denied
+            self._filepath = filepath
+            # Schedule empty update
+            def apply_empty():
+                 self.close()
+                 self._lines = SegmentedLineMap(1)
+                 self._modified_cache = {0: ""}
+                 self._size_delta = 0
+                 self._is_modified = False 
+                 self._notify_observers()
+                 if progress_callback: progress_callback(1.0)
+                 return False
+            GLib.idle_add(apply_empty)
             return
+
+        # Detached state construction (Background Thread)
+        new_indexer = None
+        new_lines = None
+        new_encoding = encoding
+        new_file = None
+        new_mmap = None
         
-        # 2. PATCH: Detect Encoding FIRST
-        # We must establish the encoding before building the index so the 
-        # indexer knows if it needs to step 2 bytes for UTF-16 newlines.
-        if encoding:
-            self.current_encoding = encoding
+        if file_size == 0:
+            # Handle empty file
+            new_lines = SegmentedLineMap(1)
+            # Setup dummy cache for empty file
         else:
-            # Assuming detect_encoding is the imported function available in scope
-            self.current_encoding = detect_encoding(filepath)
-
-        # 3. Build line index using the CONFIRMED encoding
-        self._indexer.build_from_file(filepath, encoding=self.current_encoding, check_cancel=check_cancel)
+            if not new_encoding:
+                new_encoding = detect_encoding(filepath)
             
-        # 4. Open mmap (Preserved)
-        self._file = open(filepath, 'rb')
-        self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
-        
-        # 5. Initialize lines as lazy identity map (Preserved)
-        cnt = self._indexer.line_count
-        self._lines = SegmentedLineMap(cnt)
-        
-        # 6. Final Progress Report (Preserved)
-        if progress_callback:
-            progress_callback(1.0)
+            # Local indexer (Detached)
+            new_indexer = LineIndexer()
+            new_indexer.build_from_file(filepath, encoding=new_encoding, check_cancel=check_cancel, progress_callback=progress_callback)
+            
+            # Check cancel before opening file
+            if check_cancel and check_cancel():
+                return
+                
+            new_file = open(filepath, 'rb')
+            new_mmap = mmap.mmap(new_file.fileno(), 0, access=mmap.ACCESS_READ)
+            
+            cnt = new_indexer.line_count
+            new_lines = SegmentedLineMap(cnt)
 
-        # 7. Reset tracking structures (Preserved)
-        self._modified_cache = {}
-        self._size_delta = 0
-        self._is_modified = False
-        self._notify_observers()
+        # Atomic Swap Function (Main Thread)
+        def apply_state():
+            # Final cancel check on main thread
+            if check_cancel and check_cancel():
+                # If cancelled, close the NEW resources we just opened
+                if new_file: new_file.close()
+                if new_mmap: new_mmap.close()
+                return False
+                
+            self.close() # Close OLD resources
+            
+            self._filepath = filepath
+            
+            if file_size == 0:
+                self._lines = new_lines
+                self._modified_cache = {0: ""}
+                self._size_delta = 0
+                self._is_modified = False
+            else:
+                self.current_encoding = new_encoding
+                self._indexer = new_indexer
+                self._file = new_file
+                self._mmap = new_mmap
+                self._lines = new_lines
+                
+                self._modified_cache = {}
+                self._size_delta = 0
+                self._is_modified = False
+            
+            self.syntax_engine.invalidate_from(0)
+            self._notify_observers()
+            
+            # Progress 100%
+            if progress_callback:
+                progress_callback(1.0)
+            
+            return False
+
+        # Schedule swap on main thread
+        GLib.idle_add(apply_state)
     
     def load_text(self, text: str) -> None:
         """Load text directly into buffer."""
