@@ -5201,6 +5201,8 @@ class ChromeTab(Gtk.Box):
         self._is_modified = False
         self._is_hovered = False
         self._is_active = False
+        self.loading = False
+        self.cancelled = False
         
         # Close button - overlay child
         if closeable:
@@ -5219,6 +5221,16 @@ class ChromeTab(Gtk.Box):
             self.close_button.set_opacity(0)
             
             self.overlay.add_overlay(self.close_button)
+            
+            # Spinner for loading state
+            self.spinner = Gtk.Spinner()
+            self.spinner.set_halign(Gtk.Align.END)
+            self.spinner.set_valign(Gtk.Align.CENTER)
+            self.spinner.set_hexpand(False)
+            self.spinner.set_margin_end(6)
+            self.spinner.set_visible(False)
+            
+            self.overlay.add_overlay(self.spinner)
             
             # Hover controller for the tab
             hover_controller = Gtk.EventControllerMotion()
@@ -5247,6 +5259,22 @@ class ChromeTab(Gtk.Box):
         click_gesture.connect('pressed', self._on_tab_pressed)
         click_gesture.connect('released', self._on_tab_released)
         self.add_controller(click_gesture)
+        
+    def set_loading(self, loading):
+        """Set loading state. If loading, show spinner and make close button explicitly visible as Cancel."""
+        self.loading = loading
+        if loading:
+            self.cancelled = False
+            self.spinner.set_visible(True)
+            self.spinner.start()
+            # Show close button permanently during load (as cancel button)
+            self.close_button.set_opacity(1)
+            self.close_button.set_icon_name("process-stop-symbolic") # Use Stop icon
+        else:
+            self.spinner.stop()
+            self.spinner.set_visible(False)
+            self.close_button.set_icon_name("cross-small-symbolic") # Revert to Close icon
+            self._update_close_button_state()
 
     def _on_hover_enter(self, controller, x, y):
         self._is_hovered = True
@@ -5389,6 +5417,15 @@ class ChromeTab(Gtk.Box):
         self.emit('activate-requested')
        
     def _on_close_clicked(self, button):
+        if self.loading:
+            # Cancel loading
+            self.cancelled = True
+            # We don't close immediately; wait for text loader to see flag
+            # But the user expects feedback.
+            self.spinner.stop()
+            self.close_button.set_sensitive(False)
+            return
+
         self.emit('close-requested')
        
     def set_title(self, title):
@@ -5694,6 +5731,13 @@ class ChromeTabBar(Adw.WrapBox):
         # Hide right separator if not last tab
         if i + 1 < len(self.separators) - 1:
             self.separators[i + 1].add_css_class("hidden")
+
+    def get_tab_for_page(self, page):
+        """Get ChromeTab associated with a given Adw.TabView page"""
+        for tab in self.tabs:
+            if hasattr(tab, '_page') and tab._page == page:
+                return tab
+        return None
 
     def hide_separators_for_tab(self, tab):
         """Immediately hide separators around this tab (used on press)"""
@@ -7403,6 +7447,9 @@ class EditorWindow(Adw.ApplicationWindow):
         self.tab_view.connect("notify::selected-page", self.on_page_selection_changed)
         toolbar_view.set_content(self.tab_view)
         
+        # Goto Line Bar (Revealer) - Add BEFORE status bar so it appears ABOVE it
+        toolbar_view.add_bottom_bar(self._create_goto_line_bar())
+
         # Status bar at bottom
         self.status_bar = StatusBar(self)
         toolbar_view.add_bottom_bar(self.status_bar)
@@ -8726,34 +8773,58 @@ class EditorWindow(Adw.ApplicationWindow):
         """Create the application menu model"""
         menu = Gio.Menu()
         
-        # Actions
-        menu.append("New Window", "win.new_window")
-        menu.append("Find...", "win.find")
-        menu.append("Save", "win.save")
-        menu.append("Save As...", "win.save-as")
-        menu.append("Save Copy As...", "win.save-copy")
+        # Section 1: New Window
+        section1 = Gio.Menu()
+        section1.append("New Window", "win.new_window")
+        menu.append_section(None, section1)
+        
+        # Section 2: Save, Save As, Discard
+        section2 = Gio.Menu()
+        section2.append("Save", "win.save")
+        section2.append("Save As...", "win.save-as")
+        section2.append("Discard Changes...", "win.discard_changes")
+        menu.append_section(None, section2)
+        
+        # Section 3: Find, Print, Goto Line
+        section3 = Gio.Menu()
+        section3.append("Find/Replace...", "win.find")
+        section3.append("Go to Line...", "win.goto_line")
+        section3.append("Print...", "win.print")
+        menu.append_section(None, section3)
+        
+        # Section 4: Fullscreen
+        section4 = Gio.Menu()
+        section4.append("Fullscreen", "win.fullscreen")
+        menu.append_section(None, section4)
+        
+        # Section 5: Preferences
+        section5 = Gio.Menu()
+        section5.append("Preferences", "win.preferences")
+        menu.append_section(None, section5)
+        
+        # Section 6: Zoom and Submenus (Preserved)
+        section6 = Gio.Menu()
         
         # Zoom Section (Custom Widget)
-        # We use a placeholder item with a custom attribute
         zoom_item = Gio.MenuItem.new("Zoom", None)
         zoom_item.set_attribute_value("custom", GLib.Variant.new_string("zoom_controls"))
-        menu.append_item(zoom_item)
+        section6.append_item(zoom_item)
         
         # View Submenu
         view_submenu = Gio.Menu()
         view_submenu.append("Show Line Numbers", "win.toggle_line_numbers")
         view_submenu.append("Word Wrap", "win.toggle_word_wrap")
-        menu.append_submenu("View", view_submenu)
-    
+        section6.append_submenu("View", view_submenu)
+        
         # Encoding Submenu
         encoding_submenu = Gio.Menu()
         encoding_submenu.append("UTF-8", "win.encoding::utf-8")
         encoding_submenu.append("UTF-8 with BOM", "win.encoding::utf-8-sig")
         encoding_submenu.append("UTF-16 LE", "win.encoding::utf-16le")
         encoding_submenu.append("UTF-16 BE", "win.encoding::utf-16be")
-        menu.append_submenu("Encoding", encoding_submenu)
-
-        menu.append("Preferences", "win.preferences")
+        section6.append_submenu("Encoding", encoding_submenu)
+        
+        menu.append_section(None, section6)
         
         return menu
 
@@ -8821,7 +8892,15 @@ class EditorWindow(Adw.ApplicationWindow):
 
         # Tools
         self.add_simple_action("preferences", self.on_preferences)
-        
+        self.add_simple_action("fullscreen", self.on_fullscreen)
+        self.add_simple_action("print", self.on_print_dummy)
+        self.add_simple_action("discard_changes", self.on_discard_dummy)
+        self.add_simple_action("goto_line", self.on_goto_line)
+
+        # --------------------------------------------------------
+        # Actions with Parameters (moved from perform_goto_line)
+        # --------------------------------------------------------
+
         # Encoding action with parameter
         encoding_action = Gio.SimpleAction.new_stateful(
             "encoding",
@@ -8861,6 +8940,115 @@ class EditorWindow(Adw.ApplicationWindow):
         line_feed_action = Gio.SimpleAction.new("set_line_feed", GLib.VariantType.new("s"))
         line_feed_action.connect("activate", self.on_set_line_feed)
         self.add_action(line_feed_action)
+    
+    def on_fullscreen(self, action, param):
+        if self.is_fullscreen():
+            self.unfullscreen()
+        else:
+            self.fullscreen()
+            
+    def on_print_dummy(self, action, param):
+        # Placeholder for print
+        print("Print not implemented yet")
+        
+    def on_discard_dummy(self, action, param):
+        # Placeholder for discard changes
+        print("Discard changes not implemented yet")
+        
+    
+    def on_goto_line(self, action, param):
+        """Toggle Goto Line bar."""
+        if self.goto_revealer.get_reveal_child():
+             self.goto_revealer.set_reveal_child(False)
+             editor = self.get_active_editor()
+             if editor:
+                 editor.view.grab_focus()
+        else:
+             self.goto_revealer.set_reveal_child(True)
+             self.goto_entry.grab_focus_without_selecting()
+             
+             # Pre-fill with current line
+             editor = self.get_active_editor()
+             if editor:
+                 ln = editor.view.buf.cursor_line + 1
+                 self.goto_entry.set_text(str(ln))
+                 self.goto_entry.select_region(0, -1)
+    
+    def get_active_editor(self):
+        """Get the editor instance of the currently selected tab."""
+        page = self.tab_view.get_selected_page()
+        if page:
+            return page.get_child()._editor
+        return None
+
+    def _create_goto_line_bar(self):
+        """Create the Goto Line bar widget."""
+        revealer = Gtk.Revealer()
+        revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_UP)
+        
+        # Container (Full width background)
+        container = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        container.add_css_class("toolbar")
+        container.set_halign(Gtk.Align.FILL)
+        container.set_margin_top(0)
+        container.set_margin_bottom(0)
+        
+        # Inner content (Centered)
+        content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        content_box.set_halign(Gtk.Align.CENTER)
+        content_box.set_hexpand(True)
+        content_box.set_margin_top(6)
+        content_box.set_margin_bottom(6)
+        
+        # Label
+        lbl = Gtk.Label(label="Go to Line")
+        lbl.add_css_class("heading")
+        content_box.append(lbl)
+        
+        # Entry
+        self.goto_entry = Gtk.Entry()
+        self.goto_entry.set_placeholder_text("Line number")
+        self.goto_entry.set_width_chars(10)
+        self.goto_entry.connect("activate", self.perform_goto_line)
+        content_box.append(self.goto_entry)
+        
+        # Button
+        btn_go = Gtk.Button(label="Go")
+        btn_go.add_css_class("suggested-action")
+        btn_go.connect("clicked", self.perform_goto_line)
+        content_box.append(btn_go)
+        
+        # Close Button
+        btn_close = Gtk.Button.new_from_icon_name("window-close-symbolic")
+        btn_close.add_css_class("flat")
+        btn_close.connect("clicked", lambda *_: self.on_goto_line(None, None))
+        content_box.append(btn_close)
+        
+        container.append(content_box)
+        
+        revealer.set_child(container)
+        self.goto_revealer = revealer
+        return revealer
+
+    def perform_goto_line(self, *args):
+        text = self.goto_entry.get_text()
+        try:
+            target_line = int(text)
+        except ValueError:
+            return # Ignore invalid
+            
+        editor = self.get_active_editor()
+        if editor:
+            # 1-based input -> 0-based index
+            line_idx = max(0, min(target_line - 1, editor.buf.total() - 1))
+            editor.view.buf.set_cursor(line_idx, 0)
+            editor.view.keep_cursor_visible()
+            editor.view.grab_focus()
+            
+        self.goto_revealer.set_reveal_child(False)
+        
+        # Actions have been moved to setup_actions()
+
 
 
 
@@ -9144,41 +9332,50 @@ class EditorWindow(Adw.ApplicationWindow):
         dialog.save(self, None, done)
     
     def save_file(self, editor, path):
-        """Save the editor buffer to a file using GIO (GTK4-safe)."""
+        """Save the editor buffer to a file using atomic save logic (safe for mmap)."""
         try:
-            # Convert path → Gio.File
-            gfile = Gio.File.new_for_path(path)
+            # 1. Write to a temporary file first
+            # We use the same directory to ensure atomic move (rename) is possible
+            import tempfile
+            dirname, basename = os.path.split(path)
             
-            print(f"\n=== DEBUG SAVE FILE ===")
-            print(f"Saving to path: {path}")
-            print(f"GFile path: {gfile.get_path()}")
-            print(f"GFile URI: {gfile.get_uri()}")
-
-            # Get text
-            total_lines = editor.buf.total()
-            lines = [editor.buf.get_line(i) for i in range(total_lines)]
-            content = "\n".join(lines)
+            # Create temp file
+            with tempfile.NamedTemporaryFile(mode='w', dir=dirname, delete=False, encoding=editor.current_encoding, newline='') as tf:
+                temp_path = tf.name
+                
+                # Editor buffer API: save_optimized(path)
+                # This bypasses the slow Python loop for unmodified chunks
+                editor.buf.save_optimized(temp_path)
             
-            print(f"Total lines: {total_lines}")
-            print(f"Content length: {len(content)} characters")
-            print(f"First 200 chars of content: {content[:200]}")
-            print(f"Encoding: {editor.current_encoding}")
+            # 2. Atomic replacement
+            os.replace(temp_path, path)
+            print(f"File saved atomically to {path} with encoding {editor.current_encoding}")
 
-            # Open output stream (atomic replace)
-            # None = no etag checking
-            stream = gfile.replace(None, False, Gio.FileCreateFlags.NONE, None)
-
-            # Encode using current encoding
-            data = content.encode(editor.current_encoding, errors="replace")
+            # 3. Reload buffer to prevent mmap Bus Error
+            # We must reload the file because the old mmap handles might be invalid 
+            # (pointing to deleted inode) or we want to ensure we are reading from new file.
             
-            print(f"Encoded data length: {len(data)} bytes")
-
-            # Write & close
-            bytes_written = stream.write_bytes(GLib.Bytes.new(data), None)
-            print(f"Bytes written: {bytes_written}")
-            stream.close(None)
+            # Save cursor and scroll state
+            cursor_line = editor.buf.cursor_line
+            cursor_col = editor.buf.cursor_col
+            scroll_x = editor.view.hadj.get_value()
+            scroll_y = editor.view.vadj.get_value()
             
-            print(f"Stream closed successfully")
+            # Reload
+            editor.buf.load_file(path, encoding=editor.current_encoding)
+            
+            # Restore cursor and scroll
+            editor.buf.cursor_line = cursor_line
+            editor.buf.cursor_col = cursor_col
+            # Note: setting cursor might trigger partial scroll, so force scroll values back if needed
+            # But line/col is most important.
+            
+            # Force view to respect the new cursor but try to keep scroll if possible
+            # Wait, load_file resets everything. Editor render loop might need a tick.
+            # We can try setting them immediately.
+            editor.view.hadj.set_value(scroll_x)
+            editor.view.vadj.set_value(scroll_y)
+            editor.view.queue_draw()
 
             # Release the untitled number if this was an untitled file being saved with a name
             if hasattr(editor, 'untitled_number') and editor.untitled_number is not None:
@@ -9194,7 +9391,6 @@ class EditorWindow(Adw.ApplicationWindow):
                  # Update syntax highlighting
                  lang = detect_language(path)
                  editor.view.buf.set_language(lang)
-                 editor.view.syntax = editor.view.buf.syntax_engine
                  editor.view.queue_draw()
             
             # Add to recent files
@@ -9215,9 +9411,6 @@ class EditorWindow(Adw.ApplicationWindow):
                                 self.update_header_title()
                             break
                     break
-
-            print(f"File saved as {path} with encoding {editor.current_encoding}")
-            print(f"=== END DEBUG ===\n")
 
         except Exception as e:
             print(f"Error saving file: {e}")
@@ -9358,35 +9551,56 @@ class EditorWindow(Adw.ApplicationWindow):
             # Enable Syntax Highlighting
             lang = detect_language(path)
             editor.view.buf.set_language(lang)
-            editor.view.syntax = editor.view.buf.syntax_engine
+            # editor.view.syntax = editor.view.buf.syntax_engine
             
             return
 
-        # Show progress bar widget
-        def on_cancel(button):
-            self.progress_bar_widget.cancelled = True
         
-        self.progress_bar_widget.start_loading(on_cancel)
+        # UI Updates for loading state
+        # Find the tab for this editor
+        current_tab = None
+        current_page = None
+        for i in range(self.tab_view.get_n_pages()):
+            page = self.tab_view.get_nth_page(i)
+            if page.get_child()._editor == editor:
+                current_tab = self.tab_bar.get_tab_for_page(page)
+                current_page = page
+                break
         
-        idx = IndexedFile(path)
+        if current_tab:
+            current_tab.set_loading(True)
         
-        def progress_callback(fraction):
+        # Progress bar
+        self.progress_bar_widget.start_loading(callback=lambda _: self._cancel_loading(current_tab))
+        
+        def check_cancel():
+            if current_tab and current_tab.cancelled:
+                return True
             if self.progress_bar_widget.cancelled:
-                return False
-            self.progress_bar_widget.update_progress(fraction)
+                return True
             return False
-        
-        def index_complete():
-            if self.progress_bar_widget.cancelled:
-                self.progress_bar_widget.finish_loading()
-                return False
-                
-            editor.buf.load(idx, emit_changed=False)
 
+        def progress_cb(frac):
+            GLib.idle_add(self.progress_bar_widget.update_progress, frac)
+
+        def load_worker():
+            try:
+                # Use VirtualBuffer's native loading with cancellation support
+                editor.buf.load_file(path, check_cancel=check_cancel, progress_callback=progress_cb)
+                GLib.idle_add(on_load_success)
+            except Exception as e:
+                # Handle cancellation or error
+                GLib.idle_add(on_load_error, e)
+        
+        def on_load_success():
+            if current_tab: current_tab.set_loading(False)
+            self.progress_bar_widget.finish_loading()
+            
+            # Standard post-load setup
             editor.view.scroll_line = 0
             editor.view.scroll_x = 0
             
-            # Clear all renderer caches for the new file
+            # Clear caches
             editor.view.renderer.wrap_cache.clear()
             editor.view.renderer.visual_line_map = []
             editor.view.renderer.total_visual_lines_cache = None
@@ -9395,60 +9609,63 @@ class EditorWindow(Adw.ApplicationWindow):
             editor.view.renderer.max_line_width = 0
             editor.view.renderer.needs_full_width_scan = True
             
-            # Enable Syntax Highlighting
+            # Syntax Highlighting
             lang = detect_language(path)
             editor.view.buf.set_language(lang)
-            editor.view.syntax = editor.view.buf.syntax_engine
             
-            # Clear optimization caches
+            # Optimization caches
             editor.view.renderer.last_ln_width = 0
             editor.view.renderer.estimated_total_cache = None
             editor.view.renderer.edits_since_cache_invalidation = 0
             
-            # Set current encoding to match the loaded file
-            editor.current_encoding = idx.encoding
+            # Encoding and Path
+            editor.current_encoding = editor.buf.current_encoding
             editor.current_file_path = path
 
-            # Trigger width scan for the new file
+            # Trigger width scan
             editor.view.file_loaded()
-            
-            # Set flag to update scrollbar on next draw
+            editor.view.queue_draw()
+                
+            # Scrollbar
             editor.view.needs_scrollbar_init = True
-
             editor.view.queue_draw()
 
             # Update tab title
-            for page in [self.tab_view.get_nth_page(i) for i in range(self.tab_view.get_n_pages())]:
-                if page.get_child()._editor == editor:
-                    self.update_tab_title(page)
-                    break
+            if current_page:
+                self.update_tab_title(current_page)
             
             # Add to recent files
             self.recent_files_manager.add(path)
             self.update_recent_files_menu()
             
-            # Hide progress bar
-            self.progress_bar_widget.finish_loading()
-            
             # Update status bar
             self.status_bar.update_for_editor(editor)
             
-            # Focus the editor
+            # Focus
             editor.view.grab_focus()
-            
-            return False
 
-        def index_in_thread():
-            try:
-                idx.index_file(progress_callback)
-                GLib.idle_add(index_complete)
-            except Exception as e:
-                print(f"Error indexing file: {e}")
-                GLib.idle_add(loading_dialog.close)
-        
-        thread = Thread(target=index_in_thread)
+        def on_load_error(e):
+            if current_tab: current_tab.set_loading(False)
+            self.progress_bar_widget.finish_loading()
+            
+            # If cancelled, maybe close the tab? User said "stop loading and close that tab"
+            if "cancelled" in str(e).lower() or (current_tab and current_tab.cancelled):
+                print(f"Load cancelled for {path}")
+                if current_page:
+                    self.perform_close_tab(current_page)
+            else:
+                print(f"Error loading file {path}: {e}")
+                # Maybe show error dialog?
+                
+        thread = Thread(target=load_worker)
         thread.daemon = True
         thread.start()
+
+    def _cancel_loading(self, tab):
+        """Handle cancel from progress bar"""
+        if tab:
+            tab.cancelled = True
+        self.progress_bar_widget.cancelled = True
 
 
 # ============================================================
@@ -9578,6 +9795,16 @@ class VirtualTextEditor(Adw.Application):
             self.css_provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
+        
+        # Set keyboard accelerators
+        self.set_accels_for_action("win.new_window", ["<Control>n"])
+        self.set_accels_for_action("win.save", ["<Control>s"])
+        self.set_accels_for_action("win.save-as", ["<Shift><Control>s"])
+        self.set_accels_for_action("win.find", ["<Control>f"])
+        self.set_accels_for_action("win.print", ["<Control>p"])
+        self.set_accels_for_action("win.fullscreen", ["F11"])
+        self.set_accels_for_action("win.goto_line", ["<Control>i"])
+        self.set_accels_for_action("win.new_tab", ["<Control>t"])
 
         win = self.props.active_window
         if not win:

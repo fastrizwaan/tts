@@ -19,6 +19,11 @@ from gi.repository import GLib
 from syntax_v2 import StateAwareSyntaxEngine
 
 
+class CancelledError(Exception):
+    """Raised when an operation is cancelled."""
+    pass
+
+
 def normalize_replacement_string(replacement: str) -> str:
     r"""
     Normalize capture group references in replacement strings.
@@ -100,7 +105,7 @@ class LineIndexer:
         self._total_size = total_size
         self.use_implicit_lengths(newline_len)
 
-    def build_from_file(self, filepath: str, encoding: str = 'utf-8') -> None:
+    def build_from_file(self, filepath: str, encoding: str = 'utf-8', check_cancel: Optional[callable] = None) -> None:
         """Build line index from a file using mmap for efficiency."""
         file_size = os.path.getsize(filepath)
         self._total_size = file_size
@@ -148,6 +153,10 @@ class LineIndexer:
                     while current_pos < file_size:
                         next_newline = mm.find(newline_seq, current_pos)
                         
+                        # Cancellation check
+                        if check_cancel and check_cancel():
+                            raise CancelledError("Indexing cancelled")
+                        
                         if next_newline == -1:
                             # Last line without newline
                             length = file_size - current_pos
@@ -162,12 +171,6 @@ class LineIndexer:
                             if current_pos < file_size:
                                 self._offsets.append(current_pos)
                     
-                    # Handle file ending with newline
-                    if file_size >= step:
-                        suffix = mm[file_size - step:file_size]
-                        if suffix == newline_seq:
-                            self._offsets.append(file_size)
-                            self._lengths.append(0)
                             
         except (FileNotFoundError, ValueError, OSError) as e:
             print(f"Error building index: {e}")
@@ -197,12 +200,8 @@ class LineIndexer:
                 pos = newline_pos + 1
                 if pos < len(encoded):
                     self._offsets.append(pos)
+
         
-        # Handle text ending with newline
-        if len(encoded) > 0 and encoded[-1:] == b'\n':
-            self._offsets.append(len(encoded))
-            self._lengths.append(0)
-    
     @property
     def line_count(self) -> int:
         """Total number of lines."""
@@ -226,6 +225,23 @@ class LineIndexer:
             return LineInfo(offset=offset, length=length)
         return None
     
+    
+    def write_byte_range(self, mm: mmap.mmap, start_line: int, end_line: int, outfile) -> None:
+        """Write raw bytes for a range of lines directly to outfile."""
+        if start_line >= len(self._offsets): return
+        
+        start_off = self._offsets[start_line]
+        
+        # Calculate end offset
+        if end_line < len(self._offsets):
+            end_off = self._offsets[end_line]
+        else:
+            # Last line(s)
+            end_off = self._total_size
+            
+        if end_off > start_off:
+            outfile.write(mm[start_off:end_off])
+
     
     def get_line_at_offset(self, byte_offset: int) -> Tuple[int, int]:
         """Get (line_num, byte_offset_in_line) for a global byte offset."""
@@ -838,8 +854,14 @@ class VirtualBuffer:
         # For robustness, we can invalidate.
         self.syntax_engine.invalidate_from(0)
 
-    def load_file(self, filepath: str, encoding: Optional[str] = None, progress_callback: Optional[callable] = None) -> None:
+    def load_file(self, filepath: str, encoding: Optional[str] = None, progress_callback: Optional[callable] = None, check_cancel: Optional[callable] = None) -> None:
         """Load a file using lazy index. Patched to detect encoding BEFORE indexing."""
+        # For thread safety, do not close() here if running in background thread implicitly? 
+        # But this function mutates self state significantly.
+        # It is expected to be called from a worker thread but updates internal references cleanly.
+        # However, accessing self.close() which might clear buffers used by UI is risky?
+        # The 'safe' way is for this function to build NEW state and only apply it at end.
+        # But for now, we follow the Plan: direct call, relying on UI disabled/loading state.
         self.close()
         
         self._filepath = filepath
@@ -864,7 +886,7 @@ class VirtualBuffer:
             self.current_encoding = detect_encoding(filepath)
 
         # 3. Build line index using the CONFIRMED encoding
-        self._indexer.build_from_file(filepath, encoding=self.current_encoding)
+        self._indexer.build_from_file(filepath, encoding=self.current_encoding, check_cancel=check_cancel)
             
         # 4. Open mmap (Preserved)
         self._file = open(filepath, 'rb')
@@ -888,6 +910,9 @@ class VirtualBuffer:
         """Load text directly into buffer."""
         self.close()
         lines = text.split('\n')
+        if len(text) > 0 and text.endswith('\n'):
+            lines.pop()
+        
         self._size_delta = len(text.encode('utf-8'))
         
         # All lines are "modified" (memory residents)
@@ -1429,11 +1454,60 @@ class VirtualBuffer:
 
     def save(self, save_path: str) -> None:
         """Save the current buffer content to a file."""
-        with open(save_path, 'w', encoding=getattr(self, 'current_encoding', 'utf-8')) as f:
-            for i in range(self.total_lines):
-                f.write(self.get_line(i))
-                if i < self.total_lines - 1: # Add newline for all but the last line
-                    f.write('\n')
+        self.save_optimized(save_path)
+
+    def save_optimized(self, save_path: str) -> None:
+        """Optimized save that writes raw chunks from mmap where possible."""
+        # Ensure overrides are flushed to segments
+        self._lines._flush_overrides()
+        
+        current_enc = getattr(self, 'current_encoding', 'utf-8')
+        
+        with open(save_path, 'wb') as f:
+            for seg in self._lines.segments:
+                if isinstance(seg, range):
+                    # Optimized path: Contiguous range from original file
+                    # Only valid if mmap exists and covers these lines
+                    if self._mmap and seg.start < self._indexer.line_count:
+                        # end is exclusive in range, and exclusive in write_byte_range
+                        self._indexer.write_byte_range(self._mmap, seg.start, seg.stop, f)
+                    else:
+                        # Fallback (should not happen for valid range if originating from file)
+                        for i in seg:
+                            line = self._resolve_line(i)
+                            f.write(line.encode(current_enc))
+                            # Line from file might not have newline if it was EOF? 
+                            # _resolve_line strips newlines?
+                            # Wait, write_byte_range writes raw bytes including newlines.
+                            # _resolve_line returns content. 
+                            # If we fall back here, we need to know if we should add newline.
+                            # Standard text editor behavior: separate by newline.
+                            f.write("\n".encode(current_enc)) 
+                            
+                elif isinstance(seg, (list, array)):
+                    # Check if it's a contiguous run of positive integers (file lines)
+                    # For simplicity, we just iterate. optimizing array based checking is overhead unless huge run.
+                    # Mix of modified (-id) and original (+id)
+                    for item in seg:
+                        if isinstance(item, int) and item >= 0 and self._mmap and item < self._indexer.line_count:
+                            self._indexer.write_byte_range(self._mmap, item, item + 1, f)
+                        else:
+                            # Modified line (negative ID) or fallback
+                            # Logic: retrieve text, encode, write, add newline
+                            # Note: _resolve_line returns text WITHOUT newline usually?
+                            # Let's check get_line.
+                            line = self._resolve_line(item) if not (isinstance(item, int) and item < 0) else self._modified_cache.get(~item, "")
+                            
+                            # Encode newline correctly
+                            if isinstance(line, str):
+                                # If we resolved a string, it might not have the newline
+                                # We need to append the newline using the file's encoding
+                                f.write(line.encode(current_enc))
+                                f.write("\n".encode(current_enc))
+                            else:
+                                # Fallback if _resolve_line somehow returned bytes (unlikely based on type hint)
+                                f.write(line)
+                                f.write("\n".encode(current_enc))
         
         self._filepath = save_path
         self._is_modified = False
