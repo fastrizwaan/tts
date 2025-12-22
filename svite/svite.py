@@ -5303,24 +5303,15 @@ class ChromeTab(Gtk.Box):
             self.close_button.set_sensitive(True)
             return
 
-        if self._is_modified:
-            if self._is_hovered:
-                # Modified + Hover: Show Close Icon
-                self.close_button.set_icon_name("cross-small-symbolic")
-                self.close_button.set_opacity(1.0)
-            else:
-                # Modified + No Hover: Show Dot (subtle)
-                self.close_button.set_icon_name("media-record-symbolic") # Dot
-                self.close_button.set_opacity(1.0)
+        if self._is_hovered:
+            # Hovered: Show Close Icon
+            self.close_button.set_icon_name("cross-small-symbolic")
+            # Keep slightly different opacity for modified/unmodified if desired, 
+            # or just use standard. Let's keep it visible.
+            self.close_button.set_opacity(1.0 if self._is_modified else 0.6)
         else:
-            if self._is_hovered:
-                # Unmodified + Hover: Show Close Icon
-                self.close_button.set_icon_name("cross-small-symbolic")
-                self.close_button.set_opacity(0.6)
-            else:
-                # Unmodified + No Hover: COMPLETELY HIDDEN
-                # allow text to be fully visible
-                self.close_button.set_opacity(0.0) 
+            # Not hovered: COMPLETELY HIDDEN
+            self.close_button.set_opacity(0.0)
                 
         # Ensure button is sensitive
         self.close_button.set_sensitive(True)
@@ -5328,6 +5319,7 @@ class ChromeTab(Gtk.Box):
     def set_modified(self, modified: bool):
         self._is_modified = modified
         self._update_close_button_state()
+        self.update_label()
         
         # Add/remove CSS class for modified state (used by close_tab detection)
         if modified:
@@ -5439,7 +5431,12 @@ class ChromeTab(Gtk.Box):
 
     def update_label(self):
         """Update the label text."""
-        self.label.set_text(self._original_title)
+        if self._is_modified:
+            safe_title = GLib.markup_escape_text(self._original_title)
+            # Use smaller font size for the dot
+            self.label.set_markup(f"<span size='smaller'>●</span> {safe_title}")
+        else:
+            self.label.set_text(self._original_title)
 
        
     def set_active(self, active):
@@ -7356,24 +7353,10 @@ class EditorWindow(Adw.ApplicationWindow):
         self.header.set_margin_bottom(0)
         
         # Use Adw.WindowTitle - it's designed for header bars and handles RTL properly
+        # Use Adw.WindowTitle - it's designed for header bars and handles RTL properly
         self.window_title = Adw.WindowTitle(title="Virtual Text Editor", subtitle="")
         
-        # Wrapper to include modified dot + window title
-        title_wrapper = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        title_wrapper.set_halign(Gtk.Align.CENTER)
-        title_wrapper.set_valign(Gtk.Align.CENTER)
-        
-        # Modified dot indicator
-        self.header_modified_dot = Gtk.DrawingArea()
-        self.header_modified_dot.set_size_request(8, 8)
-        self.header_modified_dot.add_css_class("header-modified-dot")
-        self.header_modified_dot.set_visible(False)
-        self.header_modified_dot.set_valign(Gtk.Align.CENTER)
-        
-        title_wrapper.append(self.header_modified_dot)
-        title_wrapper.append(self.window_title)
-        
-        self.header.set_title_widget(title_wrapper)
+        self.header.set_title_widget(self.window_title)
 
         #self.header.set_title_widget(self.window_title)
         toolbar_view.add_top_bar(self.header)
@@ -8691,7 +8674,6 @@ class EditorWindow(Adw.ApplicationWindow):
 
         if not editor:
             # No file open
-            self.header_modified_dot.set_visible(False)
             self.window_title.set_title("Virtual Text Editor")
             self.window_title.set_subtitle("")
             return
@@ -8704,8 +8686,7 @@ class EditorWindow(Adw.ApplicationWindow):
                 is_modified = getattr(tab, "_is_modified", False)
                 break
 
-        self.header_modified_dot.set_visible(is_modified)
-
+        prefix = "•  " if is_modified else ""
         # Title + subtitle
         if editor.current_file_path:
             filename = os.path.basename(editor.current_file_path)
@@ -8715,7 +8696,7 @@ class EditorWindow(Adw.ApplicationWindow):
             parent_dir = os.path.dirname(editor.current_file_path)
             short_parent = parent_dir.replace(home, "~")
 
-            self.window_title.set_title(filename)
+            self.window_title.set_title(f"{prefix}{filename}")
             self.window_title.set_subtitle(short_parent)
             
             # Window title: "filename - Virtual Text Editor"
