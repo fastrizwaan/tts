@@ -7840,16 +7840,23 @@ class EditorWindow(Adw.ApplicationWindow):
     
     def on_close_request(self, window):
         """Handle window close request - check for unsaved changes"""
+        # Cancel loading in all pages to prevent zombie threads
+        n_pages = self.tab_view.get_n_pages()
+        for i in range(n_pages):
+            page = self.tab_view.get_nth_page(i)
+            if page:
+                editor = page.get_child()._editor
+                if hasattr(editor, 'loading') and editor.loading:
+                    editor.cancel_loading()
+        
         # Collect all modified editors
         modified_editors = []
-        for page in [self.tab_view.get_nth_page(i) for i in range(self.tab_view.get_n_pages())]:
-            for tab in self.tab_bar.tabs:
-                if hasattr(tab, '_page') and tab._page == page:
-                    # Use the new check_modification_state helper
-                    editor = page.get_child()._editor
-                    if editor.check_modification_state():
-                        modified_editors.append(editor)
-                    break
+        for i in range(self.tab_view.get_n_pages()):
+            page = self.tab_view.get_nth_page(i)
+            editor = page.get_child()._editor
+            is_mod = editor.check_modification_state()
+            if is_mod:
+                modified_editors.append(editor)
         
         # If there are modified files, show save dialog
         if modified_editors:
@@ -7892,6 +7899,8 @@ class EditorWindow(Adw.ApplicationWindow):
                     self.destroy()
             
             self.show_save_changes_dialog(modified_editors, on_response)
+            return True
+        
         return False  # Allow close
     
     def on_theme_changed(self, style_manager, pspec):
@@ -8950,24 +8959,7 @@ class EditorWindow(Adw.ApplicationWindow):
         self.update_ui_state()
         self.update_tab_dropdown()
 
-    def on_close_request(self, *args):
-        """Handle window close request to ensure cleanup"""
-        # Cancel loading in all pages to prevent zombie threads
-        n_pages = self.tab_view.get_n_pages()
-        for i in range(n_pages):
-            page = self.tab_view.get_nth_page(i)
-            if page:
-                editor = page.get_child()._editor
-                if hasattr(editor, 'loading') and editor.loading:
-                    editor.cancel_loading()
-        
-        # Cleanup global observer
-        if self._global_observer_editor and self._global_observer_func:
-            self._global_observer_editor.remove_observer(self._global_observer_func)
-            self._global_observer_editor = None
-            self._global_observer_func = None
 
-        return False # Propagate to allow close
     
     def update_active_tab(self):
         selected_page = self.tab_view.get_selected_page()
@@ -9983,8 +9975,8 @@ class EditorWindow(Adw.ApplicationWindow):
             editor.current_file_path = path
 
             # Reset modification state and undo history
-            if hasattr(editor.buf, 'undo_stack'): editor.buf.undo_stack = []
-            if hasattr(editor.buf, 'redo_stack'): editor.buf.redo_stack = []
+            editor.view.undo_manager.clear()
+            editor.last_saved_undo_count = 0
             
             # Update UI for modification
             if current_tab:
