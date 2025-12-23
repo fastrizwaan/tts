@@ -280,16 +280,11 @@ CSS_OVERLAY_SCROLLBAR = """
     margin: 0;
     margin-right: 2px;
     opacity: 1.0;
-    background-color: mix(@headerbar_bg_color, @window_fg_color, 0.0);
-    color: @window_fg_color;
-     border-radius: 50%;
+    border-radius: 50%;
 }}
 
-.chrome-tab:hover .chrome-tab-close-button {{
-    background-color: alpha(@window_fg_color, 0.0);
-    color: @window_fg_color;
-}}
 
+/* These 3 needs to be 0.0 */
 .chrome-tab.active .chrome-tab-close-button {{
     background-color: alpha(@window_fg_color, 0.01);
     color: @window_fg_color;
@@ -297,12 +292,20 @@ CSS_OVERLAY_SCROLLBAR = """
 
 .chrome-tab.active:hover .chrome-tab-close-button {{
     background-color: alpha(@window_fg_color, 0.01);
+    color:  @window_fg_color;    
 }}
+
+.chrome-tab:hover .chrome-tab-close-button {{
+    background-color: alpha(@window_fg_color, 0.0);
+    color: @window_fg_color;
+}}
+/* These 3 needs to be 0.0 */
 
 .chrome-tab.active:hover {{
     background-color: alpha(@window_fg_color, 0.13);
     color: @window_fg_color;
 }}
+
 /* ========================
    Separators
    ======================== */
@@ -330,28 +333,35 @@ CSS_OVERLAY_SCROLLBAR = """
    Tab close button
    ======================== */
 .chrome-tab-close-button {{
-    opacity: 1;
-    background-color: alpha(@window_fg_color, 1.09);
-    margin-right:0px;
-    padding:0px;
+    min-width: 20px;
+    min-height: 20px;
+    padding: 2px;
+    margin: 0;
+    margin-right: 2px;
+    opacity: 1.0;
+    background-color: alpha(@window_fg_color, 0.13);
+    color:  @window_fg_color;
+     border-radius: 50%;
 }}
 
 
 
 .chrome-tab-close-button:hover  {{
-    opacity: 1;
-    background-color: alpha(@window_fg_color, 0.09);
+    opacity: 1.0;
+    color: @window_fg_color;
 }}
 
 .chrome-tab.active .chrome-tab-close-button:hover {{
     opacity: 1;
-    background-color: alpha(@window_fg_color, 0.09);
+    background-color: alpha(@window_fg_color, 0.13);
+    color: @window_fg_color;
+}}
+.chrome-tab .chrome-tab-close-button:hover {{
+    opacity: 1;
+    background-color: alpha(@window_fg_color, 0.13);
 }}
 
-.chrome-tab.inactive .chrome-tab-close-button:hover {{
-    opacity: 1;
-    background-color: alpha(@window_fg_color, 1);
-}}
+
 
 /* Corrected dropdown selectors - removed space after colon */
 .linked dropdown:first-child > button  {{
