@@ -155,8 +155,73 @@ class LineIndexer:
                             current_pos = 2
                             self._offsets[0] = 2  # Update start position
                     
+                        # Mixed Line Ending Support
+                    
                     while current_pos < file_size:
-                        next_newline = mm.find(newline_seq, current_pos)
+                        if step == 1:
+                            # For single-byte encodings, we must check for both \n (LF) and \r (CR)
+                            next_lf = mm.find(b'\n', current_pos)
+                            next_cr = mm.find(b'\r', current_pos)
+                            
+                            found_newline = False
+                            actual_newline_pos = -1
+                            actual_newline_len = 0
+                            
+                            if next_lf != -1 and next_cr != -1:
+                                if next_cr < next_lf:
+                                    # CR comes first
+                                    # Check if it is CRLF pair
+                                    if next_cr + 1 == next_lf:
+                                        # It is CRLF
+                                        actual_newline_pos = next_lf # End of line content (visual) is at CR usually?
+                                        # Wait, logic above: length = next_newline - current_pos
+                                        # If next_newline is the LF: length includes CR?
+                                        # Yes, existing logic handles CR stripping below.
+                                        # Let's align with existing consistent logic: point to the LAST byte of newline seq?
+                                        # Original uses `next_newline = mm.find(newline_seq)` where newline_seq is b'\n' usually.
+                                        # So next_newline points to \n.
+                                        
+                                        actual_newline_pos = next_lf
+                                        actual_newline_len = 1 # We advance past \n. What about CR?
+                                        # current_pos = next_newline + newline_len
+                                        
+                                        found_newline = True
+                                    else:
+                                        # CR alone (Classic Mac)
+                                        actual_newline_pos = next_cr
+                                        actual_newline_len = 1
+                                        found_newline = True
+                                else:
+                                    # LF comes first (Unix)
+                                    actual_newline_pos = next_lf
+                                    actual_newline_len = 1
+                                    found_newline = True
+                                    
+                            elif next_lf != -1:
+                                # Only LF found
+                                actual_newline_pos = next_lf
+                                actual_newline_len = 1
+                                found_newline = True
+                                
+                            elif next_cr != -1:
+                                # Only CR found
+                                actual_newline_pos = next_cr
+                                actual_newline_len = 1
+                                found_newline = True
+                                
+                            if not found_newline:
+                                next_newline = -1
+                            else:
+                                next_newline = actual_newline_pos
+                                # If it was CR alone, next_newline points to CR.
+                                # If it was LF alone, next_newline points to LF.
+                                # If it was CRLF, next_newline points to LF (due to next_lf logic).
+                                
+                        else:
+                            # For UTF-16, keep existing logic (assumes LF or explicit sequence)
+                            # TODO: robust mixed support for UTF-16 if needed
+                            next_newline = mm.find(newline_seq, current_pos)
+
                         
                         # Progress reporting with Time Throttling
                         # First check byte interval (cheap), then check time (expensive syscall)
@@ -181,10 +246,23 @@ class LineIndexer:
                             break
                         else:
                             length = next_newline - current_pos
+                            
+                            # Check for CR before LF (for non-UTF16)
+                            if step == 1 and next_newline > 0:
+                                # If next_newline points to LF, check if prev is CR
+                                if mm[next_newline] == 10: # LF
+                                     if mm[next_newline - 1] == 13: # 13 is CR
+                                         length -= 1
+                                # If next_newline points to CR, length is correct (CR excluded)
+                            
                             self._lengths.append(length)
                             
                             # Move past the full newline sequence
-                            current_pos = next_newline + newline_len
+                            # If CRLF: next_newline is LF. current_pos = next_newline + 1. Correct.
+                            # If LF: next_newline is LF. current_pos = next_newline + 1. Correct.
+                            # If CR: next_newline is CR. current_pos should be next_newline + 1.
+                            current_pos = next_newline + 1
+
                             if current_pos < file_size:
                                 self._offsets.append(current_pos)
                     
@@ -213,7 +291,10 @@ class LineIndexer:
                 self._lengths.append(len(encoded) - pos)
                 break
             else:
-                self._lengths.append(newline_pos - pos)
+                length = newline_pos - pos
+                if newline_pos > 0 and encoded[newline_pos-1] == 13: # 13 is CR
+                    length -= 1
+                self._lengths.append(length)
                 pos = newline_pos + 1
                 if pos < len(encoded):
                     self._offsets.append(pos)
@@ -427,6 +508,24 @@ def detect_encoding(path):
 
     # Default
     return "utf-8"
+
+def detect_line_feed(path):
+    """Detect line feed type from file content."""
+    try:
+        with open(path, 'rb') as f:
+            # Read first 4KB
+            data = f.read(4096)
+            if not data: return 'lf'
+            
+            # Simple heuristic
+            if b'\r\n' in data:
+                return 'crlf'
+            elif b'\r' in data and b'\n' not in data:
+                return 'cr'
+            else:
+                return 'lf'
+    except:
+        return 'lf'
 
 
 class SegmentedLineMap:
@@ -715,6 +814,7 @@ class VirtualBuffer:
         self.selection = Selection()
         self._suppress_notifications = 0
         self._size_delta: int = 0 # Track size changes relative to indexer
+        self.line_feed = 'lf' # Default line feed preference
 
     def set_language(self, lang):
         current_engine = self.syntax_engine
@@ -910,6 +1010,8 @@ class VirtualBuffer:
             new_indexer = LineIndexer()
             new_indexer.build_from_file(filepath, encoding=new_encoding, check_cancel=check_cancel, progress_callback=progress_callback)
             
+            new_line_feed = detect_line_feed(filepath)
+            
             # Check cancel before opening file
             if check_cancel and check_cancel():
                 return
@@ -940,6 +1042,7 @@ class VirtualBuffer:
                 self._is_modified = False
             else:
                 self.current_encoding = new_encoding
+                self.line_feed = new_line_feed
                 self._indexer = new_indexer
                 self._file = new_file
                 self._mmap = new_mmap
@@ -1516,7 +1619,14 @@ class VirtualBuffer:
         # Ensure overrides are flushed to segments
         self._lines._flush_overrides()
         
+        self._lines._flush_overrides()
+        
         current_enc = getattr(self, 'current_encoding', 'utf-8')
+        line_feed_seq = "\r\n" if getattr(self, 'line_feed', 'lf') == 'crlf' else "\n"
+        if getattr(self, 'line_feed', 'lf') == 'cr':
+             line_feed_seq = "\r"
+             
+        encoded_newline = line_feed_seq.encode(current_enc)
         
         with open(save_path, 'wb') as f:
             for seg in self._lines.segments:
@@ -1537,7 +1647,7 @@ class VirtualBuffer:
                             # _resolve_line returns content. 
                             # If we fall back here, we need to know if we should add newline.
                             # Standard text editor behavior: separate by newline.
-                            f.write("\n".encode(current_enc)) 
+                            f.write(encoded_newline) 
                             
                 elif isinstance(seg, (list, array)):
                     # Check if it's a contiguous run of positive integers (file lines)
@@ -1558,11 +1668,11 @@ class VirtualBuffer:
                                 # If we resolved a string, it might not have the newline
                                 # We need to append the newline using the file's encoding
                                 f.write(line.encode(current_enc))
-                                f.write("\n".encode(current_enc))
+                                f.write(encoded_newline)
                             else:
                                 # Fallback if _resolve_line somehow returned bytes (unlikely based on type hint)
                                 f.write(line)
-                                f.write("\n".encode(current_enc))
+                                f.write(encoded_newline)
         
         self._filepath = save_path
         self._is_modified = False

@@ -6970,6 +6970,23 @@ class EditorPage:
         # (Moved to method below)
         pass
 
+    @property
+    def line_feed(self):
+        return getattr(self.buf, 'line_feed', 'lf')
+    
+    @line_feed.setter
+    def line_feed(self, value):
+        if hasattr(self.buf, 'line_feed'):
+             self.buf.line_feed = value
+
+    @property
+    def current_encoding(self):
+        return getattr(self.buf, 'current_encoding', 'utf-8')
+        
+    @current_encoding.setter
+    def current_encoding(self, value):
+        self.buf.current_encoding = value
+
     def check_modification_state(self):
         """Check modification state based on undo history"""
         current_undo_count = self.view.undo_manager.get_undo_count()
