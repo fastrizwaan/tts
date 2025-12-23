@@ -5329,7 +5329,7 @@ class ChromeTab(Gtk.Box):
             self.close_button.set_icon_name("cross-small-symbolic")
             # Keep slightly different opacity for modified/unmodified if desired, 
             # or just use standard. Let's keep it visible.
-            self.close_button.set_opacity(1.0 if self._is_modified else 0.6)
+            self.close_button.set_opacity(1.0 if self._is_modified else 0.7)
         else:
             # Not hovered: COMPLETELY HIDDEN
             self.close_button.set_opacity(0.0)
