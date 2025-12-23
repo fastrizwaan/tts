@@ -171,6 +171,30 @@ CSS_OVERLAY_SCROLLBAR = """
     margin-bottom: 1px;
 
 }}
+.chrome-tab label {{
+    font-size: 0.9em;
+    padding-left: 10px;
+    padding-right: 15px;
+    margin-top: 1px;
+}}
+
+.chrome-tab .progress-bar {{
+    min-height: 2px;
+    margin-top: 30px; /* Position at the very bottom of the tab (32px high) */
+}}
+
+.chrome-tab .progress-bar trough {{
+    min-height: 2px;
+    background: transparent;
+    border: none;
+}}
+
+.chrome-tab .progress-bar progress {{
+    min-height: 2px;
+    background-color: alpha(@window_fg_color, 0.4);
+    border-radius: 0;
+}}
+
 .header-modified-dot{{
     min-width: 8px;
     min-height: 8px;
@@ -250,24 +274,35 @@ CSS_OVERLAY_SCROLLBAR = """
 
 /* close button specific */
 .chrome-tab .chrome-tab-close-button {{
+    min-width: 20px;
+    min-height: 20px;
     padding: 2px;
-    opacity: 0.5;
+    margin: 0;
+    margin-right: 2px;
+    opacity: 1.0;
+    background-color: mix(@headerbar_bg_color, @window_fg_color, 0.0);
     color: @window_fg_color;
+     border-radius: 50%;
 }}
 
 .chrome-tab:hover .chrome-tab-close-button {{
-    opacity: 1;
-    background-color: mix(@headerbar_bg_color, @window_fg_color, 0.15);
-    border-radius: 50%;
-}}
-
-.chrome-tab.active .chrome-tab-close-button {{
-    opacity: 1;
-    background-color: mix(@headerbar_bg_color, @window_fg_color, 0.2);
-    border-radius: 50%;
+    background-color: alpha(@window_fg_color, 0.0);
     color: @window_fg_color;
 }}
 
+.chrome-tab.active .chrome-tab-close-button {{
+    background-color: alpha(@window_fg_color, 0.01);
+    color: @window_fg_color;
+}}
+
+.chrome-tab.active:hover .chrome-tab-close-button {{
+    background-color: alpha(@window_fg_color, 0.01);
+}}
+
+.chrome-tab.active:hover {{
+    background-color: alpha(@window_fg_color, 0.13);
+    color: @window_fg_color;
+}}
 /* ========================
    Separators
    ======================== */
@@ -295,8 +330,8 @@ CSS_OVERLAY_SCROLLBAR = """
    Tab close button
    ======================== */
 .chrome-tab-close-button {{
-    opacity: 0;
-    transition: opacity 300ms ease, background-color 300ms ease;
+    opacity: 1;
+    background-color: alpha(@window_fg_color, 1.09);
     margin-right:0px;
     padding:0px;
 }}
@@ -304,14 +339,19 @@ CSS_OVERLAY_SCROLLBAR = """
 
 
 .chrome-tab-close-button:hover  {{
-    background-color: alpha(@window_fg_color, 0.2);
+    opacity: 1;
+    background-color: alpha(@window_fg_color, 0.09);
 }}
 
 .chrome-tab.active .chrome-tab-close-button:hover {{
     opacity: 1;
-    background-color: alpha(@window_fg_color, 0.2);
+    background-color: alpha(@window_fg_color, 0.09);
 }}
 
+.chrome-tab.inactive .chrome-tab-close-button:hover {{
+    opacity: 1;
+    background-color: alpha(@window_fg_color, 1);
+}}
 
 /* Corrected dropdown selectors - removed space after colon */
 .linked dropdown:first-child > button  {{
@@ -4630,54 +4670,6 @@ class VirtualTextView(Gtk.DrawingArea):
 #   PROGRESS BAR WIDGET
 # ============================================================
 
-class ProgressBarWidget(Gtk.Box):
-    """Compact progress bar with cancel button for file loading"""
-    
-    def __init__(self):
-        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.set_margin_start(12)
-        self.set_margin_end(12)
-        self.set_margin_top(2)
-        self.set_margin_bottom(2)
-        self.add_css_class("progress-bar-widget")
-        
-        # Progress bar
-        self.progress_bar = Gtk.ProgressBar()
-        self.progress_bar.set_hexpand(True)
-        self.progress_bar.set_show_text(True)
-        self.progress_bar.set_text("Loading...")
-        self.append(self.progress_bar)
-        
-        # Cancel button
-        self.cancel_button = Gtk.Button(label="Cancel")
-        self.cancel_button.add_css_class("flat")
-        self.append(self.cancel_button)
-        
-        # Initially hidden
-        self.set_visible(False)
-        
-        # Cancellation flag
-        self.cancelled = False
-    
-    def start_loading(self, callback=None):
-        """Start showing progress bar"""
-        self.cancelled = False
-        self.progress_bar.set_fraction(0.0)
-        self.progress_bar.set_text("Loading...")
-        self.set_visible(True)
-        
-        if callback:
-            self.cancel_button.connect("clicked", callback)
-    
-    def update_progress(self, fraction):
-        """Update progress (0.0 to 1.0)"""
-        self.progress_bar.set_fraction(fraction)
-        self.progress_bar.set_text(f"{int(fraction * 100)}%")
-    
-    def finish_loading(self):
-        """Hide progress bar"""
-        self.set_visible(False)
-        self.cancelled = False
 
 
 # ============================================================
@@ -5166,6 +5158,7 @@ class ChromeTab(Gtk.Box):
     __gsignals__ = {
         'close-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'activate-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'cancel-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
    
     def __init__(self, title="Untitled 1", closeable=True):
@@ -5192,7 +5185,6 @@ class ChromeTab(Gtk.Box):
         self.label.set_halign(Gtk.Align.CENTER)
         self.label.set_xalign(0.5)
         # Constrain label width strictly
-        self.label.set_max_width_chars(12)
         self.label.set_width_chars(1)
         
         self.overlay.set_child(self.label)
@@ -5221,16 +5213,24 @@ class ChromeTab(Gtk.Box):
             self.close_button.set_opacity(0)
             
             self.overlay.add_overlay(self.close_button)
+            self.overlay.set_measure_overlay(self.close_button, False)
             
-            # Spinner for loading state
+            # Spinner for loading state - START (left)
             self.spinner = Gtk.Spinner()
-            self.spinner.set_halign(Gtk.Align.END)
+            self.spinner.set_halign(Gtk.Align.START)
             self.spinner.set_valign(Gtk.Align.CENTER)
             self.spinner.set_hexpand(False)
-            self.spinner.set_margin_end(6)
-            self.spinner.set_visible(False)
-            
+            self.spinner.set_margin_start(6)
             self.overlay.add_overlay(self.spinner)
+            self.overlay.set_measure_overlay(self.spinner, False)
+            
+            # Progress bar for the tab - Thin line at the bottom
+            self.progress_bar = Gtk.ProgressBar()
+            self.progress_bar.set_valign(Gtk.Align.END)
+            self.progress_bar.add_css_class("progress-bar")
+            self.progress_bar.set_visible(False)
+            self.overlay.add_overlay(self.progress_bar)
+            self.overlay.set_measure_overlay(self.progress_bar, False)
             
             # Hover controller for the tab
             hover_controller = Gtk.EventControllerMotion()
@@ -5261,20 +5261,31 @@ class ChromeTab(Gtk.Box):
         self.add_controller(click_gesture)
         
     def set_loading(self, loading):
-        """Set loading state. If loading, show spinner and make close button explicitly visible as Cancel."""
+        """Set loading state. If loading, show spinner, progress bar and make close button explicitly visible as Cancel."""
         self.loading = loading
         if loading:
             self.cancelled = False
             self.spinner.set_visible(True)
             self.spinner.start()
+            self.progress_bar.set_visible(True)
+            self.progress_bar.set_fraction(0.0)
             # Show close button permanently during load (as cancel button)
             self.close_button.set_opacity(1)
             self.close_button.set_icon_name("process-stop-symbolic") # Use Stop icon
         else:
             self.spinner.stop()
             self.spinner.set_visible(False)
+            self.progress_bar.set_visible(False)
             self.close_button.set_icon_name("cross-small-symbolic") # Revert to Close icon
+            self.close_button.set_sensitive(True) # Ensure clickable
             self._update_close_button_state()
+
+    def update_progress(self, fraction):
+        """Update progress bar (0.0 to 1.0)"""
+        if hasattr(self, 'progress_bar'):
+            self.progress_bar.set_fraction(fraction)
+            # Optionally update tooltip or label with percentage
+            # self.set_tooltip_text(f"Loading... {int(fraction * 100)}%")
 
     def _on_hover_enter(self, controller, x, y):
         self._is_hovered = True
@@ -5412,6 +5423,7 @@ class ChromeTab(Gtk.Box):
         if self.loading:
             # Cancel loading
             self.cancelled = True
+            self.emit('cancel-requested')
             # We don't close immediately; wait for text loader to see flag
             # But the user expects feedback.
             self.spinner.stop()
@@ -5863,22 +5875,28 @@ class ChromeTabBar(Adw.WrapBox):
         total_separator_width = (effective_cols - 1) * separator_width
         available_for_tabs = available_width - total_separator_width - layout_buffer
         
-        tab_width = available_for_tabs // effective_cols
+        # Use divmod to get exact pixels and remainder
+        base_width, remainder = divmod(available_for_tabs, effective_cols)
         
-        # Final clamp to constraints
-        tab_width = max(min_tab_width, min(tab_width, max_tab_width))
-        
-        # Calculate approximation of max characters that fit
-        # usage: ~9.5px per char (Optimized), + ~12px padding (close button is overlay now)
-        reserved_inner_width = 12 
-        available_text_width = max(1, tab_width - reserved_inner_width)
-        max_chars = int(available_text_width / 9.5) # significantly more text visible now
+        # Apply width to tabs, distributing remainder to first columns
+        for i, tab in enumerate(self.tabs):
+            col_idx = i % effective_cols
+            
+            # Add 1px to the first 'remainder' columns to fill space perfectly
+            final_width = base_width + 1 if col_idx < remainder else base_width
+            
+            # Final clamp variables (safety)
+            final_width = max(min_tab_width, min(final_width, max_tab_width))
+            
+            # Recalculate max_chars per tab to ensure text ellipsize works and prevents expansion
+            # usage: ~12px per char (Conservative value to guarantee fit)
+            reserved_inner_width = 12 
+            available_text_width = max(1, final_width - reserved_inner_width)
+            max_chars = int(available_text_width / 12.0)
 
-        # Apply the same fixed width to all tabs
-        for tab in self.tabs:
             # set_size_request sets minimum size
-            # Combined with hexpand=False, and limiting label chars, this enforces exact width
-            tab.set_size_request(tab_width, 32)
+            # Combined with max_width_chars, this prevents the tab from expanding beyond its slot
+            tab.set_size_request(final_width, 32)
             if hasattr(tab, 'label'):
                 tab.label.set_max_width_chars(max_chars)
         
@@ -6869,6 +6887,39 @@ class EditorPage:
         self.default_tab_width = 4
         self.default_encoding = "utf-8"
         self.default_line_feed = "lf"
+        
+        # Loading State
+        self.loading = False
+        self.progress = 0.0
+        self.cancelled = False
+        self._observers = []
+
+    def add_observer(self, callback):
+        if callback not in self._observers:
+            self._observers.append(callback)
+
+    def remove_observer(self, callback):
+        if callback in self._observers:
+            self._observers.remove(callback)
+
+    def notify_observers(self):
+        for cb in self._observers:
+             cb(self)
+
+    def set_loading(self, loading):
+        self.loading = loading
+        if loading: 
+            self.cancelled = False
+            self.progress = 0.0
+        self.notify_observers()
+
+    def set_progress(self, progress):
+        self.progress = progress
+        self.notify_observers()
+
+    def cancel_loading(self):
+        self.cancelled = True
+        self.notify_observers()
 
 
 
@@ -7343,6 +7394,9 @@ class EditorWindow(Adw.ApplicationWindow):
         
         # Initialize recent files manager
         self.recent_files_manager = RecentFilesManager()
+        
+        # Connect close request for cleanup
+        self.connect('close-request', self.on_close_request)
 
         # Create ToolbarView
         toolbar_view = Adw.ToolbarView()
@@ -7353,10 +7407,20 @@ class EditorWindow(Adw.ApplicationWindow):
         self.header.set_margin_bottom(0)
         
         # Use Adw.WindowTitle - it's designed for header bars and handles RTL properly
-        # Use Adw.WindowTitle - it's designed for header bars and handles RTL properly
         self.window_title = Adw.WindowTitle(title="Virtual Text Editor", subtitle="")
         
-        self.header.set_title_widget(self.window_title)
+        # Wrap WindowTitle in a layout to support spinner on left
+        self.title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.title_box.set_halign(Gtk.Align.CENTER)
+        
+        # Header Spinner (for single tab global loading)
+        self.header_spinner = Gtk.Spinner()
+        self.header_spinner.set_visible(False)
+        self.title_box.append(self.header_spinner)
+        
+        self.title_box.append(self.window_title)
+        
+        self.header.set_title_widget(self.title_box)
 
         #self.header.set_title_widget(self.window_title)
         toolbar_view.add_top_bar(self.header)
@@ -7414,15 +7478,44 @@ class EditorWindow(Adw.ApplicationWindow):
         self.header.pack_end(self.tab_dropdown)
         
         
+        # Global Progress Bar (for when no tab is visible/active)
+        self.global_progress_bar = Gtk.ProgressBar()
+        self.global_progress_bar.add_css_class("global-progress")
+        self.global_progress_bar.set_visible(False)
+        self.global_progress_bar.set_vexpand(False)
+        self.global_progress_bar.set_valign(Gtk.Align.START)
+        
+        # Style for thin progress bar
+        css_provider = Gtk.CssProvider()
+        css_provider.load_from_data(b"""
+            .global-progress trough, .global-progress progress {
+                min-height: 2px;
+                min-height: 2px;
+                margin-bottom: 0px;
+                margin-top: 0px;
+                padding: 0px;
+                border: none;
+                border-radius: 0;
+            }
+        """)
+        # Fix Deprecation: use add_provider_for_display
+        Gtk.StyleContext.add_provider_for_display(
+             Gdk.Display.get_default(),
+             css_provider,
+             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+        
+        # Add to top bar
+        toolbar_view.add_top_bar(self.global_progress_bar)
+        
+        self._global_observer_editor = None
+        self._global_observer_func = None
+
         # Tab List (ChromeTabBar) as a top bar
         self.tab_bar = ChromeTabBar()
         self.tab_bar.connect('tab-reordered', self.on_tab_reordered)
         toolbar_view.add_top_bar(self.tab_bar)
         
-        # Progress bar widget (shown during file loading)
-        self.progress_bar_widget = ProgressBarWidget()
-        toolbar_view.add_top_bar(self.progress_bar_widget)
-
         # Tab View (Content)
         self.tab_view = Adw.TabView()
         self.tab_view.set_vexpand(True)
@@ -7967,7 +8060,29 @@ class EditorWindow(Adw.ApplicationWindow):
         # Connect signals
         tab.connect('activate-requested', self.on_tab_activated)
         tab.connect('close-requested', self.on_tab_close_requested)
+        # Handle cancellation request safely
+        tab.connect('cancel-requested', lambda t: editor.cancel_loading())
         
+        # Connect to EditorPage loading state
+        # Define a callback that updates the tab
+        def on_editor_state_changed(ed):
+            if not tab.get_realized(): return # Safety check
+            
+            # Loading state
+            if ed.loading != tab.loading:
+                tab.set_loading(ed.loading)
+            
+            # Progress
+            if ed.loading and tab.loading:
+                tab.update_progress(ed.progress)
+            
+        # We need to store this callback to remove it later
+        tab._editor_observer = on_editor_state_changed
+        editor.add_observer(on_editor_state_changed)
+        
+        # Initial sync
+        on_editor_state_changed(editor)
+
         self.tab_bar.add_tab(tab)
         
         # Set active state
@@ -8128,7 +8243,12 @@ class EditorWindow(Adw.ApplicationWindow):
                 app.release_untitled_number(initial_editor.untitled_number)
         
         # Remove the initial tab completely
-        new_window.tab_view.close_page(initial_page)
+        if initial_page is not None:
+            # Safe check before closing (Adwaita asserts if not in view)
+            for i in range(new_window.tab_view.get_n_pages()):
+                if new_window.tab_view.get_nth_page(i) == initial_page:
+                    new_window.tab_view.close_page(initial_page)
+                    break
         for tab in new_window.tab_bar.tabs:
             if hasattr(tab, '_page') and tab._page == initial_page:
                 new_window.tab_bar.remove_tab(tab)
@@ -8191,8 +8311,13 @@ class EditorWindow(Adw.ApplicationWindow):
                 self.tab_bar.remove_tab(tab)
                 break
         
-        # Close the original page (it's now empty, so this is fast)
-        self.tab_view.close_page(page)
+        # Close the original page if it still exists in the view
+        if page is not None:
+            # Safe check before closing (Adwaita asserts if not in view)
+            for i in range(self.tab_view.get_n_pages()):
+                if self.tab_view.get_nth_page(i) == page:
+                    self.tab_view.close_page(page)
+                    break
         
         # Update UI state in the old window to hide tab bar if only 1 tab remains
         self.update_ui_state()
@@ -8598,11 +8723,17 @@ class EditorWindow(Adw.ApplicationWindow):
     
     def perform_close_tab(self, page):
         """Actually remove the tab from the view"""
+        # Get the editor
+        editor = page.get_child()._editor
+        
+        # CRITICAL: If loading, cancel it explicitly to prevent stuck threads/callbacks
+        if getattr(editor, 'loading', False):
+            editor.cancel_loading()
+        
         # Check if untitled numbers were transferred (e.g., moved to another window)
         numbers_transferred = getattr(page, '_untitled_numbers_transferred', False)
         
-        # Get the editor and release its untitled number if it has one
-        editor = page.get_child()._editor
+        # Release its untitled number if it has one
         if hasattr(editor, 'untitled_number') and editor.untitled_number is not None:
             if not numbers_transferred:
                 print(f"[CLOSE TAB] Releasing untitled number {editor.untitled_number} for editor '{editor.get_title()}'")
@@ -8651,6 +8782,25 @@ class EditorWindow(Adw.ApplicationWindow):
         self.update_ui_state()
         self.update_tab_dropdown()
 
+    def on_close_request(self, *args):
+        """Handle window close request to ensure cleanup"""
+        # Cancel loading in all pages to prevent zombie threads
+        n_pages = self.tab_view.get_n_pages()
+        for i in range(n_pages):
+            page = self.tab_view.get_nth_page(i)
+            if page:
+                editor = page.get_child()._editor
+                if hasattr(editor, 'loading') and editor.loading:
+                    editor.cancel_loading()
+        
+        # Cleanup global observer
+        if self._global_observer_editor and self._global_observer_func:
+            self._global_observer_editor.remove_observer(self._global_observer_func)
+            self._global_observer_editor = None
+            self._global_observer_func = None
+
+        return False # Propagate to allow close
+    
     def update_active_tab(self):
         selected_page = self.tab_view.get_selected_page()
         for tab in self.tab_bar.tabs:
@@ -8666,6 +8816,57 @@ class EditorWindow(Adw.ApplicationWindow):
         n_tabs = len(self.tab_bar.tabs)
         self.tab_bar.set_visible(n_tabs > 1)
         self.update_header_title()
+        self._update_global_progress_binding()
+
+    def _update_global_progress_binding(self):
+        """Bind global progress bar to the single active editor if only 1 tab exists"""
+        if self.tab_view.get_n_pages() == 1:
+            # Single tab mode - bind info
+            page = self.tab_view.get_nth_page(0)
+            if not page: return
+            
+            editor = page.get_child()._editor
+            
+            # If already bound to this editor, do nothing
+            if self._global_observer_editor == editor:
+                return
+
+            # Unbind previous
+            if self._global_observer_editor and self._global_observer_func:
+                self._global_observer_editor.remove_observer(self._global_observer_func)
+            
+            # Method to update global bar
+            def update_global_bar(ed):
+                if ed.loading:
+                    if not self.global_progress_bar.get_visible():
+                        self.global_progress_bar.set_visible(True)
+                        self.header_spinner.set_visible(True)
+                        self.header_spinner.start()
+                    self.global_progress_bar.set_fraction(ed.progress)
+                else:
+                    self.global_progress_bar.set_visible(False)
+                    self.header_spinner.stop()
+                    self.header_spinner.set_visible(False)
+            
+            # Bind new
+            self._global_observer_editor = editor
+            self._global_observer_func = update_global_bar
+            editor.add_observer(update_global_bar)
+            
+            # Initial sync
+            update_global_bar(editor)
+            
+        else:
+            # Multiple tabs - unbind global bar
+            if self._global_observer_editor:
+                if self._global_observer_func:
+                    self._global_observer_editor.remove_observer(self._global_observer_func)
+                self._global_observer_editor = None
+                self._global_observer_func = None
+                
+            self.global_progress_bar.set_visible(False)
+            self.header_spinner.stop()
+            self.header_spinner.set_visible(False)
 
     def update_header_title(self):
         """Update header bar title and subtitle based on current tab"""
@@ -9565,21 +9766,21 @@ class EditorWindow(Adw.ApplicationWindow):
                 current_page = page
                 break
         
-        if current_tab:
-            current_tab.set_loading(True)
+        # Set status on editor object. This triggers observers (ChromeTab, GlobalBar)
+        editor.set_loading(True)
+        # Set path immediately to prevent other opens from reusing this tab
+        editor.current_file_path = path
         
-        # Progress bar
-        self.progress_bar_widget.start_loading(callback=lambda _: self._cancel_loading(current_tab))
+        # Ensure title update immediately
+        if current_tab:
+            current_tab.set_title(os.path.basename(path))
+
         
         def check_cancel():
-            if current_tab and current_tab.cancelled:
-                return True
-            if self.progress_bar_widget.cancelled:
-                return True
-            return False
+            return editor.cancelled
 
         def progress_cb(frac):
-            GLib.idle_add(self.progress_bar_widget.update_progress, frac)
+            GLib.idle_add(editor.set_progress, frac)
 
         def load_worker():
             try:
@@ -9591,8 +9792,7 @@ class EditorWindow(Adw.ApplicationWindow):
                 GLib.idle_add(on_load_error, e)
         
         def on_load_success():
-            if current_tab: current_tab.set_loading(False)
-            self.progress_bar_widget.finish_loading()
+            editor.set_loading(False)
             
             # Standard post-load setup
             editor.view.scroll_line = 0
@@ -9620,6 +9820,19 @@ class EditorWindow(Adw.ApplicationWindow):
             editor.current_encoding = editor.buf.current_encoding
             editor.current_file_path = path
 
+            # Reset modification state and undo history
+            if hasattr(editor.buf, 'undo_stack'): editor.buf.undo_stack = []
+            if hasattr(editor.buf, 'redo_stack'): editor.buf.redo_stack = []
+            
+            # Update UI for modification
+            if current_tab:
+                current_tab.remove_css_class("modified")
+                current_tab._is_modified = False 
+            
+            # Initial tab flag
+            if hasattr(editor, 'is_initial_empty_tab'):
+                editor.is_initial_empty_tab = False
+            
             # Trigger width scan
             editor.view.file_loaded()
             editor.view.queue_draw()
@@ -9643,27 +9856,38 @@ class EditorWindow(Adw.ApplicationWindow):
             editor.view.grab_focus()
 
         def on_load_error(e):
-            if current_tab: current_tab.set_loading(False)
-            self.progress_bar_widget.finish_loading()
+            editor.set_loading(False)
             
+            # Reset title if failed (unless cancelled and we keep it?)
+            # If we set current_file_path early, we must unset it on error
+            if editor.current_file_path == path:
+                editor.current_file_path = None
+                if current_tab: current_tab.set_title("Untitled")
+
             # If cancelled, maybe close the tab? User said "stop loading and close that tab"
-            if "cancelled" in str(e).lower() or (current_tab and current_tab.cancelled):
+            if "cancelled" in str(e).lower() or editor.cancelled:
                 print(f"Load cancelled for {path}")
                 if current_page:
-                    self.perform_close_tab(current_page)
+                    # Safe check before closing
+                    for i in range(self.tab_view.get_n_pages()):
+                        if self.tab_view.get_nth_page(i) == current_page:
+                            self.tab_view.close_page(current_page)
+                            break
+                    # If we opened a new tab just for this file and it cancelled, close it?
+                    # The user might have manually closed it.
+                    pass
             else:
                 print(f"Error loading file {path}: {e}")
                 # Maybe show error dialog?
-                
+        
         thread = Thread(target=load_worker)
         thread.daemon = True
         thread.start()
 
     def _cancel_loading(self, tab):
-        """Handle cancel from progress bar"""
+        """Handle cancel from tab stop button"""
         if tab:
             tab.cancelled = True
-        self.progress_bar_widget.cancelled = True
 
 
 # ============================================================
