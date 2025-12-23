@@ -451,8 +451,9 @@ CSS_OVERLAY_SCROLLBAR = """
 /* Status Bar Styling */
 .status-bar {{
     background-color: @headerbar_bg_color;
-    min-height: 28px;
-    font-size: 0.9em;
+    min-height: 20px;
+    font-size: small;
+    opacity: 0.75;
 }}
 
 .status-bar button {{
@@ -465,7 +466,7 @@ CSS_OVERLAY_SCROLLBAR = """
 }}
 
 .status-bar label {{
-    font-size: 0.9em;
+    font-size: small;
 }}
 """
 
@@ -4695,8 +4696,8 @@ class StatusBar(Gtk.Box):
         self.add_css_class("status-bar")
         self.set_margin_start(6)
         self.set_margin_end(6)
-        self.set_margin_top(2)
-        self.set_margin_bottom(2)
+        self.set_margin_top(0)
+        self.set_margin_bottom(0)
         
         # File type dropdown
         self.file_type_button = Gtk.MenuButton()
