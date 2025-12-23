@@ -2887,6 +2887,15 @@ class VirtualTextView(Gtk.DrawingArea):
         self.update_scrollbar()
         self.keep_cursor_visible()
         self.queue_draw()
+        
+        # Update modification state
+        if hasattr(self, '_editor'):
+            editor = self._editor
+            is_modified = editor.check_modification_state()
+            
+            # Notify observers
+            if editor:
+                editor.notify_observers()
 
     def on_redo_action(self):
         """Redo action handler"""
@@ -6219,6 +6228,11 @@ class FindReplaceBar(Gtk.Box):
         self.find_entry.connect("search-changed", self.on_find_field_changed)
         self.find_entry.connect("activate", self.on_find_next)
         
+        # Add key controller for Shift+Enter (Previous match)
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect("key-pressed", self.on_entry_key_pressed)
+        self.find_entry.add_controller(key_ctrl)
+        
         self.find_overlay.set_child(self.find_entry)
         
         # Matches Label (x of y)
@@ -6363,20 +6377,40 @@ class FindReplaceBar(Gtk.Box):
         else:
             self.find_entry.grab_focus()
 
-    def show_search(self):
+    def show_search(self, initial_text=None):
         self.set_visible(True)
         self.replace_box.set_visible(False)
         # self.reveal_replace_btn.set_icon_name("pan-down-symbolic")
         self.find_entry.grab_focus()
-        # Select all text in find entry
-        self.find_entry.select_region(0, -1)
         
-    def show_replace(self):
+        if initial_text:
+            self.find_entry.set_text(initial_text)
+            self.find_entry.select_region(0, -1)
+            # Perform search but DO NOT jump to first match (highlight only)
+            # We delay slightly to let the text change signal process if needed, 
+            # though set_text triggers it. 
+            # Actually search-changed will trigger _perform_search via timeout.
+            # We want to override the default behavior.
+            # The cleanest way is to let search-changed handle it but we need to tell it NOT to jump.
+            self._suppress_auto_jump = True
+        else:
+            # Select all text in find entry
+            self.find_entry.select_region(0, -1)
+            self._suppress_auto_jump = False
+        
+    def show_replace(self, initial_text=None):
         self.set_visible(True)
         self.replace_box.set_visible(True)
         # self.reveal_replace_btn.set_icon_name("pan-up-symbolic")
         self.find_entry.grab_focus() # Focus find first usually? Or replace? 
         # Usu. focus find, but show replace options.
+        
+        if initial_text:
+            self.find_entry.set_text(initial_text)
+            self.find_entry.select_region(0, -1)
+            self._suppress_auto_jump = True
+        else:
+             self._suppress_auto_jump = False
         
     def close(self, *args):
         self.set_visible(False)
@@ -6405,11 +6439,21 @@ class FindReplaceBar(Gtk.Box):
                     self.editor.view.undo_manager.redo()
                 else:
                     self.editor.view.undo_manager.undo()
+                
+                # Notify observers to update UI (modified state)
+                if self.editor:
+                    self.editor.notify_observers()
+                    
                 return True
                 
             # Ctrl+Y
             if keyval == Gdk.KEY_y or keyval == Gdk.KEY_Y:
                 self.editor.view.undo_manager.redo()
+                
+                # Notify observers
+                if self.editor:
+                    self.editor.notify_observers()
+                    
                 return True
                 
         return False
@@ -6438,10 +6482,24 @@ class FindReplaceBar(Gtk.Box):
             GLib.source_remove(self._search_timeout_id)
             self._search_timeout_id = None
 
+        # Check if we should suppress auto-jump (e.g. initiating from selection)
+        auto_jump = True
+        if hasattr(self, '_suppress_auto_jump') and self._suppress_auto_jump:
+            auto_jump = False
+            self._suppress_auto_jump = False # Reset for subsequent typing
+
         self._search_timeout_id = GLib.timeout_add(
             200,
-            lambda: self._perform_search(auto_scroll=True, auto_jump=True)
+            lambda: self._perform_search(auto_scroll=True, auto_jump=auto_jump)
         )
+        return False
+
+    def on_entry_key_pressed(self, controller, keyval, keycode, state):
+        """Handle special keys in find entry."""
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_ISO_Enter, Gdk.KEY_KP_Enter):
+            if state & Gdk.ModifierType.SHIFT_MASK:
+                self.on_find_prev()
+                return True
         return False
 
     def on_search_changed(self, *args):
@@ -6904,6 +6962,29 @@ class EditorPage:
         self.progress = 0.0
         self.cancelled = False
         self._observers = []
+        
+        # Undo State
+        self.last_saved_undo_count = 0 
+        
+        # Helper to check modification state based on undo history
+        # (Moved to method below)
+        pass
+
+    def check_modification_state(self):
+        """Check modification state based on undo history"""
+        current_undo_count = self.view.undo_manager.get_undo_count()
+        is_modified = (current_undo_count != self.last_saved_undo_count)
+        
+        # For untitled files, also check for content as a fallback
+        # This handles cases where undo count may not be updated yet
+        if not self.current_file_path and not is_modified:
+            # If there's any non-empty content, consider it modified
+            if self.buf.total() > 0:
+                first_line = self.buf.get_line(0)
+                if first_line and first_line.strip():
+                    return True
+        
+        return is_modified
 
     def add_observer(self, callback):
         if callback not in self._observers:
@@ -6935,9 +7016,58 @@ class EditorPage:
 
 
         
+    def get_content_preview_title(self):
+        """Generate a title preview from the first few lines of content"""
+        # Get first few lines (let's say first 5 lines or up to 200 chars to be safe)
+        text_preview = ""
+        total_lines = self.buf.total()
+        lines_to_read = min(5, total_lines)
+        
+        for i in range(lines_to_read):
+            line = self.buf.get_line(i)
+            text_preview += line + " "
+            if len(text_preview) > 100:
+                break
+        
+        # Normalize whitespace (tabs/newlines -> space)
+        # Use single space separator
+        text_preview = " ".join(text_preview.split())
+        
+        if not text_preview:
+            return None
+            
+        # Limit to 25 chars
+        limit = 25
+        if len(text_preview) > limit:
+            # Try to cut at word boundary
+            truncated = text_preview[:limit]
+            
+            # If the next char is a space, we can just cut cleanly
+            if len(text_preview) > limit and text_preview[limit] == ' ':
+                return truncated
+            
+            # Otherwise, avoid cutting a word in half
+            # Look for last space within the limit
+            last_space = truncated.rfind(' ')
+            
+            # If space found and it's not too early (e.g. at least 5 chars in)
+            if last_space > 5:
+                return truncated[:last_space]
+                
+            # If no space or very long first word, just truncate hard
+            return truncated
+            
+        return text_preview
+
     def get_title(self):
         if self.current_file_path:
             return os.path.basename(self.current_file_path)
+        
+        # For untitled files, try to get a content preview
+        preview = self.get_content_preview_title()
+        if preview:
+            return preview
+            
         return self.untitled_title
         
     def set_title(self, title):
@@ -7678,13 +7808,17 @@ class EditorWindow(Adw.ApplicationWindow):
             elif keyval == Gdk.KEY_f or keyval == Gdk.KEY_F:
                 page = self.tab_view.get_selected_page()
                 if page:
-                    # page.get_child() gives tab_root
-                    # tab_root._editor gives EditorPage
                     root = page.get_child()
                     if hasattr(root, '_editor'):
                         editor = root._editor
                         if editor.find_bar:
-                            editor.find_bar.show_search()
+                            # Check for selection
+                            text = None
+                            # Use correct API: buf.selection.has_selection()
+                            if hasattr(editor.view.buf, 'selection') and editor.view.buf.selection.has_selection():
+                                text = editor.view.buf.get_selected_text()
+                                
+                            editor.find_bar.show_search(initial_text=text)
                 return True
                 
             # Ctrl+H: Replace
@@ -7695,7 +7829,11 @@ class EditorWindow(Adw.ApplicationWindow):
                     if hasattr(root, '_editor'):
                         editor = root._editor
                         if editor.find_bar:
-                            editor.find_bar.show_replace()
+                            text = None
+                            if hasattr(editor.view.buf, 'selection') and editor.view.buf.selection.has_selection():
+                                text = editor.view.buf.get_selected_text()
+                                
+                            editor.find_bar.show_replace(initial_text=text)
                 return True
                 
         return False
@@ -7707,8 +7845,9 @@ class EditorWindow(Adw.ApplicationWindow):
         for page in [self.tab_view.get_nth_page(i) for i in range(self.tab_view.get_n_pages())]:
             for tab in self.tab_bar.tabs:
                 if hasattr(tab, '_page') and tab._page == page:
-                    if tab.has_css_class("modified"):
-                        editor = page.get_child()._editor
+                    # Use the new check_modification_state helper
+                    editor = page.get_child()._editor
+                    if editor.check_modification_state():
                         modified_editors.append(editor)
                     break
         
@@ -7934,6 +8073,31 @@ class EditorWindow(Adw.ApplicationWindow):
 
         # Apply settings
         self.apply_settings_to_editor(editor)
+
+        # Listen for state changes (modified state via undo/redo)
+        def on_editor_state_changed(editor_page):
+            # Update modified state UI
+            is_modified = editor_page.check_modification_state()
+            
+            # Update chrome tab
+            for tab in self.tab_bar.tabs:
+                if hasattr(tab, '_page') and tab._page == page:
+                    # Use standard method to ensure dot and state are synced
+                    tab.set_modified(is_modified)
+                    break
+            
+            # Also update the title (dynamic naming might depend on content changes that triggered this)
+            # on_buffer_changed handles title updates, but undo/redo might not trigger it in the same way 
+            # for title refresh if we are just reverting state.
+            # Actually, if we undo content, title should change too.
+            # And we need to make sure the label reflects the new state.
+            self.update_tab_title(page)
+            
+            # Update header if active
+            if self.tab_view.get_selected_page() == page:
+                self.update_header_title()
+                
+        editor.add_observer(on_editor_state_changed)
 
         return editor
 
@@ -8217,14 +8381,6 @@ class EditorWindow(Adw.ApplicationWindow):
         page = self._get_target_page(parameter)
         if not page: return
         
-        # Get the tab title and modified state from the page
-        page_title = page.get_title()
-        page_is_modified = any(
-            tab.has_css_class("modified") 
-            for tab in self.tab_bar.tabs 
-            if hasattr(tab, '_page') and tab._page == page
-        )
-        
         # Get the TabRoot which may contain splits
         tab_root = page.get_child()
         
@@ -8284,7 +8440,12 @@ class EditorWindow(Adw.ApplicationWindow):
         
         # Add the same tab_root to a new page in the new window
         new_page = new_window.tab_view.append(tab_root)
-        new_page.set_title(page_title)
+        
+        # Get the editor for the transferred page
+        editor = tab_root._editor
+        
+        # Update the new page's title based on the editor's current title
+        new_page.set_title(editor.get_title())
         
         # Use idle_add to set selected page to ensure window is ready
         def select_new_page():
@@ -8299,7 +8460,7 @@ class EditorWindow(Adw.ApplicationWindow):
         # Update modified state on the chrome tab
         for tab in new_window.tab_bar.tabs:
             if hasattr(tab, '_page') and tab._page == new_page:
-                if page_is_modified:
+                if editor.check_modification_state(): # Use the helper
                     tab.add_css_class("modified")
                 break
         
@@ -8621,12 +8782,8 @@ class EditorWindow(Adw.ApplicationWindow):
         # Get the editor for this page
         editor = page.get_child()._editor
         
-        # Check if this tab is modified
-        is_modified = False
-        for tab in self.tab_bar.tabs:
-            if hasattr(tab, '_page') and tab._page == page:
-                is_modified = tab.has_css_class("modified")
-                break
+        # Check if this tab is modified using the helper
+        is_modified = editor.check_modification_state()
         
         # If modified, show save dialog
         if is_modified:
@@ -8890,13 +9047,8 @@ class EditorWindow(Adw.ApplicationWindow):
             self.window_title.set_subtitle("")
             return
 
-        # Detect modified state from the current tab
-        is_modified = False
-        current_page = self.tab_view.get_selected_page()
-        for tab in self.tab_bar.tabs:
-            if getattr(tab, "_page", None) == current_page:
-                is_modified = getattr(tab, "_is_modified", False)
-                break
+        # Detect modified state from the current tab using the helper
+        is_modified = editor.check_modification_state()
 
         prefix = "•  " if is_modified else ""
         # Title + subtitle
@@ -8926,9 +9078,10 @@ class EditorWindow(Adw.ApplicationWindow):
                 self.window_title.set_title("Virtual Text Editor")
                 self.set_title("Virtual Text Editor")
             else:
-                # Show the actual title (Untitled 1, Untitled 2, etc.) when modified or multiple tabs
-                self.window_title.set_title(title)
-                self.set_title(f"{title} - Virtual Text Editor")
+                # Show the actual title when modified or multiple tabs
+                # Apply prefix for modification indicator
+                self.window_title.set_title(f"{prefix}{title}")
+                self.set_title(f"{prefix}{title} - Virtual Text Editor")
             
             self.window_title.set_subtitle("")
 
@@ -8940,10 +9093,8 @@ class EditorWindow(Adw.ApplicationWindow):
         path = editor.current_file_path
         
         # Get filename for tab title
-        if path:
-            filename = os.path.basename(path)
-        else:
-            filename = "Untitled"
+        # (Dynamically from editor to support content-based titles)
+        filename = editor.get_title()
         
         page.set_title(filename)
         
@@ -9389,16 +9540,9 @@ class EditorWindow(Adw.ApplicationWindow):
             if current_page:
                 editor = current_page.get_child()._editor
                 
-                # Check if current tab is modified
-                is_modified = False
-                for tab in self.tab_bar.tabs:
-                    if hasattr(tab, '_page') and tab._page == current_page:
-                        is_modified = tab.has_css_class("modified")
-                        break
-                
                 # Check if it's an empty untitled file that's unmodified
                 if (not editor.current_file_path and 
-                    not is_modified and
+                    not editor.check_modification_state() and # Use the helper
                     editor.buf.total() == 1 and 
                     len(editor.buf.get_line(0)) == 0):
                     # Replace this tab with the opened file
@@ -9495,8 +9639,18 @@ class EditorWindow(Adw.ApplicationWindow):
             # Set the filename
             dialog.set_initial_name(os.path.basename(editor.current_file_path))
         else:
-            # No current file, use a default name
-            dialog.set_initial_name("untitled.txt")
+            # No current file, try to suggest dynamic name
+            title = editor.get_title()
+            
+            # Sanitize filename (remove potentially invalid chars)
+            safe_name = "".join([c for c in title if c.isalnum() or c in (' ', '-', '_', '.')])
+            # Strip result
+            safe_name = safe_name.strip()
+            
+            if not safe_name:
+                safe_name = "untitled"
+                
+            dialog.set_initial_name(f"{safe_name}.txt")
         
         def done(dialog, result):
             try:
@@ -9602,7 +9756,10 @@ class EditorWindow(Adw.ApplicationWindow):
                  lang = detect_language(path)
                  editor.view.buf.set_language(lang)
                  editor.view.queue_draw()
-            
+        
+            # Update undo count checkpoint
+            editor.last_saved_undo_count = editor.view.undo_manager.get_undo_count()
+
             # Add to recent files
             self.recent_files_manager.add(path)
             self.update_recent_files_menu()
@@ -9644,8 +9801,16 @@ class EditorWindow(Adw.ApplicationWindow):
         # Check if this is the initial empty tab being modified
         if getattr(editor, "is_initial_empty_tab", False):
             editor.is_initial_empty_tab = False
-            # The initial tab is already named "Untitled 1", just update the header
-            self.update_header_title()
+
+        # Notify observers immediately
+        editor.notify_observers()
+        
+        # Also schedule a deferred notification to catch undo timing issues
+        # The undo command might be pushed AFTER this callback returns
+        def deferred_notify():
+            editor.notify_observers()
+            return False  # Don't repeat
+        GLib.idle_add(deferred_notify)
 
         editor.view.queue_draw()
 
@@ -9654,20 +9819,6 @@ class EditorWindow(Adw.ApplicationWindow):
         if width <= 0 or height <= 0:
             GLib.idle_add(lambda: self.on_buffer_changed(editor))
             return
-
-        # Mark the tab as modified
-        for page in [self.tab_view.get_nth_page(i) for i in range(self.tab_view.get_n_pages())]:
-            if page.get_child()._editor == editor:
-                # Update chrome tab modified status
-                for tab in self.tab_bar.tabs:
-                    if hasattr(tab, '_page') and tab._page == page:
-                        tab.set_modified(True)
-                        self.update_tab_dropdown()
-                        # Update header title if this is the active page
-                        if page == self.tab_view.get_selected_page():
-                            self.update_header_title()
-                        break
-                break
         
         # Live Search Update:
         # If the editor has an active Find Bar, trigger a re-search to update matches/count
