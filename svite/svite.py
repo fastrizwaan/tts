@@ -172,10 +172,10 @@ CSS_OVERLAY_SCROLLBAR = """
 
 }}
 .chrome-tab label {{
-    font-size: 0.9em;
-    padding-left: 10px;
-    padding-right: 15px;
+    padding-left: 0px;
+    padding-right: 0px;
     margin-top: 1px;
+    opacity: 0.9;
 }}
 
 .chrome-tab .progress-bar {{
@@ -5329,7 +5329,7 @@ class ChromeTab(Gtk.Box):
             self.close_button.set_icon_name("cross-small-symbolic")
             # Keep slightly different opacity for modified/unmodified if desired, 
             # or just use standard. Let's keep it visible.
-            self.close_button.set_opacity(1.0 if self._is_modified else 0.7)
+            self.close_button.set_opacity(1.0 if self._is_modified else 0.9)
         else:
             # Not hovered: COMPLETELY HIDDEN
             self.close_button.set_opacity(0.0)
