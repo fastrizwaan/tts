@@ -2387,3 +2387,598 @@ class VirtualBuffer:
         self.selection.set_end(new_end_ln, new_end_col)
         self.cursor_line = new_end_ln
         self.cursor_col = new_end_col
+        
+
+    def move_line_up_with_text(self):
+        """Swap current line with previous line."""
+        ln = self.cursor_line
+        if ln <= 0: return
+        
+        curr_text = self.get_line(ln)
+        prev_text = self.get_line(ln - 1)
+        
+        # We can implement this as a replace of both lines
+        # Or delete and insert. 
+        # Ideally atomic for undo? 
+        # For now, simplistic approach:
+        
+        self.replace(ln - 1, 0, ln, len(curr_text), curr_text + "\n" + prev_text)
+        self.cursor_line = ln - 1
+        
+    def move_line_down_with_text(self):
+        """Swap current line with next line."""
+        ln = self.cursor_line
+        if ln >= self.total() - 1: return
+        
+        curr_text = self.get_line(ln)
+        next_text = self.get_line(ln + 1)
+        
+        self.replace(ln, 0, ln + 1, len(next_text), next_text + "\n" + curr_text)
+        self.cursor_line = ln + 1
+
+    def move_word_left_with_text(self):
+        """Move text left: full words swap, partial selection moves 1 char (Alt+Left)"""
+        ln = self.cursor_line
+        col = self.cursor_col
+        line = self.get_line(ln)
+        
+        # Initialize tracking attributes if not present
+        if not hasattr(self, 'expected_selection'):
+            self.expected_selection = None
+        if not hasattr(self, 'last_move_was_partial'):
+            self.last_move_was_partial = False
+        
+        def is_word_separator(ch):
+            """Check if character is a word separator (space, underscore, or punctuation)"""
+            return ch in ' _' or not ch.isalnum()
+        
+        def replace_line(line_num, new_content):
+            """Helper to replace entire line content"""
+            old_line = self.get_line(line_num)
+            self.replace(line_num, 0, line_num, len(old_line), new_content, _record_undo=True)
+        
+        # Check if we have a selection
+        if self.selection.has_selection():
+            bounds = self.selection.get_bounds()
+            if bounds and bounds[0] is not None:
+                start_ln, start_col, end_ln, end_col = bounds
+                
+                # Handle multi-line selections - move character wise
+                if start_ln != end_ln:
+                    # Get selected text
+                    selected_text = self.get_selected_text()
+                    
+                    # Identify char before
+                    if start_col > 0:
+                        prev_ln = start_ln
+                        prev_col = start_col - 1
+                        char_before = self.get_line(start_ln)[start_col - 1]
+                    else:
+                        if start_ln == 0:
+                            return  # Can't move left
+                        prev_ln = start_ln - 1
+                        prev_line_content = self.get_line(prev_ln)
+                        prev_col = len(prev_line_content)
+                        char_before = '\n'
+                    
+                    # Extend selection to include char before
+                    self.selection.set_start(prev_ln, prev_col)
+                    self.selection.set_end(end_ln, end_col)
+                    
+                    # Delete extended range
+                    self.delete_selection()
+                    
+                    # Insert swapped: selected_text + char_before
+                    full_text = selected_text + char_before
+                    ins_start_ln = self.cursor_line
+                    ins_start_col = self.cursor_col
+                    
+                    self.insert(ins_start_ln, ins_start_col, full_text, _record_undo=True)
+                    
+                    # Restore selection (selected_text part)
+                    sel_lines = selected_text.split('\n')
+                    if len(sel_lines) == 1:
+                        sel_end_ln = ins_start_ln
+                        sel_end_col = ins_start_col + len(selected_text)
+                    else:
+                        sel_end_ln = ins_start_ln + len(sel_lines) - 1
+                        sel_end_col = len(sel_lines[-1])
+                    
+                    self.selection.set_start(ins_start_ln, ins_start_col)
+                    self.selection.set_end(sel_end_ln, sel_end_col)
+                    self._notify_observers()
+                    return
+                
+                selected_text = line[start_col:end_col]
+                
+                # Check if selection is full words
+                is_full_word_selection = True
+                if start_col > 0 and start_col <= len(line) and not is_word_separator(line[start_col - 1]):
+                    is_full_word_selection = False
+                if start_col < len(line) and is_word_separator(line[start_col]):
+                    is_full_word_selection = False
+                if end_col < len(line) and not is_word_separator(line[end_col]):
+                    is_full_word_selection = False
+                if end_col > 0 and end_col <= len(line) and is_word_separator(line[end_col - 1]):
+                    is_full_word_selection = False
+                
+                # Check state
+                current_bounds = (start_ln, start_col, end_ln, end_col)
+                if self.expected_selection != current_bounds:
+                    self.last_move_was_partial = False
+                if self.last_move_was_partial:
+                    is_full_word_selection = False
+
+                if is_full_word_selection:
+                    # Find previous word
+                    prev_word_end = start_col - 1
+                    while prev_word_end >= 0 and prev_word_end < len(line) and is_word_separator(line[prev_word_end]):
+                        prev_word_end -= 1
+                    prev_word_end += 1
+                    
+                    if prev_word_end == 0:
+                        # No previous word on this line - try previous line
+                        if ln == 0:
+                            return
+                        
+                        prev_ln = ln - 1
+                        while prev_ln >= 0:
+                            prev_line = self.get_line(prev_ln)
+                            prev_word_end = len(prev_line)
+                            while prev_word_end > 0 and is_word_separator(prev_line[prev_word_end - 1]):
+                                prev_word_end -= 1
+                            if prev_word_end > 0:
+                                break
+                            prev_ln -= 1
+                        
+                        if prev_ln < 0:
+                            return
+                        
+                        prev_word_start = prev_word_end
+                        while prev_word_start > 0 and not is_word_separator(prev_line[prev_word_start - 1]):
+                            prev_word_start -= 1
+                        
+                        prev_word = prev_line[prev_word_start:prev_word_end]
+                        
+                        # Update current line
+                        new_current_line = line[:start_col] + prev_word + line[end_col:]
+                        replace_line(ln, new_current_line)
+                        
+                        # Update previous line
+                        new_prev_line = prev_line[:prev_word_start] + selected_text + prev_line[prev_word_end:]
+                        replace_line(prev_ln, new_prev_line)
+                        
+                        # Update selection
+                        self.selection.set_start(prev_ln, prev_word_start)
+                        self.selection.set_end(prev_ln, prev_word_start + len(selected_text))
+                        self.cursor_line = prev_ln
+                        self.cursor_col = prev_word_start
+                        
+                        self.last_move_was_partial = False
+                        self.expected_selection = (prev_ln, prev_word_start, prev_ln, prev_word_start + len(selected_text))
+                        self._notify_observers()
+                        return
+                    
+                    prev_word_start = prev_word_end - 1
+                    while prev_word_start > 0 and prev_word_start <= len(line) and not is_word_separator(line[prev_word_start - 1]):
+                        prev_word_start -= 1
+                    
+                    prev_word = line[prev_word_start:prev_word_end]
+                    separators = line[prev_word_end:start_col]
+                    
+                    # Rebuild line with swapped text
+                    new_line = line[:prev_word_start] + selected_text + separators + prev_word + line[end_col:]
+                    replace_line(ln, new_line)
+                    
+                    # Update selection
+                    self.selection.set_start(ln, prev_word_start)
+                    self.selection.set_end(ln, prev_word_start + len(selected_text))
+                    self.cursor_col = prev_word_start
+                    
+                    self.last_move_was_partial = False
+                    self.expected_selection = (ln, prev_word_start, ln, prev_word_start + len(selected_text))
+                    self._notify_observers()
+                else:
+                    # Partial selection - character-wise movement
+                    start_line = self.get_line(start_ln)
+                    if start_col > 0:
+                        prev_ln = start_ln
+                        prev_col = start_col - 1
+                        char_before = start_line[start_col - 1]
+                    else:
+                        if start_ln == 0:
+                            return
+                        prev_ln = start_ln - 1
+                        prev_line_content = self.get_line(prev_ln)
+                        prev_col = len(prev_line_content)
+                        char_before = '\n'
+                    
+                    selected_text = self.get_selected_text()
+                    self.selection.set_start(prev_ln, prev_col)
+                    self.selection.set_end(end_ln, end_col)
+                    self.delete_selection()
+                    
+                    full_text = selected_text + char_before
+                    ins_start_ln = self.cursor_line
+                    ins_start_col = self.cursor_col
+                    
+                    self.insert(ins_start_ln, ins_start_col, full_text, _record_undo=True)
+                    
+                    sel_lines = selected_text.split('\n')
+                    if len(sel_lines) == 1:
+                        sel_end_ln = ins_start_ln
+                        sel_end_col = ins_start_col + len(selected_text)
+                    else:
+                        sel_end_ln = ins_start_ln + len(sel_lines) - 1
+                        sel_end_col = len(sel_lines[-1])
+                    
+                    self.selection.set_start(ins_start_ln, ins_start_col)
+                    self.selection.set_end(sel_end_ln, sel_end_col)
+                    self.cursor_line = sel_end_ln
+                    self.cursor_col = sel_end_col
+                    
+                    self.last_move_was_partial = True
+                    self.expected_selection = (ins_start_ln, ins_start_col, sel_end_ln, sel_end_col)
+                    self._notify_observers()
+                return
+        
+        # No selection - swap current word with previous word
+        if col > 0 and col < len(line) and is_word_separator(line[col]) and not is_word_separator(line[col - 1]):
+            word_end = col
+            word_start = col
+            while word_start > 0 and word_start - 1 < len(line) and not is_word_separator(line[word_start - 1]):
+                word_start -= 1
+        elif col >= len(line) and col > 0 and not is_word_separator(line[col - 1]):
+            word_end = col
+            word_start = col
+            while word_start > 0 and not is_word_separator(line[word_start - 1]):
+                word_start -= 1
+        elif col < len(line) and is_word_separator(line[col]):
+            return
+        elif col >= len(line):
+            return
+        else:
+            word_start = col
+            while word_start > 0 and word_start <= len(line) and not is_word_separator(line[word_start - 1]):
+                word_start -= 1
+            word_end = col
+            while word_end < len(line) and not is_word_separator(line[word_end]):
+                word_end += 1
+        
+        # Find previous word
+        prev_word_end = word_start - 1
+        while prev_word_end >= 0 and prev_word_end < len(line) and is_word_separator(line[prev_word_end]):
+            prev_word_end -= 1
+        prev_word_end += 1
+        
+        if prev_word_end == 0:
+            # No previous word - try previous line
+            if ln == 0:
+                return
+            
+            prev_ln = ln - 1
+            while prev_ln >= 0:
+                prev_line = self.get_line(prev_ln)
+                prev_word_end = len(prev_line)
+                while prev_word_end > 0 and is_word_separator(prev_line[prev_word_end - 1]):
+                    prev_word_end -= 1
+                if prev_word_end > 0:
+                    break
+                prev_ln -= 1
+            
+            if prev_ln < 0:
+                return
+            
+            prev_word_start = prev_word_end
+            while prev_word_start > 0 and not is_word_separator(prev_line[prev_word_start - 1]):
+                prev_word_start -= 1
+            
+            prev_word = prev_line[prev_word_start:prev_word_end]
+            current_word = line[word_start:word_end]
+            
+            # Update current line
+            new_current_line = line[:word_start] + prev_word + line[word_end:]
+            replace_line(ln, new_current_line)
+            
+            # Update previous line
+            new_prev_line = prev_line[:prev_word_start] + current_word + prev_line[prev_word_end:]
+            replace_line(prev_ln, new_prev_line)
+            
+            # Update cursor
+            self.cursor_line = prev_ln
+            self.cursor_col = prev_word_start + len(current_word)
+            self.selection.set_start(self.cursor_line, self.cursor_col)
+            self.selection.set_end(self.cursor_line, self.cursor_col)
+            self._notify_observers()
+            return
+        
+        prev_word_start = prev_word_end - 1
+        while prev_word_start > 0 and prev_word_start <= len(line) and not is_word_separator(line[prev_word_start - 1]):
+            prev_word_start -= 1
+        
+        current_word = line[word_start:word_end]
+        prev_word = line[prev_word_start:prev_word_end]
+        separators = line[prev_word_end:word_start]
+        
+        new_line = line[:prev_word_start] + current_word + separators + prev_word + line[word_end:]
+        replace_line(ln, new_line)
+        
+        self.cursor_col = prev_word_start
+        self.selection.set_start(ln, prev_word_start)
+        self.selection.set_end(ln, prev_word_start + len(current_word))
+        self._notify_observers()
+
+    def move_word_right_with_text(self):
+        """Move text right: full words swap, partial selection moves 1 char (Alt+Right)"""
+        ln = self.cursor_line
+        col = self.cursor_col
+        line = self.get_line(ln)
+        
+        if not hasattr(self, 'expected_selection'):
+            self.expected_selection = None
+        if not hasattr(self, 'last_move_was_partial'):
+            self.last_move_was_partial = False
+        
+        def is_word_separator(ch):
+            return ch in ' _' or not ch.isalnum()
+        
+        def replace_line(line_num, new_content):
+            old_line = self.get_line(line_num)
+            self.replace(line_num, 0, line_num, len(old_line), new_content, _record_undo=True)
+        
+        if self.selection.has_selection():
+            bounds = self.selection.get_bounds()
+            if bounds and bounds[0] is not None:
+                start_ln, start_col, end_ln, end_col = bounds
+                
+                # Handle multi-line selections
+                if start_ln != end_ln:
+                    selected_text = self.get_selected_text()
+                    
+                    last_line = self.get_line(end_ln)
+                    if end_col < len(last_line):
+                        next_ln = end_ln
+                        next_col = end_col + 1
+                        char_after = last_line[end_col]
+                    else:
+                        if end_ln >= self.total() - 1:
+                            return
+                        next_ln = end_ln + 1
+                        next_col = 0
+                        char_after = '\n'
+                    
+                    self.selection.set_end(next_ln, next_col)
+                    self.delete_selection()
+                    
+                    full_text = char_after + selected_text
+                    ins_start_ln = self.cursor_line
+                    ins_start_col = self.cursor_col
+                    
+                    self.insert(ins_start_ln, ins_start_col, full_text, _record_undo=True)
+                    
+                    char_lines = char_after.split('\n')
+                    if len(char_lines) == 1:
+                        sel_start_ln = ins_start_ln
+                        sel_start_col = ins_start_col + len(char_after)
+                    else:
+                        sel_start_ln = ins_start_ln + len(char_lines) - 1
+                        sel_start_col = len(char_lines[-1])
+                    
+                    sel_end_ln = self.cursor_line
+                    sel_end_col = self.cursor_col
+                    
+                    self.selection.set_start(sel_start_ln, sel_start_col)
+                    self.selection.set_end(sel_end_ln, sel_end_col)
+                    self._notify_observers()
+                    return
+                
+                selected_text = line[start_col:end_col]
+                
+                is_full_word_selection = True
+                if start_col > 0 and start_col <= len(line) and not is_word_separator(line[start_col - 1]):
+                    is_full_word_selection = False
+                if start_col < len(line) and is_word_separator(line[start_col]):
+                    is_full_word_selection = False
+                if end_col < len(line) and not is_word_separator(line[end_col]):
+                    is_full_word_selection = False
+                if end_col > 0 and end_col <= len(line) and is_word_separator(line[end_col - 1]):
+                    is_full_word_selection = False
+                
+                current_bounds = (start_ln, start_col, end_ln, end_col)
+                if self.expected_selection != current_bounds:
+                    self.last_move_was_partial = False
+                if self.last_move_was_partial:
+                    is_full_word_selection = False
+
+                if is_full_word_selection:
+                    # Find next word
+                    next_word_start = end_col
+                    while next_word_start < len(line) and is_word_separator(line[next_word_start]):
+                        next_word_start += 1
+                    
+                    if next_word_start == len(line):
+                        # No next word - try next line
+                        if ln >= self.total() - 1:
+                            return
+                        
+                        next_ln = ln + 1
+                        while next_ln < self.total():
+                            next_line = self.get_line(next_ln)
+                            next_word_start = 0
+                            while next_word_start < len(next_line) and is_word_separator(next_line[next_word_start]):
+                                next_word_start += 1
+                            if next_word_start < len(next_line):
+                                break
+                            next_ln += 1
+                        
+                        if next_ln >= self.total():
+                            return
+                        
+                        next_word_end = next_word_start
+                        while next_word_end < len(next_line) and not is_word_separator(next_line[next_word_end]):
+                            next_word_end += 1
+                        
+                        next_word = next_line[next_word_start:next_word_end]
+                        
+                        new_current_line = line[:start_col] + next_word + line[end_col:]
+                        replace_line(ln, new_current_line)
+                        
+                        new_next_line = next_line[:next_word_start] + selected_text + next_line[next_word_end:]
+                        replace_line(next_ln, new_next_line)
+                        
+                        self.selection.set_start(next_ln, next_word_start)
+                        self.selection.set_end(next_ln, next_word_start + len(selected_text))
+                        self.cursor_line = next_ln
+                        self.cursor_col = next_word_start + len(selected_text)
+                        
+                        self.last_move_was_partial = False
+                        self.expected_selection = (next_ln, next_word_start, next_ln, next_word_start + len(selected_text))
+                        self._notify_observers()
+                        return
+
+                    next_word_end = next_word_start
+                    while next_word_end < len(line) and not is_word_separator(line[next_word_end]):
+                        next_word_end += 1
+                    
+                    next_word = line[next_word_start:next_word_end]
+                    separators = line[end_col:next_word_start]
+                    
+                    new_line = line[:start_col] + next_word + separators + selected_text + line[next_word_end:]
+                    replace_line(ln, new_line)
+                    
+                    new_sel_start = start_col + len(next_word) + len(separators)
+                    self.selection.set_start(ln, new_sel_start)
+                    self.selection.set_end(ln, new_sel_start + len(selected_text))
+                    self.cursor_col = new_sel_start + len(selected_text)
+                    
+                    self.last_move_was_partial = False
+                    self.expected_selection = (ln, new_sel_start, ln, new_sel_start + len(selected_text))
+                    self._notify_observers()
+                else:
+                    # Partial selection - character-wise
+                    last_line = self.get_line(end_ln)
+                    if end_col < len(last_line):
+                        next_ln = end_ln
+                        next_col = end_col + 1
+                        char_after = last_line[end_col]
+                    else:
+                        if end_ln >= self.total() - 1:
+                            return
+                        next_ln = end_ln + 1
+                        next_col = 0
+                        char_after = '\n'
+                    
+                    selected_text = self.get_selected_text()
+                    self.selection.set_end(next_ln, next_col)
+                    self.delete_selection()
+                    
+                    full_text = char_after + selected_text
+                    ins_start_ln = self.cursor_line
+                    ins_start_col = self.cursor_col
+                    
+                    self.insert(ins_start_ln, ins_start_col, full_text, _record_undo=True)
+                    
+                    char_lines = char_after.split('\n')
+                    if len(char_lines) == 1:
+                        sel_start_ln = ins_start_ln
+                        sel_start_col = ins_start_col + len(char_after)
+                    else:
+                        sel_start_ln = ins_start_ln + len(char_lines) - 1
+                        sel_start_col = len(char_lines[-1])
+                    
+                    sel_end_ln = self.cursor_line
+                    sel_end_col = self.cursor_col
+                    
+                    self.selection.set_start(sel_start_ln, sel_start_col)
+                    self.selection.set_end(sel_end_ln, sel_end_col)
+                    self.cursor_line = sel_end_ln
+                    self.cursor_col = sel_end_col
+                    
+                    self.last_move_was_partial = True
+                    self.expected_selection = (sel_start_ln, sel_start_col, sel_end_ln, sel_end_col)
+                    self._notify_observers()
+                return
+        
+        # No selection - swap current word with next word
+        if col > 0 and col < len(line) and is_word_separator(line[col]) and not is_word_separator(line[col - 1]):
+            word_end = col
+            word_start = col
+            while word_start > 0 and not is_word_separator(line[word_start - 1]):
+                word_start -= 1
+        elif col >= len(line) and col > 0 and not is_word_separator(line[col - 1]):
+            word_end = col
+            word_start = col
+            while word_start > 0 and not is_word_separator(line[word_start - 1]):
+                word_start -= 1
+        elif col < len(line) and is_word_separator(line[col]):
+            return
+        elif col >= len(line):
+            return
+        else:
+            word_start = col
+            while word_start > 0 and word_start <= len(line) and not is_word_separator(line[word_start - 1]):
+                word_start -= 1
+            word_end = col
+            while word_end < len(line) and not is_word_separator(line[word_end]):
+                word_end += 1
+        
+        next_word_start = word_end
+        while next_word_start < len(line) and is_word_separator(line[next_word_start]):
+            next_word_start += 1
+        
+        if next_word_start >= len(line):
+            # No next word - try next line
+            if ln >= self.total() - 1:
+                return
+            
+            next_ln = ln + 1
+            while next_ln < self.total():
+                next_line = self.get_line(next_ln)
+                next_word_start = 0
+                while next_word_start < len(next_line) and is_word_separator(next_line[next_word_start]):
+                    next_word_start += 1
+                if next_word_start < len(next_line):
+                    break
+                next_ln += 1
+            
+            if next_ln >= self.total():
+                return
+            
+            next_word_end = next_word_start
+            while next_word_end < len(next_line) and not is_word_separator(next_line[next_word_end]):
+                next_word_end += 1
+            
+            next_word = next_line[next_word_start:next_word_end]
+            current_word = line[word_start:word_end]
+            
+            new_current_line = line[:word_start] + next_word + line[word_end:]
+            replace_line(ln, new_current_line)
+            
+            new_next_line = next_line[:next_word_start] + current_word + next_line[next_word_end:]
+            replace_line(next_ln, new_next_line)
+            
+            self.cursor_line = next_ln
+            self.cursor_col = next_word_start + len(current_word)
+            self.selection.set_start(self.cursor_line, self.cursor_col)
+            self.selection.set_end(self.cursor_line, self.cursor_col)
+            self._notify_observers()
+            return
+
+        next_word_end = next_word_start
+        while next_word_end < len(line) and not is_word_separator(line[next_word_end]):
+            next_word_end += 1
+        
+        current_word = line[word_start:word_end]
+        next_word = line[next_word_start:next_word_end]
+        separators = line[word_end:next_word_start]
+        
+        new_line = line[:word_start] + next_word + separators + current_word + line[next_word_end:]
+        replace_line(ln, new_line)
+        
+        new_cursor_col = word_start + len(next_word) + len(separators) + len(current_word)
+        self.cursor_col = new_cursor_col
+        self.selection.set_start(ln, new_cursor_col)
+        self.selection.set_end(ln, new_cursor_col)
+        self._notify_observers()
+
+        
