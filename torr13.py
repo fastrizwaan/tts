@@ -155,7 +155,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.add_column("Size", "size", self.setup_label_col, self.bind_size_col)
         self.add_column("Seeds", "seeders", self.setup_status_col, self.bind_seeders_col)
         self.add_column("Leech", "leechers", self.setup_status_col, self.bind_leechers_col)
-        self.add_column("Source", "source", self.setup_label_col, self.bind_source_col)
+        #self.add_column("Source", "source", self.setup_label_col, self.bind_source_col)
         self.add_action_column("Link")
 
         # Scrolled Window
