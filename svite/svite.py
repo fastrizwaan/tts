@@ -4655,6 +4655,19 @@ class VirtualTextView(Gtk.DrawingArea):
                      line = iter.get_line_readonly()
                      
                      base_x = ln_width + 2 - self.scroll_x
+                     
+                     # Manual RTL Alignment Calculation (MOVED UP)
+                     # If paragraph is RTL, we calculate the offset to push this line to the right edge.
+                     final_x_offset = 0
+                     line_extents = line.get_extents() # (ink, logical)
+                     
+                     if base_dir == Pango.Direction.RTL:
+                         line_width_px = line_extents[1].width / Pango.SCALE
+                         final_x_offset = viewport_w - line_width_px
+                         
+                     # Add Pango's internal logical x offset (alignment/indentation)
+                     # (Usually 0 since we forced LEFT alignment for manual positioning, but good for completeness)
+                     final_x_offset += line_extents[1].x / Pango.SCALE
 
                      # DEBUG LINES
                      # cr.set_source_rgba(1, 0, 0, 0.3)
@@ -4711,7 +4724,8 @@ class VirtualTextView(Gtk.DrawingArea):
                              
                              for r_start, r_end in flat_ranges:
                                  # r is (start_x, end_x) in Pango units
-                                 rx = base_x + r_start / Pango.SCALE
+                                 # Apply final_x_offset for alignment
+                                 rx = base_x + (r_start / Pango.SCALE) + final_x_offset
                                  rw = (r_end - r_start) / Pango.SCALE
                                  cr.rectangle(rx, current_y, rw, self.line_h)
                                  cr.fill()
@@ -4751,7 +4765,8 @@ class VirtualTextView(Gtk.DrawingArea):
                                      color = (1.0, 0.5, 0.0, 0.6) if self.current_match_idx == mi else (1.0, 1.0, 0.0, 0.4)
                                      cr.set_source_rgba(*color)
                                      for r_start, r_end in flat_ranges:
-                                         rx = base_x + r_start / Pango.SCALE
+                                         # Apply final_x_offset for alignment
+                                         rx = base_x + (r_start / Pango.SCALE) + final_x_offset
                                          rw = (r_end - r_start) / Pango.SCALE
                                          cr.rectangle(rx, current_y, rw, self.line_h)
                                          cr.fill()
@@ -4772,19 +4787,6 @@ class VirtualTextView(Gtk.DrawingArea):
                      # PangoCairo.show_layout_line draws relative to the BASELINE.
                      # We use the fixed ascent calculated from font metrics to ensure consistency with cursor
                      
-                     line_extents = line.get_extents() # (ink, logical)
-                     
-                     # Manual RTL Alignment
-                     # If paragraph is RTL, we calculate the offset to push this line to the right edge.
-                     final_x_offset = 0
-                     if base_dir == Pango.Direction.RTL:
-                         line_width_px = line_extents[1].width / Pango.SCALE
-                         # If wrapped line is shorter than viewport, push it right.
-                         # (Logic handles both full lines and short last lines correctly)
-                         final_x_offset = viewport_w - line_width_px
-                         
-                     # Add Pango's internal offset (usually 0 since we forced LEFT alignment)
-                     final_x_offset += line_extents[1].x / Pango.SCALE
                      
                      cr.move_to(base_x + final_x_offset, current_y + getattr(self, 'ascent', self.line_h * 0.8))
                      fg = getattr(self, 'text_foreground_color', (0.9, 0.9, 0.9))
