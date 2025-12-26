@@ -261,7 +261,14 @@ class LineIndexer:
                             # If CRLF: next_newline is LF. current_pos = next_newline + 1. Correct.
                             # If LF: next_newline is LF. current_pos = next_newline + 1. Correct.
                             # If CR: next_newline is CR. current_pos should be next_newline + 1.
-                            current_pos = next_newline + 1
+                            
+                            # For UTF-16 (step > 1), next_newline is START of sequence (2 bytes).
+                            # We must skip the full sequence length.
+                            advance = 1
+                            if step > 1:
+                                advance = newline_len
+                                
+                            current_pos = next_newline + advance
 
                             if current_pos < file_size:
                                 self._offsets.append(current_pos)

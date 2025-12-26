@@ -8,6 +8,7 @@ import bisect
 import re
 import json
 from enum import Enum, auto
+
 from virtual_buffer import VirtualBuffer, normalize_replacement_string
 from word_wrap import VisualLineMapper
 from syntax_v2 import StateAwareSyntaxEngine
@@ -18,8 +19,170 @@ gi.require_version("Gdk", "4.0")
 
 from gi.repository import Gtk, Adw, Gdk, GObject, Pango, PangoCairo, GLib, Gio
 
-# Global variable to track dragged tab for drag and drop
-DRAGGED_TAB = None
+# Optional: Import vitetab feature if available
+try:
+    import vitetab
+    VITETAB_AVAILABLE = True
+except ImportError:
+    VITETAB_AVAILABLE = False
+    print("Note: vitetab feature not available (vitetab.py not found)")
+    print("      Using basic tab stubs")
+
+    # StubChromeTab handles logic by proxying to the associated Adw.TabPage.
+    # It is NOT a widget itself (or at least, acts as a dummy one).
+    class StubChromeTab(GObject.Object):
+        __gsignals__ = {
+            'close-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
+            'activate-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
+            'cancel-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        }
+
+        def __init__(self, title="Untitled", closeable=True):
+            super().__init__()
+            self._title = title
+            self._page = None # Will be set by svite.py logic (hopefully) or inferred
+            self._is_modified = False
+            self.loading = False
+            # Dummy widget methods just in case external code tries to add it to generic container
+            # But in the fallback path, we won't add it to a Box, Adw.TabBar manages pages.
+            # svite calls self.tab_bar.add_tab(tab). If tab_bar is Adw.TabBar, we handle it there.
+
+        def _get_page(self):
+            return getattr(self, '_page', None)
+
+        def set_loading(self, loading): 
+            self.loading = loading
+            page = self._get_page()
+            if page:
+                page.set_loading(loading)
+
+        def update_progress(self, fraction): pass # Adw.TabPage doesn't show progress bar easily
+
+        def set_modified(self, modified): 
+            self._is_modified = modified
+            self._update_title_on_page()
+            
+            # User requested "Instead of underline" (which implies needs-attention style).
+            # So we DON'T set needs_attention, just update title.
+            # page = self._get_page()
+            # if page:
+            #    page.set_needs_attention(modified)
+
+        def set_title(self, title):
+             self._title = title
+             self._update_title_on_page()
+
+        def _update_title_on_page(self):
+             page = self._get_page()
+             if page:
+                 if self._is_modified:
+                     # Adw.TabPage title does not support markup. 
+                     # Using U+2022 BULLET '•' which is visually smaller than U+25CF '●'
+                     page.set_title(f"• {self._title}")
+                 else:
+                     page.set_title(self._title)
+
+        def get_title(self): return self._title
+        
+        def set_active(self, active): pass # Handled by Adw.TabView/TabBar
+
+        def update_label(self): pass
+        
+        def get_realized(self): return True # Pretend we are realized so updates happen
+
+        # CSS class helpers for compatibility (has_css_class, add_css_class, remove_css_class)
+        def has_css_class(self, class_name):
+            # We can check our own modified state for "modified"
+            if class_name == "modified":
+                return self._is_modified
+            return False # Stubs don't really use other classes
+
+        def add_css_class(self, class_name):
+            if class_name == "modified":
+                self.set_modified(True)
+
+        def remove_css_class(self, class_name):
+            if class_name == "modified":
+                self.set_modified(False)
+
+    def create_stub_tab_bar():
+        tab_bar = Adw.TabBar()
+        
+        # Monkey patch methods onto the instance using a helper class or direct assignment
+        # Since we can't easily add methods to a GObject instance in Python like this for GtK callbacks to work 
+        # (mostly for signals? but we don't define new signals on Adw.TabBar here except reordered which AdwTabBar doesn't use)
+        
+        # Actually svite.py expects 'tab_bar' to be the object.
+        # It calls: tab_bar.connect('tab-reordered', ...) -> Adw.TabBar doesn't have this signal.
+        # tab_bar.add_tab(tab) -> Adw.TabBar doesn't have this.
+        
+        # So we MUST wrap it or compose it.
+        # "Composition" means StubChromeTabBar IS A Gtk.Box (or similar) containing Adw.TabBar?
+        # NO, because svite.py adds it to toolbar_view.add_top_bar(self.tab_bar).
+        # Use Gtk.Box as the container.
+        
+        container = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        container.tab_bar = Adw.TabBar()
+        container.tab_bar.set_hexpand(True)
+        container.append(container.tab_bar)
+        
+        # Signal definitions for the container
+        # We need to register signal on the class, so we need a dynamic class
+        pass
+
+    # Better approach: StubChromeTabBar IS A Gtk.Box that CONTAINS a Adw.TabBar
+    # This avoids inheritance issues and allows us to provide the API svite needs.
+    class StubChromeTabBar(Gtk.Box):
+        __gsignals__ = {
+            'tab-reordered': (GObject.SignalFlags.RUN_FIRST, None, (object, int)),
+        }
+        
+        def __init__(self):
+            super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
+            self.adw_tab_bar = Adw.TabBar()
+            self.adw_tab_bar.set_hexpand(True)
+            self.append(self.adw_tab_bar)
+            
+            self.tabs = [] 
+
+        def set_view(self, view):
+            self.adw_tab_bar.set_view(view)
+
+        def add_tab(self, tab):
+            self.tabs.append(tab)
+            tab.tab_bar = self
+            # No visual add needed, Adw.TabBar tracks view
+
+        def remove_tab(self, tab):
+            if tab in self.tabs:
+                self.tabs.remove(tab)
+
+        def reorder_tab(self, tab, index): 
+            page = getattr(tab, '_page', None)
+            if page and self.adw_tab_bar.get_view():
+                 self.adw_tab_bar.get_view().reorder_page(page, index)
+            
+        def get_tab_for_page(self, page):
+            for t in self.tabs:
+                if hasattr(t, '_page') and t._page == page:
+                    return t
+            return None
+            
+        def set_tab_active(self, tab):
+            page = getattr(tab, '_page', None)
+            if page and self.adw_tab_bar.get_view():
+                self.adw_tab_bar.get_view().set_selected_page(page)
+        
+        def update_separators(self): pass
+        def update_tab_sizes(self, allocated_width=None): pass
+        def hide_separators_for_tab(self, tab): pass
+
+    class DummyVitetab:
+        ChromeTab = StubChromeTab
+        ChromeTabBar = StubChromeTabBar
+        def apply_css(self, provider): pass
+        
+    vitetab = DummyVitetab()
 
 CSS_OVERLAY_SCROLLBAR = """
 /* ===== Vertical overlay scrollbar ===== */
@@ -157,209 +320,6 @@ CSS_OVERLAY_SCROLLBAR = """
     background-color: {bg_color};
 }}
 
-/* ========================
-   Chrome Tabs
-   ======================== */
-
-.chrome-tab {{
-    background: transparent;
-    color: alpha(@window_fg_color, 0.85);
-    min-height: 32px;
-    padding-left: 0px;
-    padding-right: 0px;
-    border-radius: 9px 9px 9px 9px;
-    margin-bottom: 1px;
-
-}}
-.chrome-tab label {{
-    padding-left: 0px;
-    padding-right: 0px;
-    margin-top: 1px;
-    opacity: 0.9;
-}}
-
-.chrome-tab .progress-bar {{
-    min-height: 2px;
-    margin-top: 30px; /* Position at the very bottom of the tab (32px high) */
-}}
-
-.chrome-tab .progress-bar trough {{
-    min-height: 2px;
-    background: transparent;
-    border: none;
-}}
-
-.chrome-tab .progress-bar progress {{
-    min-height: 2px;
-    background-color: alpha(@window_fg_color, 0.4);
-    border-radius: 0;
-}}
-
-.header-modified-dot{{
-    min-width: 8px;
-    min-height: 8px;
-
-    background-color: alpha(@window_fg_color, 0.7);
-    border-radius: 4px;
-
-    margin-top: 5px;   /* vertically center inside tab */
-    margin-bottom: 5px;
-}}
-
-.modified-dot {{
-    min-width: 8px;
-    min-height: 8px;
-
-    background-color: alpha(@window_fg_color, 0.7);
-    border-radius: 4px;
-
-    margin-top: 12px;   /* vertically center inside tab */
-    margin-bottom: 12px;
-}}
-
-.chrome-tab label {{
-    font-weight: normal;
-}}
-
-.chrome-tab:hover {{
-    color: @window_fg_color;
-    background: alpha(@window_fg_color, 0.10);
-
-}}
-
-/* ACTIVE TAB (pilled) */
-.chrome-tab.active {{
-    background-color: mix(@headerbar_bg_color, @window_fg_color, 0.1);
-    color: @window_fg_color;
-}}
-
-.chrome-tab.active label {{
-    font-weight: normal;
-    opacity: 1;
-}}
-
-/* Dragging state */
-.chrome-tab.dragging {{
-    opacity: 0.5;
-}}
-
-/* Drop indicator line */
-.tab-drop-indicator {{
-    background: linear-gradient(to bottom, 
-        transparent 0%, 
-        rgba(0, 127, 255, 0.8) 20%, 
-        rgba(0, 127, 255, 1) 50%, 
-        rgba(0, 127, 255, 0.8) 80%, 
-        transparent 100%);
-    min-width: 3px;
-    border-radius: 2px;
-}}
-
-
-/* Modified marker */
-.chrome-tab.modified {{
-    font-style: normal;
-}}
-
-/* Reset all buttons inside tab (fixes size regression) */
-.chrome-tab button {{
-    background: none;
-    border: none;
-    box-shadow: none;
-    padding: 0;
-    margin: 0;
-    min-width: 0;
-    min-height: 0;
-}}
-
-/* close button specific */
-.chrome-tab .chrome-tab-close-button {{
-    min-width: 20px;
-    min-height: 20px;
-    padding: 2px;
-    margin: 0;
-    margin-right: 2px;
-    opacity: 1.0;
-    border-radius: 50%;
-}}
-
-
-/* These 3 needs to be 0.0 */
-.chrome-tab.active .chrome-tab-close-button {{
-    background-color: alpha(@window_fg_color, 0.01);
-    color: @window_fg_color;
-}}
-
-.chrome-tab.active:hover .chrome-tab-close-button {{
-    background-color: alpha(@window_fg_color, 0.01);
-    color:  @window_fg_color;    
-}}
-
-.chrome-tab:hover .chrome-tab-close-button {{
-    background-color: alpha(@window_fg_color, 0.0);
-    color: @window_fg_color;
-}}
-/* These 3 needs to be 0.0 */
-
-.chrome-tab.active:hover {{
-    background-color: alpha(@window_fg_color, 0.13);
-    color: @window_fg_color;
-}}
-
-/* ========================
-   Separators
-   ======================== */
-.chrome-tab-separator {{
-    min-width: 1px;
-    background-color: alpha(@window_fg_color, 0.15);
-    margin-top: 6px;
-    margin-bottom: 6px;
-}}
-
-.chrome-tab-separator.hidden {{
-    min-width: 0px;
-    background-color: transparent;
-}}
-.chrome-tab-separator:first-child {{
-    background-color: transparent;
-    min-width: 0;
-}}
-
-.chrome-tab-separator:last-child {{
-    background-color: transparent;
-    min-width: 0;
-}}
-/* ========================
-   Tab close button
-   ======================== */
-.chrome-tab-close-button {{
-    min-width: 20px;
-    min-height: 20px;
-    padding: 2px;
-    margin: 0;
-    margin-right: 2px;
-    opacity: 1.0;
-    background-color: alpha(@window_fg_color, 0.13);
-    color:  @window_fg_color;
-     border-radius: 50%;
-}}
-
-
-
-.chrome-tab-close-button:hover  {{
-    opacity: 1.0;
-    color: @window_fg_color;
-}}
-
-.chrome-tab.active .chrome-tab-close-button:hover {{
-    opacity: 1;
-    background-color: alpha(@window_fg_color, 0.13);
-    color: @window_fg_color;
-}}
-.chrome-tab .chrome-tab-close-button:hover {{
-    opacity: 1;
-    background-color: alpha(@window_fg_color, 0.13);
-}}
 
 
 
@@ -5164,1019 +5124,6 @@ class LoadingDialog(Adw.Window):
 
 
 
-# ============================================================
-#   CHROME TABS
-# ============================================================
-
-# Global variable for drag and drop
-DRAGGED_TAB = None
-
-class ChromeTab(Gtk.Box):
-    """A custom tab widget that behaves like Chrome tabs"""
-    _drag_in_progress = False
-
-    __gsignals__ = {
-        'close-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'activate-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'cancel-requested': (GObject.SignalFlags.RUN_FIRST, None, ()),
-    }
-   
-    def __init__(self, title="Untitled 1", closeable=True):
-        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        FIXED_H = 32
-        self.set_hexpand(False)
-        self.set_vexpand(False)
-        self.set_halign(Gtk.Align.START)  # Don't fill - use exact size from set_size_request
-        self.set_valign(Gtk.Align.CENTER)
-        self.add_css_class("chrome-tab")
-        self.set_size_request(150, FIXED_H)
-        
-        # Overlay for label and close button
-        self.overlay = Gtk.Overlay()
-        self.overlay.set_hexpand(True)
-        self.append(self.overlay)
-        
-        # Title label - main child of overlay
-        self.label = Gtk.Label()
-        self.label.set_text(title)
-        self.label.set_ellipsize(Pango.EllipsizeMode.END)
-        self.label.set_single_line_mode(True)
-        self.label.set_hexpand(True)
-        self.label.set_halign(Gtk.Align.CENTER)
-        self.label.set_xalign(0.5)
-        # Constrain label width strictly
-        self.label.set_width_chars(1)
-        
-        self.overlay.set_child(self.label)
-        
-        # State tracking
-        self._is_modified = False
-        self._is_hovered = False
-        self._is_active = False
-        self.loading = False
-        self.cancelled = False
-        
-        # Close button - overlay child
-        if closeable:
-            self.close_button = Gtk.Button()
-            self.close_button.set_icon_name("cross-small-symbolic")
-            self.close_button.add_css_class("flat")
-            self.close_button.add_css_class("chrome-tab-close-button")
-            self.close_button.set_halign(Gtk.Align.END)
-            self.close_button.set_valign(Gtk.Align.CENTER)
-            self.close_button.set_hexpand(False)
-            self.close_button.set_margin_end(6)
-            self.close_button.connect('clicked', self._on_close_clicked)
-            
-            # Hide initially (opacity 0 to keep layout if needed, or just invisible)
-            # Using set_opacity gives smoother transition possibility
-            self.close_button.set_opacity(0)
-            
-            self.overlay.add_overlay(self.close_button)
-            self.overlay.set_measure_overlay(self.close_button, False)
-            
-            # Spinner for loading state - START (left)
-            self.spinner = Gtk.Spinner()
-            self.spinner.set_halign(Gtk.Align.START)
-            self.spinner.set_valign(Gtk.Align.CENTER)
-            self.spinner.set_hexpand(False)
-            self.spinner.set_margin_start(6)
-            self.overlay.add_overlay(self.spinner)
-            self.overlay.set_measure_overlay(self.spinner, False)
-            
-            # Progress bar for the tab - Thin line at the bottom
-            self.progress_bar = Gtk.ProgressBar()
-            self.progress_bar.set_valign(Gtk.Align.END)
-            self.progress_bar.add_css_class("progress-bar")
-            self.progress_bar.set_visible(False)
-            self.overlay.add_overlay(self.progress_bar)
-            self.overlay.set_measure_overlay(self.progress_bar, False)
-            
-            # Hover controller for the tab
-            hover_controller = Gtk.EventControllerMotion()
-            hover_controller.connect("enter", self._on_hover_enter)
-            hover_controller.connect("leave", self._on_hover_leave)
-            self.add_controller(hover_controller)
-            
-            # Initial state update
-            self._update_close_button_state()
-       
-
-        self._original_title = title
-        self.tab_bar = None  # Set by ChromeTabBar
-        
-        # Dragging setup
-        drag_source = Gtk.DragSource()
-        drag_source.set_actions(Gdk.DragAction.MOVE)
-        drag_source.connect('prepare', self._on_drag_prepare)
-        drag_source.connect('drag-begin', self._on_drag_begin)
-        drag_source.connect('drag-end', self._on_drag_end)
-        self.add_controller(drag_source)
-        
-        # Explicitly claim clicks
-        click_gesture = Gtk.GestureClick()
-        click_gesture.set_button(0) # Listen to all buttons (left, middle, right)
-        click_gesture.connect('pressed', self._on_tab_pressed)
-        click_gesture.connect('released', self._on_tab_released)
-        self.add_controller(click_gesture)
-        
-    def set_loading(self, loading):
-        """Set loading state. If loading, show spinner, progress bar and make close button explicitly visible as Cancel."""
-        self.loading = loading
-        if loading:
-            self.cancelled = False
-            self.spinner.set_visible(True)
-            self.spinner.start()
-            self.progress_bar.set_visible(True)
-            self.progress_bar.set_fraction(0.0)
-            # Show close button permanently during load (as cancel button)
-            self.close_button.set_opacity(1)
-            self.close_button.set_icon_name("process-stop-symbolic") # Use Stop icon
-        else:
-            self.spinner.stop()
-            self.spinner.set_visible(False)
-            self.progress_bar.set_visible(False)
-            self.close_button.set_icon_name("cross-small-symbolic") # Revert to Close icon
-            self.close_button.set_sensitive(True) # Ensure clickable
-            self._update_close_button_state()
-
-    def update_progress(self, fraction):
-        """Update progress bar (0.0 to 1.0)"""
-        if hasattr(self, 'progress_bar'):
-            self.progress_bar.set_fraction(fraction)
-            # Optionally update tooltip or label with percentage
-            # self.set_tooltip_text(f"Loading... {int(fraction * 100)}%")
-
-    def _on_hover_enter(self, controller, x, y):
-        self._is_hovered = True
-        self._update_close_button_state()
-        
-        # Notify tab bar to hide separators
-        if self.tab_bar and hasattr(self.tab_bar, 'hide_separators_for_tab'):
-            self.tab_bar.hide_separators_for_tab(self)
-
-    def _on_hover_leave(self, controller):
-        self._is_hovered = False
-        self._update_close_button_state()
-        
-        # Notify tab bar to restore separators
-        if self.tab_bar and hasattr(self.tab_bar, 'update_separators'):
-            self.tab_bar.update_separators()
-
-    def _update_close_button_state(self):
-        if not hasattr(self, 'close_button'):
-            return
-
-        # Always show close button on active tab
-        if self._is_active:
-            self.close_button.set_icon_name("cross-small-symbolic")
-            self.close_button.set_opacity(1.0)
-            self.close_button.set_sensitive(True)
-            return
-
-        if self._is_hovered:
-            # Hovered: Show Close Icon
-            self.close_button.set_icon_name("cross-small-symbolic")
-            # Keep slightly different opacity for modified/unmodified if desired, 
-            # or just use standard. Let's keep it visible.
-            self.close_button.set_opacity(1.0 if self._is_modified else 0.9)
-        else:
-            # Not hovered: COMPLETELY HIDDEN
-            self.close_button.set_opacity(0.0)
-                
-        # Ensure button is sensitive
-        self.close_button.set_sensitive(True)
-
-    def set_modified(self, modified: bool):
-        self._is_modified = modified
-        self._update_close_button_state()
-        self.update_label()
-        
-        # Add/remove CSS class for modified state (used by close_tab detection)
-        if modified:
-            self.add_css_class("modified")
-        else:
-            self.remove_css_class("modified")
-
-       
-    def _on_tab_pressed(self, gesture, n_press, x, y):
-        # Check if click is on the close button - if so, don't claim it
-        if hasattr(self, 'close_button') and self.close_button.get_sensitive():
-            # Convert coordinates to widget-relative (GTK4 returns tuple of x, y)
-            coords = self.close_button.translate_coordinates(self, 0, 0)
-            if coords is not None:
-                widget_x, widget_y = coords
-                # Check if click is within close button bounds
-                if (widget_x <= x <= widget_x + self.close_button.get_width() and
-                    widget_y <= y <= widget_y + self.close_button.get_height()):
-                    # Don't claim - let the button handle it
-                    return
-        
-        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
-        
-        # Check for right click (button 3)
-        current_button = gesture.get_current_button()
-        if n_press == 1 and current_button == 3:
-            self._show_context_menu(x, y)
-            return
-
-        if self.tab_bar:
-            self.tab_bar.hide_separators_for_tab(self)
-
-    def _show_context_menu(self, x, y):
-        """Show context menu for the tab"""
-        if not self.tab_bar:
-            return
-            
-        # Get index of this tab
-        try:
-            tab_index = self.tab_bar.tabs.index(self)
-        except ValueError:
-            return
-
-        menu = Gio.Menu()
-        
-        # Helper to add item with string target
-        def add_item(label, action, target_str):
-            item = Gio.MenuItem.new(label, action)
-            item.set_action_and_target_value(action, GLib.Variant.new_string(target_str))
-            return item
-
-        idx_str = str(tab_index)
-
-        # Section 1: Move
-        section1 = Gio.Menu()
-        section1.append_item(add_item("Move Left", "win.tab_move_left", idx_str))
-        section1.append_item(add_item("Move Right", "win.tab_move_right", idx_str))
-        section1.append_item(add_item("Split View Horizontally", "win.tab_split_horizontal", idx_str))
-        section1.append_item(add_item("Split View Vertically", "win.tab_split_vertical", idx_str))
-        section1.append_item(add_item("Move to New Window", "win.tab_move_new_window", idx_str))
-        menu.append_section(None, section1)
-        
-        # Section 2: Close
-        section2 = Gio.Menu()
-        section2.append_item(add_item("Close Tabs to Left", "win.tab_close_left", idx_str))
-        section2.append_item(add_item("Close Tabs to Right", "win.tab_close_right", idx_str))
-        section2.append_item(add_item("Close Other Tabs", "win.tab_close_other", idx_str))
-        section2.append_item(add_item("Close", "win.tab_close", idx_str))
-        menu.append_section(None, section2)
-        
-        popover = Gtk.PopoverMenu.new_from_model(menu)
-        popover.set_parent(self)
-        popover.set_has_arrow(False)
-        
-        # Position at click
-        rect = Gdk.Rectangle()
-        rect.x = int(x)
-        rect.y = int(y)
-        rect.width = 1
-        rect.height = 1
-        popover.set_pointing_to(rect)
-        
-        popover.popup()
-
-        
-    def _on_tab_released(self, gesture, n_press, x, y):
-        self.emit('activate-requested')
-       
-    def _on_close_clicked(self, button):
-        if self.loading:
-            # Cancel loading
-            self.cancelled = True
-            self.emit('cancel-requested')
-            # We don't close immediately; wait for text loader to see flag
-            # But the user expects feedback.
-            self.spinner.stop()
-            self.close_button.set_sensitive(False)
-            return
-
-        self.emit('close-requested')
-       
-    def set_title(self, title):
-        self._original_title = title
-        self.update_label()
-       
-    def get_title(self):
-        return self._original_title
-    
-
-
-    def update_label(self):
-        """Update the label text."""
-        if self._is_modified:
-            safe_title = GLib.markup_escape_text(self._original_title)
-            # Use smaller font size for the dot
-            self.label.set_markup(f"<span size='smaller'>●</span> {safe_title}")
-        else:
-            self.label.set_text(self._original_title)
-
-       
-    def set_active(self, active):
-        self._is_active = active
-        if active:
-            self.add_css_class("active")
-        else:
-            self.remove_css_class("active")
-        
-        # Update close button visibility
-        self._update_close_button_state()
-           
-
-    
-    # Drag and drop handlers
-    def _on_drag_prepare(self, source, x, y):
-        """Prepare drag operation - return content provider with tab object"""
-        # Prevent concurrent drags
-        if ChromeTab._drag_in_progress:
-            return None
-        
-        # Pass the ChromeTab object directly
-        return Gdk.ContentProvider.new_for_value(self)
-    
-    def _on_drag_begin(self, source, drag):
-        """Called when drag begins - set visual feedback"""
-        global DRAGGED_TAB
-        
-        # Prevent concurrent drags
-        if ChromeTab._drag_in_progress:
-            drag.drop_done(False)
-            return
-        
-        ChromeTab._drag_in_progress = True
-        DRAGGED_TAB = self
-        self.drag_success = False  # Track if drag was successful
-        
-        # Add a CSS class for visual feedback
-        self.add_css_class("dragging")
-        
-        # Create drag icon from the tab widget
-        paintable = Gtk.WidgetPaintable.new(self)
-        source.set_icon(paintable, 0, 0)
-    
-    def _on_drag_end(self, source, drag, delete_data):
-        """Called when drag ends - cleanup and handle cross-window transfer"""
-        global DRAGGED_TAB
-        
-        # Reset drag success flag for next drag
-        had_success = getattr(self, 'drag_success', False)
-        self.drag_success = False
-        
-        # Check if tab was already transferred (e.g. by drop handler)
-        was_transferred = getattr(self, 'was_transferred', False)
-        self.was_transferred = False
-        
-        # Clean up visual state
-        DRAGGED_TAB = None
-        self.remove_css_class("dragging")
-        
-        # Schedule cleanup of drag lock after a delay to ensure all operations complete
-        def cleanup_drag_lock():
-            ChromeTab._drag_in_progress = False
-            return False
-        
-        GLib.timeout_add(100, cleanup_drag_lock)  # 100ms delay
-        
-        if was_transferred:
-            return
-
-        # If drag was successful and cross-window, close the source tab
-        # Only close if it was a CROSS-WINDOW drag (tab_bar changed)
-        if had_success:
-            # Check if this was actually a cross-window transfer
-            # by checking if the tab is still in its original tab_bar
-            if self.tab_bar and self not in self.tab_bar.tabs:
-                # Tab was removed from original bar = cross-window transfer
-                # The drop handler already took care of closing the source tab
-                pass
-            # If tab is still in tab_bar, it was just reordered within same window
-            # Don't do anything - normal reordering handled it
-            return
-        
-        # If drag was NOT successful (dropped on nothing), check if dropped outside window
-        # But only if we still have a valid tab_bar reference
-        if not self.tab_bar or self not in self.tab_bar.tabs:
-            # Tab is detached or invalid, don't try to process further
-            return
-        
-        # Find the window that owns this tab
-        window = None
-        parent = self.tab_bar.get_parent()
-        while parent:
-            if isinstance(parent, Adw.ApplicationWindow):
-                window = parent
-                break
-            parent = parent.get_parent()
-        
-        if not window:
-            return
-        
-        # Use idle_add to defer the window check to avoid GTK state issues
-        def check_outside_window():
-            # Get seat and pointer
-            try:
-                seat = Gdk.Display.get_default().get_default_seat()
-                if not seat:
-                    return False
-                
-                pointer = seat.get_pointer()
-                if not pointer:
-                    return False
-                
-                # Get window surface and coordinates
-                surface = window.get_surface()
-                if not surface:
-                    return False
-                
-                # Check if outside
-                # On Wayland, get_device_position returns False if pointer is not over surface
-                found, x, y, mask = surface.get_device_position(pointer)
-                
-                is_outside = False
-                if not found:
-                    is_outside = True
-                else:
-                    # Even if found, check bounds (in case of grab)
-                    width = window.get_width()
-                    height = window.get_height()
-                    if x < 0 or y < 0 or x > width or y > height:
-                        is_outside = True
-                
-                if is_outside:
-                    # It is outside!
-                    # Trigger move to new window
-                    if self.tab_bar and self in self.tab_bar.tabs:
-                        idx = self.tab_bar.tabs.index(self)
-                        window.activate_action('win.tab_move_new_window', GLib.Variant.new_string(str(idx)))
-                
-            except Exception as e:
-                print(f"Error checking window bounds: {e}")
-            
-            return False
-        
-        # Defer the check to let GTK clean up drag state
-        GLib.timeout_add(50, check_outside_window)  # 50ms delay
-
-
-
-class ChromeTabBar(Adw.WrapBox):
-    """
-    Chrome-like tab bar with correct separator model.
-    separators[i] is BEFORE tab[i]
-    and there is one final separator after last tab.
-    """
-
-    __gsignals__ = {
-        'tab-reordered': (GObject.SignalFlags.RUN_FIRST, None, (object, int)),
-    }
-
-    def __init__(self):
-        super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
-
-        self.set_margin_start(6)
-        self.set_margin_top(0)
-        self.set_margin_bottom(0)
-        self.set_child_spacing(0)
-
-        self.tabs = []
-        self.separators = []   # separator BEFORE each tab + 1 final separator
-        
-        # Drop indicator for drag and drop
-        self.drop_indicator = Gtk.Box()
-        self.drop_indicator.set_size_request(3, 24)
-        self.drop_indicator.add_css_class("tab-drop-indicator")
-        self.drop_indicator.set_visible(False)
-        self.drop_indicator_position = -1
-
-        # Create initial left separator (this one will be hidden)
-        first_sep = Gtk.Box()
-        first_sep.set_size_request(1, 1)
-        first_sep.add_css_class("chrome-tab-separator")
-        self.append(first_sep)
-        self.separators.append(first_sep)
-        
-        # Setup drop target on the tab bar itself
-        # Accept ChromeTab objects directly
-        drop_target = Gtk.DropTarget.new(ChromeTab, Gdk.DragAction.MOVE)
-        drop_target.connect('drop', self._on_tab_bar_drop)
-        drop_target.connect('motion', self._on_tab_bar_motion)
-        drop_target.connect('leave', self._on_tab_bar_leave)
-        self.add_controller(drop_target)
-        
-        # Connect to size allocation to update tab widths dynamically
-        self.connect('notify::visible', self._on_visibility_changed)
-        
-        # Connect to size-allocate to update tabs when layout changes
-        # This ensures tabs recalculate when the tab bar is resized
-        self._size_allocate_handler_id = None
-        self._setup_size_allocate_handler()
-        
-    def add_tab(self, tab):
-        idx = len(self.tabs)
-
-        # Insert tab AFTER separator[idx]
-        before_sep = self.separators[idx]
-        self.insert_child_after(tab, before_sep)
-
-        # Insert separator AFTER the tab
-        new_sep = Gtk.Box()
-        new_sep.set_size_request(1, 1)
-        new_sep.add_css_class("chrome-tab-separator")
-        self.insert_child_after(new_sep, tab)
-
-        # update internal lists
-        self.tabs.append(tab)
-        self.separators.insert(idx + 1, new_sep)
-        
-        # Set tab_bar reference for drag and drop
-        tab.tab_bar = self
-        tab.separator = new_sep
-
-        # Immediate update of separators and sizes
-        self.update_separators()
-        
-        # Pre-calculate and apply size immediately to avoid "pop"
-        # Use last known width if current allocation is 0 (e.g. during init)
-        current_width = self.get_width()
-        if current_width <= 0 and hasattr(self, '_last_allocated_width'):
-            current_width = self._last_allocated_width
-            
-        if current_width > 0:
-            # Re-run full update logic immediately, passing known width
-            self.update_tab_sizes(allocated_width=current_width)
-        else:
-            # Fallback for very first render if no width known yet
-            # forcing a reasonable default based on window size guess or just allow layout to happen
-            GLib.idle_add(self.update_tab_sizes)
-        
-        # Update window UI state (visibility of tab bar)
-        window = self.get_ancestor(Adw.ApplicationWindow)
-        if window and hasattr(window, 'update_ui_state'):
-            window.update_ui_state()
-
-        GLib.timeout_add(50, self.update_tab_sizes)
-
-
-    def remove_tab(self, tab):
-        if tab not in self.tabs:
-            return
-
-        idx = self.tabs.index(tab)
-
-        # Remove tab widget
-        self.remove(tab)
-
-        # Remove separator AFTER this tab
-        sep = self.separators[idx + 1]
-        self.remove(sep)
-        del self.separators[idx + 1]
-
-        # Keep separator[0] (always exists)
-        self.tabs.remove(tab)
-
-        self.update_separators()
-        
-        # Update tab sizes immediately with a small delay
-        GLib.timeout_add(50, self.update_tab_sizes)
-    
-        # Update window UI state (visibility of tab bar)
-        window = self.get_ancestor(Adw.ApplicationWindow)
-        if window and hasattr(window, 'update_ui_state'):
-            window.update_ui_state()
-
-    def set_tab_active(self, tab):
-        for t in self.tabs:
-            t.set_active(t is tab)
-
-        # update separators *immediately*
-        self.update_separators()
-
-    def _hide_pair(self, i):
-        """Hide left + right separators for tab[i]."""
-
-        # Hide left separator if not first tab
-        if i > 0:
-            self.separators[i].add_css_class("hidden")
-
-        # Hide right separator if not last tab
-        if i + 1 < len(self.separators) - 1:
-            self.separators[i + 1].add_css_class("hidden")
-
-    def get_tab_for_page(self, page):
-        """Get ChromeTab associated with a given Adw.TabView page"""
-        for tab in self.tabs:
-            if hasattr(tab, '_page') and tab._page == page:
-                return tab
-        return None
-
-    def hide_separators_for_tab(self, tab):
-        """Immediately hide separators around this tab (used on press)"""
-        if tab in self.tabs:
-            i = self.tabs.index(tab)
-            self._hide_pair(i)
-    
-    def reorder_tab(self, tab, new_index):
-        """Reorder a tab to a new position"""
-        if tab not in self.tabs:
-            return
-        
-        old_index = self.tabs.index(tab)
-        if old_index == new_index:
-            return
-        
-        # Get the separator associated with this tab
-        tab_separator = tab.separator
-        
-        # Remove from old position in list
-        self.tabs.pop(old_index)
-        
-        # Insert at new position in list
-        self.tabs.insert(new_index, tab)
-        
-        # Reorder widgets in the WrapBox
-        if new_index == 0:
-            anchor = self.separators[0]
-        else:
-            prev_tab = self.tabs[new_index - 1]
-            anchor = prev_tab.separator
-        
-        self.reorder_child_after(tab, anchor)
-        self.reorder_child_after(tab_separator, tab)
-        
-        # Rebuild separator list to match new tab order
-        self.separators = [self.separators[0]] + [t.separator for t in self.tabs]
-        
-        # Update separators
-        self.update_separators()
-        
-        # Emit signal to notify parent
-        self.emit('tab-reordered', tab, new_index)
-
-    def update_separators(self):
-        # Reset all
-        for sep in self.separators:
-            sep.remove_css_class("hidden")
-
-        # Hide edge separators permanently
-        if self.separators:
-            self.separators[0].add_css_class("hidden")
-            if len(self.separators) > 1:
-                self.separators[-1].add_css_class("hidden")
-
-        # Hide separator at the end of every row
-        allocated_width = self.get_width()
-        if allocated_width > 0:
-            margin_start = 6
-            available_width = allocated_width - margin_start
-            cols, _, _, _ = self._calculate_grid_cols(available_width)
-            
-            # If we have multiple rows, hide the separator at the end of each row
-            # Separators are indexed such that separators[i+1] is after tab[i]
-            # So if a row has 'cols' tabs, the separator after tab[cols-1] is index cols
-            if cols > 0:
-                for i in range(cols, len(self.separators), cols):
-                    if i < len(self.separators):
-                        self.separators[i].add_css_class("hidden")
-
-        # Hide around active tab
-        for i, tab in enumerate(self.tabs):
-            if tab.has_css_class("active"):
-                self._hide_pair(i)
-    
-    def _calculate_grid_cols(self, available_width):
-        """Calculate number of effective columns based on available width"""
-        min_tab_width = 150  # Updated to 150 as requested
-        max_tab_width = 4000
-        separator_width = 1
-        
-        # Calculate how many tabs can fit per row at minimum width (Theoretical Capacity)
-        capacity_per_row = (available_width + separator_width) // (min_tab_width + separator_width)
-        if capacity_per_row < 1:
-            capacity_per_row = 1
-            
-        # Determine effective columns: use actual tab count, but don't exceed capacity
-        num_tabs = len(self.tabs)
-        effective_cols = min(num_tabs, capacity_per_row)
-        if effective_cols < 1: 
-            effective_cols = 1
-            
-        return effective_cols, separator_width, min_tab_width, max_tab_width
-
-    def update_tab_sizes(self, allocated_width=None):
-        """Update tab sizes to fill the window width perfectly with no gaps"""
-        if not self.tabs:
-            return False
-        
-        # Get the actual allocated width of the tab bar if not provided
-        if allocated_width is None:
-            allocated_width = self.get_width()
-        
-        if allocated_width <= 0:
-            return False
-        
-        # Calculate available width for tabs
-        # Account for margin_start only - use all available space
-        margin_start = 6
-        buffer = 0  # No buffer - use all available space
-        available_width = allocated_width - margin_start - buffer
-        
-        if available_width <= 0:
-            return False
-        
-        effective_cols, separator_width, min_tab_width, max_tab_width = self._calculate_grid_cols(available_width)
-        
-        # Now calculate the exact width needed to fill the row using effective_cols
-        # Formula: N tabs + N-1 separators (visible). 
-        # But we previously hide first/last. Let's assume N-1 separators consume space.
-        # separator overhead = (effective_cols - 1) * separator_width
-        # But for safety, let's subtract ample buffer to prevent subpixel wrapping issues.
-        
-        layout_buffer = 4  # Reverted buffer as active tab margins were removed
-        
-        total_separator_width = (effective_cols - 1) * separator_width
-        available_for_tabs = available_width - total_separator_width - layout_buffer
-        
-        # Use divmod to get exact pixels and remainder
-        base_width, remainder = divmod(available_for_tabs, effective_cols)
-        
-        # Apply width to tabs, distributing remainder to first columns
-        for i, tab in enumerate(self.tabs):
-            col_idx = i % effective_cols
-            
-            # Add 1px to the first 'remainder' columns to fill space perfectly
-            final_width = base_width + 1 if col_idx < remainder else base_width
-            
-            # Final clamp variables (safety)
-            final_width = max(min_tab_width, min(final_width, max_tab_width))
-            
-            # Recalculate max_chars per tab to ensure text ellipsize works and prevents expansion
-            # usage: ~12px per char (Conservative value to guarantee fit)
-            reserved_inner_width = 12 
-            available_text_width = max(1, final_width - reserved_inner_width)
-            max_chars = int(available_text_width / 12.0)
-
-            # set_size_request sets minimum size
-            # Combined with max_width_chars, this prevents the tab from expanding beyond its slot
-            tab.set_size_request(final_width, 32)
-            if hasattr(tab, 'label'):
-                tab.label.set_max_width_chars(max_chars)
-        
-        # Ensure separators are updated (e.g. if columns changed)
-        self.update_separators()
-        
-        return False
-    
-    def _on_visibility_changed(self, widget, param):
-        """Handle visibility changes to update tab sizes"""
-        if self.get_visible():
-            GLib.idle_add(self.update_tab_sizes)
-    
-    def _setup_size_allocate_handler(self):
-        """Setup periodic monitoring of tab bar width"""
-        self._last_allocated_width = 0
-        # Check tab bar width every 200ms and update if changed
-        GLib.timeout_add(200, self._check_tab_bar_width)
-        
-    def _check_tab_bar_width(self):
-        """Periodically check if tab bar width changed and update tab sizes"""
-        current_width = self.get_width()
-        
-        if current_width != self._last_allocated_width and current_width > 0:
-            self._last_allocated_width = current_width
-            self.update_tab_sizes()
-        
-        return True  # Continue periodic checks
-    
-    def _calculate_drop_position(self, x, y):
-        """Calculate the drop position based on mouse X and Y coordinates"""
-        # Group tabs by row
-        rows = {}
-        for i, tab in enumerate(self.tabs):
-            success, bounds = tab.compute_bounds(self)
-            if not success:
-                continue
-                
-            # Use the middle Y of the tab to identify the row
-            mid_y = bounds.origin.y + bounds.size.height / 2
-            
-            # Find matching row (simple clustering)
-            found_row = False
-            for row_y in rows:
-                if abs(row_y - mid_y) < bounds.size.height / 2:
-                    rows[row_y].append((i, tab))
-                    found_row = True
-                    break
-            if not found_row:
-                rows[mid_y] = [(i, tab)]
-        
-        # Sort rows by Y coordinate
-        sorted_row_ys = sorted(rows.keys())
-        
-        # Find which row the mouse is in
-        target_row_y = None
-        for row_y in sorted_row_ys:
-            # Check if Y is within this row's vertical bounds (approx)
-            # We assume standard height for all tabs
-            if abs(y - row_y) < 20: # 20 is roughly half height
-                target_row_y = row_y
-                break
-        
-        # If no row matched, check if we are below the last row
-        if target_row_y is None:
-            if not sorted_row_ys:
-                return len(self.tabs)
-            if y > sorted_row_ys[-1] + 20:
-                return len(self.tabs)
-            # If above first row, return 0
-            if y < sorted_row_ys[0] - 20:
-                return 0
-            # If between rows, find the closest one
-            closest_y = min(sorted_row_ys, key=lambda ry: abs(y - ry))
-            target_row_y = closest_y
-
-        # Now find position within the target row
-        row_tabs = rows[target_row_y]
-        
-        for i, tab in row_tabs:
-            success, bounds = tab.compute_bounds(self)
-            if not success:
-                continue
-                
-            tab_center = bounds.origin.x + bounds.size.width / 2
-            
-            if x < tab_center:
-                return i
-        
-        # If past the last tab in this row, return index after the last tab in this row
-        last_idx_in_row = row_tabs[-1][0]
-        return last_idx_in_row + 1
-    
-    def _show_drop_indicator(self, position):
-        """Show the drop indicator line at the specified position"""
-        if position == self.drop_indicator_position:
-            return
-        
-        # Remove indicator from old position
-        if self.drop_indicator.get_parent():
-            self.remove(self.drop_indicator)
-        
-        self.drop_indicator_position = position
-        
-        # Insert indicator at new position
-        if position == 0:
-            self.insert_child_after(self.drop_indicator, self.separators[0])
-        elif position < len(self.tabs):
-            self.insert_child_after(self.drop_indicator, self.separators[position])
-        else:
-            if len(self.separators) > len(self.tabs):
-                self.insert_child_after(self.drop_indicator, self.separators[-1])
-        
-        self.drop_indicator.set_visible(True)
-    
-    def _hide_drop_indicator(self):
-        """Hide the drop indicator"""
-        self.drop_indicator.set_visible(False)
-        if self.drop_indicator.get_parent():
-            self.remove(self.drop_indicator)
-        self.drop_indicator_position = -1
-    
-    def _on_tab_bar_motion(self, target, x, y):
-        """Handle drag motion over the tab bar"""
-        position = self._calculate_drop_position(x, y)
-        self._show_drop_indicator(position)
-        return Gdk.DragAction.MOVE
-    
-    def _on_tab_bar_leave(self, target):
-        """Handle drag leaving the tab bar"""
-        self._hide_drop_indicator()
-        self.update_separators()
-    
-    def _on_tab_bar_drop(self, target, value, x, y):
-        """Handle drop on the tab bar - supports same-window and cross-window tab drops"""
-        global DRAGGED_TAB
-        
-        # Prevent processing if drag is being finalized
-        if not ChromeTab._drag_in_progress:
-            return False
-        
-        # We now expect a ChromeTab object directly
-        if not isinstance(value, ChromeTab):
-            return False
-            
-        dragged_tab = value
-        
-        # Get target window
-        target_window = None
-        parent = self.get_parent()
-        while parent:
-            if isinstance(parent, Adw.ApplicationWindow):
-                target_window = parent
-                break
-            parent = parent.get_parent()
-        
-        if not target_window:
-            return False
-            
-        # Check if this is a cross-window drag (tab is from another tab bar)
-        if dragged_tab.tab_bar != self:
-            # Cross-window drop
-            drop_position = self._calculate_drop_position(x, y)
-            
-            # Get source window BEFORE removing tab from bar
-            source_window = None
-            if dragged_tab.tab_bar:
-                source_window = dragged_tab.tab_bar.get_ancestor(Adw.ApplicationWindow)
-            
-            # Reparent the tab
-            # 1. Remove from source tab bar
-            if dragged_tab.tab_bar:
-                dragged_tab.tab_bar.remove_tab(dragged_tab)
-            
-            # 2. Add to this tab bar at the correct position
-            # We need to insert it, but add_tab appends. 
-            # So we append then reorder.
-            self.add_tab(dragged_tab)
-            
-            # Mark drag as successful so source doesn't try to close it again
-            dragged_tab.drag_success = True
-            
-            # Reorder to drop position
-            # Note: add_tab puts it at the end, so index is len-1
-            current_index = len(self.tabs) - 1
-            if current_index != drop_position:
-                self.reorder_tab(dragged_tab, drop_position)
-            
-            # 3. Transfer the EditorPage
-            if source_window and source_window != target_window and hasattr(dragged_tab, '_page'):
-                # Mark as transferred so _on_drag_end doesn't try to close it
-                dragged_tab.was_transferred = True
-                
-                # Switch signal connections from source window to target window
-                if source_window:
-                    try:
-                        dragged_tab.disconnect_by_func(source_window.on_tab_activated)
-                        dragged_tab.disconnect_by_func(source_window.on_tab_close_requested)
-                    except Exception as e:
-                        print(f"Error disconnecting signals: {e}")
-                
-                dragged_tab.connect('activate-requested', target_window.on_tab_activated)
-                dragged_tab.connect('close-requested', target_window.on_tab_close_requested)
-
-                page = getattr(dragged_tab, '_page', None)
-                if page:
-                    # Transfer page to target window's tab view
-                    # IMPORTANT: transfer_page returns the NEW Adw.TabPage belonging to the target view
-                    new_page = source_window.tab_view.transfer_page(page, target_window.tab_view, drop_position)
-                    
-                    # Update the tab's page reference immediately
-                    if new_page:
-                        dragged_tab._page = new_page
-                        
-                        # Ensure the page is selected in the new window
-                        def select_page():
-                            if new_page.get_selected_page() != new_page:
-                                 target_window.tab_view.set_selected_page(new_page)
-                            return False
-                        GLib.idle_add(select_page)
-                else:
-                    print("Error: dragged_tab has no _page")
-                    return False
-            
-            # 4. Activate the tab
-            self.set_tab_active(dragged_tab)
-            dragged_tab.emit('activate-requested')
-            
-            # Mark drag as successful
-            if DRAGGED_TAB:
-                DRAGGED_TAB.drag_success = True
-                
-            self._hide_drop_indicator()
-            return True
-        
-        # Same-window drag
-        if dragged_tab not in self.tabs:
-            return False
-        
-        # Calculate drop position
-        drop_position = self._calculate_drop_position(x, y)
-        
-        # Get current position of dragged tab
-        current_position = self.tabs.index(dragged_tab)
-        
-        # Adjust drop position if dragging from before the drop point
-        if current_position < drop_position:
-            drop_position -= 1
-        
-        # Reorder the tab
-        if current_position != drop_position:
-            self.reorder_tab(dragged_tab, drop_position)
-        
-        # Mark drag as successful
-        dragged_tab.drag_success = True
-        
-        # Hide indicator
-        self._hide_drop_indicator()
-        
-        return True
 
 
 # ============================================================
@@ -7669,8 +6616,8 @@ class EditorWindow(Adw.ApplicationWindow):
         self._global_observer_editor = None
         self._global_observer_func = None
 
-        # Tab List (ChromeTabBar) as a top bar
-        self.tab_bar = ChromeTabBar()
+        # Tab List (vitetab.ChromeTabBar) as a top bar
+        self.tab_bar = vitetab.ChromeTabBar()
         self.tab_bar.connect('tab-reordered', self.on_tab_reordered)
         toolbar_view.add_top_bar(self.tab_bar)
         
@@ -7680,6 +6627,13 @@ class EditorWindow(Adw.ApplicationWindow):
         self.tab_view.set_hexpand(True)
         self.tab_view.connect("notify::selected-page", self.on_page_selection_changed)
         toolbar_view.set_content(self.tab_view)
+        
+        # Connect Adw.TabBar fallback if used
+        if isinstance(self.tab_bar, Adw.TabBar):
+             self.tab_bar.set_view(self.tab_view)
+        elif hasattr(self.tab_bar, 'set_view'):
+             # Handle our StubChromeTabBar wrapper
+             self.tab_bar.set_view(self.tab_view)
         
         # Goto Line Bar (Revealer) - Add BEFORE status bar so it appears ABOVE it
         toolbar_view.add_bottom_bar(self._create_goto_line_bar())
@@ -8084,7 +7038,7 @@ class EditorWindow(Adw.ApplicationWindow):
         page.set_title(editor.get_title())
         self.tab_view.set_selected_page(page)
 
-        # Add ChromeTab to ChromeTabBar
+        # Add vitetab.ChromeTab to vitetab.ChromeTabBar
         self.add_tab_button(page)
 
         # Focus the new editor view
@@ -8255,7 +7209,7 @@ class EditorWindow(Adw.ApplicationWindow):
         editor = page.get_child()._editor
         title = editor.get_title()
         
-        tab = ChromeTab(title=title)
+        tab = vitetab.ChromeTab(title=title)
         tab._page = page
         
         # Connect signals
@@ -8314,7 +7268,7 @@ class EditorWindow(Adw.ApplicationWindow):
             self.close_tab(tab._page)
 
     def on_tab_reordered(self, tab_bar, tab, new_index):
-        """Sync Adw.TabView order with ChromeTabBar order"""
+        """Sync Adw.TabView order with vitetab.ChromeTabBar order"""
         if hasattr(tab, '_page'):
             # Only reorder if the page belongs to this view
             # This prevents errors during cross-window drag when the tab is added
@@ -8385,7 +7339,7 @@ class EditorWindow(Adw.ApplicationWindow):
         
         idx = self.tab_view.get_page_position(page)
         if idx > 0:
-            # Reorder in ChromeTabBar - this emits signal to sync TabView
+            # Reorder in vitetab.ChromeTabBar - this emits signal to sync TabView
             for tab in self.tab_bar.tabs:
                 if getattr(tab, '_page', None) == page:
                     self.tab_bar.reorder_tab(tab, idx - 1)
@@ -8397,7 +7351,7 @@ class EditorWindow(Adw.ApplicationWindow):
         
         idx = self.tab_view.get_page_position(page)
         if idx < self.tab_view.get_n_pages() - 1:
-            # Reorder in ChromeTabBar - this emits signal to sync TabView
+            # Reorder in vitetab.ChromeTabBar - this emits signal to sync TabView
             for tab in self.tab_bar.tabs:
                 if getattr(tab, '_page', None) == page:
                     self.tab_bar.reorder_tab(tab, idx + 1)
@@ -8480,7 +7434,7 @@ class EditorWindow(Adw.ApplicationWindow):
             return False
         GLib.idle_add(select_new_page)
         
-        # Add ChromeTab to ChromeTabBar
+        # Add vitetab.ChromeTab to vitetab.ChromeTabBar
         new_window.add_tab_button(new_page)
         
         # Update modified state on the chrome tab
@@ -8502,7 +7456,7 @@ class EditorWindow(Adw.ApplicationWindow):
         # Mark the tab to not release untitled numbers since they were transferred
         page._untitled_numbers_transferred = True
         
-        # Remove the ChromeTab from the old window's ChromeTabBar before closing
+        # Remove the vitetab.ChromeTab from the old window's vitetab.ChromeTabBar before closing
         # This prevents the tab from hanging in the old window
         for tab in self.tab_bar.tabs:
             if hasattr(tab, '_page') and tab._page == page:
@@ -8941,7 +7895,7 @@ class EditorWindow(Adw.ApplicationWindow):
         
         # If this is the last tab, close it and create a fresh new Untitled 1 tab
         if self.tab_view.get_n_pages() <= 1:
-            # Remove from ChromeTabBar
+            # Remove from vitetab.ChromeTabBar
             for tab in self.tab_bar.tabs:
                 if hasattr(tab, '_page') and tab._page == page:
                     self.tab_bar.remove_tab(tab)
@@ -8958,7 +7912,7 @@ class EditorWindow(Adw.ApplicationWindow):
             self.update_tab_dropdown()
             return
         
-        # Remove from ChromeTabBar first (before closing the page)
+        # Remove from vitetab.ChromeTabBar first (before closing the page)
         for tab in self.tab_bar.tabs:
             if hasattr(tab, '_page') and tab._page == page:
                 self.tab_bar.remove_tab(tab)
@@ -9937,7 +8891,7 @@ class EditorWindow(Adw.ApplicationWindow):
                 current_page = page
                 break
         
-        # Set status on editor object. This triggers observers (ChromeTab, GlobalBar)
+        # Set status on editor object. This triggers observers (vitetab.ChromeTab, GlobalBar)
         editor.set_loading(True)
         # Set path immediately to prevent other opens from reusing this tab
         editor.current_file_path = path
@@ -10171,6 +9125,16 @@ class VirtualTextEditor(Adw.Application):
     def do_activate(self):
         # Create and store CSS provider for dynamic updates
         self.css_provider = Gtk.CssProvider()
+
+        if VITETAB_AVAILABLE:
+            # Load static tab CSS from vitetab module
+            tab_provider = Gtk.CssProvider()
+            vitetab.apply_css(tab_provider)
+            Gtk.StyleContext.add_provider_for_display(
+                 Gdk.Display.get_default(),
+                 tab_provider,
+                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
         
         # Detect current theme and initialize with appropriate color
         style_manager = Adw.StyleManager.get_default()
