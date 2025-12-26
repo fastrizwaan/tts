@@ -159,63 +159,10 @@ class LineIndexer:
                     
                     while current_pos < file_size:
                         if step == 1:
-                            # For single-byte encodings, we must check for both \n (LF) and \r (CR)
-                            next_lf = mm.find(b'\n', current_pos)
-                            next_cr = mm.find(b'\r', current_pos)
-                            
-                            found_newline = False
-                            actual_newline_pos = -1
-                            actual_newline_len = 0
-                            
-                            if next_lf != -1 and next_cr != -1:
-                                if next_cr < next_lf:
-                                    # CR comes first
-                                    # Check if it is CRLF pair
-                                    if next_cr + 1 == next_lf:
-                                        # It is CRLF
-                                        actual_newline_pos = next_lf # End of line content (visual) is at CR usually?
-                                        # Wait, logic above: length = next_newline - current_pos
-                                        # If next_newline is the LF: length includes CR?
-                                        # Yes, existing logic handles CR stripping below.
-                                        # Let's align with existing consistent logic: point to the LAST byte of newline seq?
-                                        # Original uses `next_newline = mm.find(newline_seq)` where newline_seq is b'\n' usually.
-                                        # So next_newline points to \n.
-                                        
-                                        actual_newline_pos = next_lf
-                                        actual_newline_len = 1 # We advance past \n. What about CR?
-                                        # current_pos = next_newline + newline_len
-                                        
-                                        found_newline = True
-                                    else:
-                                        # CR alone (Classic Mac)
-                                        actual_newline_pos = next_cr
-                                        actual_newline_len = 1
-                                        found_newline = True
-                                else:
-                                    # LF comes first (Unix)
-                                    actual_newline_pos = next_lf
-                                    actual_newline_len = 1
-                                    found_newline = True
-                                    
-                            elif next_lf != -1:
-                                # Only LF found
-                                actual_newline_pos = next_lf
-                                actual_newline_len = 1
-                                found_newline = True
-                                
-                            elif next_cr != -1:
-                                # Only CR found
-                                actual_newline_pos = next_cr
-                                actual_newline_len = 1
-                                found_newline = True
-                                
-                            if not found_newline:
-                                next_newline = -1
-                            else:
-                                next_newline = actual_newline_pos
-                                # If it was CR alone, next_newline points to CR.
-                                # If it was LF alone, next_newline points to LF.
-                                # If it was CRLF, next_newline points to LF (due to next_lf logic).
+                            # OPTIMIZED: Single mmap.find for LF (most common line ending)
+                            # CR-only files (Classic Mac) are very rare, so we don't scan for CR separately
+                            # CRLF is detected by checking the byte before LF
+                            next_newline = mm.find(b'\n', current_pos)
                                 
                         else:
                             # For UTF-16, keep existing logic (assumes LF or explicit sequence)
