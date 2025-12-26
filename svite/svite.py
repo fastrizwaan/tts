@@ -2294,8 +2294,8 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # Ensure context update
         if hasattr(self, 'get_pango_context'):
-             ctx = self.get_pango_context()
-             self.mapper.update_context(ctx, self.font_desc)
+             # Update mapper with font for accurate measurements
+             self.mapper.set_font(self.font_desc)
              
         # Create temp layout using the same font description as drawing
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
@@ -2310,6 +2310,14 @@ class VirtualTextView(Gtk.DrawingArea):
             tabs = Pango.TabArray.new(1, True)
             tabs.set_tab(0, Pango.TabAlign.LEFT, int(tab_width_px))
             layout.set_tabs(tabs)
+            
+            # Update mapper with tabs too
+            self.mapper.set_tab_array(tabs)
+        
+        # Configure layout width to match viewport (for consistent wrapping)
+        layout.set_width(int(getattr(self.mapper, '_viewport_width_px', 800) * Pango.SCALE))
+        layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+        layout.set_auto_dir(True)
         
         # Iterate until we find the line or go off screen
         while curr_ln < total_lines:
@@ -2338,17 +2346,37 @@ class VirtualTextView(Gtk.DrawingArea):
                  # Setup Layout
                  text = get_line(curr_ln)
                  layout.set_text(text, -1)
-                 self.mapper.configure_layout(layout)
+                 # Configure layout manually (VisualLineMapper.configure_layout was removed)
+                 layout.set_width(int(getattr(self.mapper, '_viewport_width_px', 800) * Pango.SCALE))
+                 layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+                 layout.set_auto_dir(True)
                  
-                 # Sync alignment logic
-                 if Pango.find_base_dir(text, -1) == Pango.Direction.RTL:
-                     layout.set_alignment(Pango.Alignment.RIGHT)
-                 else:
-                     layout.set_alignment(Pango.Alignment.LEFT)
+                 # Explicitly check for RTL base direction
+                 base_dir = Pango.find_base_dir(text, -1)
+                 
+                 # Force LEFT to ensure consistent 0-based Pango coordinates
+                 layout.set_alignment(Pango.Alignment.LEFT)
+                 
+                 # Calculate manual RTL shift
+                 manual_x_offset = 0
+                 if base_dir == Pango.Direction.RTL:
+                     # Get layout width (this line's width)
+                     # (Use logic extents width)
+                     line_w = layout.get_extents()[1].width / Pango.SCALE
+                     
+                     # Viewport width from mapper or heuristic
+                     vp_w = getattr(self.mapper, '_viewport_width_px', 800)
+                     
+                     manual_x_offset = vp_w - line_w
 
                  # Hit Test
+                 # Input X is relative to visual viewport Left=0.
+                 # Layout is drawn at X = manual_x_offset.
+                 # So we must subtract this offset to find the X relative to the layout.
+                 hit_x = text_x - manual_x_offset
+                 
                  # Returns (inside, index, trailing)
-                 inside, idx, trailing = layout.xy_to_index(int(text_x * Pango.SCALE), int(layout_y * Pango.SCALE))
+                 inside, idx, trailing = layout.xy_to_index(int(hit_x * Pango.SCALE), int(layout_y * Pango.SCALE))
                  
                  found_col = self.byte_index_to_char_index(text, idx)
                  if trailing > 0:
@@ -4462,13 +4490,9 @@ class VirtualTextView(Gtk.DrawingArea):
         
         # Ensure mapper uses the same font for metrics as drawing
         if hasattr(self, 'get_pango_context'):
-             ctx = self.get_pango_context()
-             self.mapper.update_context(ctx, self.font_desc)
+             # ctx = self.get_pango_context()
+             self.mapper.set_font(self.font_desc)
 
-        visible_lines = int(h / self.line_h) + 2
-
-        current_y = -int(getattr(self, "scroll_line_frac", 0) * self.line_h)
-        current_log_line = self.scroll_line
         visible_lines = int(h / self.line_h) + 2
 
         current_y = -int(getattr(self, "scroll_line_frac", 0) * self.line_h)
@@ -4476,6 +4500,12 @@ class VirtualTextView(Gtk.DrawingArea):
         start_vis_offset = self.scroll_visual_offset
 
         layout = self.create_text_layout(cr, "")
+        
+        # Sync tabs to mapper if layout has them
+        # (create_text_layout sets tabs on the layout, but helper methods might abstract it.
+        #  Ideally we set tabs on mapper from update_metrics, but doing it here ensures sync)
+        if layout.get_tabs():
+            self.mapper.set_tab_array(layout.get_tabs())
 
         sel_start_ln = sel_start_col = sel_end_ln = sel_end_col = -1
         if self.buf.selection.has_selection():
@@ -4489,22 +4519,33 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # Update mapper context once per draw to ensure accuracy
         if hasattr(self, 'get_pango_context'):
-             ctx = self.get_pango_context()
-             self.mapper.update_context(ctx, ctx.get_font_description())
+             # ctx = self.get_pango_context()
+             self.mapper.set_font(self.font_desc)
 
         while visual_lines_drawn < visible_lines and current_log_line < total_lines:
             line_text = self.buf.get_line(current_log_line)
             
             # Configure layout for this line
             layout.set_text(line_text, -1)
-            self.mapper.configure_layout(layout)
             
-            # Explicitly check for RTL base direction to enforce Right alignment
-            # This is necessary because Pango defaults to Left alignment even in auto-dir mode
-            if Pango.find_base_dir(line_text, -1) == Pango.Direction.RTL:
-                layout.set_alignment(Pango.Alignment.RIGHT)
-            else:
-                layout.set_alignment(Pango.Alignment.LEFT)
+            # Configure layout manually (VisualLineMapper.configure_layout was removed)
+            # Match settings from word_wrap.py
+            layout.set_width(int(viewport_w * Pango.SCALE))
+            layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+            # Auto-direction for shaping
+            layout.set_auto_dir(True)
+            
+            # Explicitly check for RTL base direction
+            base_dir = Pango.find_base_dir(line_text, -1)
+            
+            # We force LEFT alignment in Pango so it always returns X=0.
+            # We will manually calculate the Right Alignment offset ourselves.
+            layout.set_alignment(Pango.Alignment.LEFT)
+            
+            # DEBUG LOGGING (Temporary)
+            # if len(line_text) > 5 and current_log_line < 5:
+            #     ext = layout.get_extents()[1]
+            #     print(f"DEBUG: Ln={current_log_line} Dir={base_dir} Align={layout.get_alignment()} W={viewport_w} LayoutW={layout.get_width()/Pango.SCALE} ExtX={ext.x/Pango.SCALE}")
 
             tokens = self.syntax.get_cached(current_log_line)
             if tokens is None:
@@ -4730,7 +4771,21 @@ class VirtualTextView(Gtk.DrawingArea):
                      # PangoCairo.show_layout_line draws relative to the BASELINE.
                      # We use the fixed ascent calculated from font metrics to ensure consistency with cursor
                      
-                     cr.move_to(base_x, current_y + getattr(self, 'ascent', self.line_h * 0.8))
+                     line_extents = line.get_extents() # (ink, logical)
+                     
+                     # Manual RTL Alignment
+                     # If paragraph is RTL, we calculate the offset to push this line to the right edge.
+                     final_x_offset = 0
+                     if base_dir == Pango.Direction.RTL:
+                         line_width_px = line_extents[1].width / Pango.SCALE
+                         # If wrapped line is shorter than viewport, push it right.
+                         # (Logic handles both full lines and short last lines correctly)
+                         final_x_offset = viewport_w - line_width_px
+                         
+                     # Add Pango's internal offset (usually 0 since we forced LEFT alignment)
+                     final_x_offset += line_extents[1].x / Pango.SCALE
+                     
+                     cr.move_to(base_x + final_x_offset, current_y + getattr(self, 'ascent', self.line_h * 0.8))
                      fg = getattr(self, 'text_foreground_color', (0.9, 0.9, 0.9))
                      cr.set_source_rgb(*fg)
                      PangoCairo.show_layout_line(cr, line)
@@ -4744,7 +4799,8 @@ class VirtualTextView(Gtk.DrawingArea):
                          
                          if c_line_idx == line_idx:
                              # Draw cursor
-                             cx = base_x + c_x / Pango.SCALE
+                             # Add the same manual offset we added to the text
+                             cx = base_x + (c_x / Pango.SCALE) + final_x_offset
                              
                              if is_dark:
                                  cursor_r, cursor_g, cursor_b = 1.0, 1.0, 1.0

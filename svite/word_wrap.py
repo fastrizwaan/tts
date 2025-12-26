@@ -1,22 +1,29 @@
 """
-Word Wrap System - Smooth lazy word wrap (no precomputation).
+Word Wrap System - Pango-based word wrap for proper bidi/RTL support.
 
-KEY INSIGHT: For smooth performance like no-wrap mode, we:
-1. Track scroll position in LOGICAL lines, not visual lines
-2. Only compute wrap for the ~50 visible lines per frame
-3. Never precompute the entire file
-4. Accept scrollbar estimation (minor inaccuracy is fine)
+KEY FEATURES:
+1. Uses Pango for accurate text measurement (proper bidi/RTL handling)
+2. Lazy evaluation - only compute wrap for visible lines
+3. LRU cache for recently accessed lines
+4. Fallback to character-based estimation when no Cairo context available
 
 This makes word wrap O(viewport_size) per frame, same as no-wrap mode.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, TYPE_CHECKING
-import gi
-gi.require_version('Pango', '1.0')
-gi.require_version('PangoCairo', '1.0')
-from gi.repository import Pango, PangoCairo
-import cairo
+from typing import List, Dict, Tuple, Optional, TYPE_CHECKING
+
+# Pango imports for proper text measurement
+try:
+    import gi
+    gi.require_version('Pango', '1.0')
+    gi.require_version('PangoCairo', '1.0')
+    from gi.repository import Pango, PangoCairo
+    HAS_PANGO = True
+except (ImportError, ValueError):
+    HAS_PANGO = False
+    Pango = None
+    PangoCairo = None
 
 if TYPE_CHECKING:
     from virtual_buffer import VirtualBuffer
@@ -36,28 +43,42 @@ class WrapInfo:
 
 class VisualLineMapper:
     """
-    Lazy word wrap mapper - O(viewport) per frame.
+    Pango-based word wrap mapper with proper bidi/RTL support.
     
-    Instead of precomputing all lines, we:
-    - Track scroll position in logical lines
-    - Compute wrap only for visible lines during render
-    - Use LRU cache for recently accessed lines
+    Uses Pango for accurate text measurement which handles:
+    - Variable glyph widths (important for RTL scripts)
+    - Bidirectional text shaping
+    - Proper word break opportunities
+    
+    Falls back to character-based estimation when no Cairo context is available.
     """
     
     def __init__(self, buffer: 'VirtualBuffer'):
         self._buffer = buffer
-        self._viewport_width_px: int = 800
-        self._char_width: float = 10.0
+        self._viewport_width_px: float = 800.0  # Width in pixels
+        self._viewport_width_chars: int = 80    # Fallback character width
+        self._char_width: float = 10.0          # Average char width for fallback
         self._enabled: bool = False
         
-        # Pango context and font for accurate measuring
-        self._pango_context = None 
-        self._font_desc = None
+        # Font for Pango measurement (set by renderer)
+        self._font_desc: Optional['Pango.FontDescription'] = None
+        
+        # Tab stops (set by renderer)  
+        self._tab_array: Optional['Pango.TabArray'] = None
         
         # LRU cache for wrap info (limited size)
         self._cache: Dict[int, WrapInfo] = {}
         self._cache_order: List[int] = []  # For LRU eviction
-        self._max_cache_size: int = 500  # Cache ~500 lines
+        self._max_cache_size: int = 500    # Cache ~500 lines
+        
+        # Cached total visual lines
+        self._cached_total: Optional[int] = None
+    
+    @property
+    def _viewport_width(self) -> int:
+        """Backward-compatible property for character-based width."""
+        return self._viewport_width_chars
+
     
     @property
     def enabled(self) -> bool:
@@ -69,24 +90,29 @@ class VisualLineMapper:
             self._enabled = value
             self.invalidate_all()
     
-    def update_context(self, context: Pango.Context, font_desc: Pango.FontDescription) -> None:
-        """Update the Pango context and font description used for measuring."""
-        if self._pango_context != context or self._font_desc != font_desc:
-            self._pango_context = context
-            self._font_desc = font_desc
-            self.invalidate_all()
-
+    def set_font(self, font_desc: 'Pango.FontDescription') -> None:
+        """Set font description for accurate text measurement."""
+        self._font_desc = font_desc
+        self.invalidate_all()
+    
+    def set_tab_array(self, tab_array: 'Pango.TabArray') -> None:
+        """Set tab stops for layout."""
+        self._tab_array = tab_array
+        self.invalidate_all()
+    
     def set_viewport_width(self, width_pixels: float, char_width: float = 10.0) -> None:
         """Update viewport width in pixels."""
         if width_pixels != self._viewport_width_px or char_width != self._char_width:
-            self._viewport_width_px = int(width_pixels)
+            self._viewport_width_px = max(100, width_pixels)
             self._char_width = char_width
+            self._viewport_width_chars = max(20, int(width_pixels / char_width))
             self.invalidate_all()
     
     def set_char_width(self, chars: int) -> None:
-        """Set viewport width directly in characters (approximate)."""
-        width_pixels = chars * self._char_width
-        self.set_viewport_width(width_pixels, self._char_width)
+        """Set viewport width directly in characters (fallback mode)."""
+        if chars != self._viewport_width_chars:
+            self._viewport_width_chars = max(20, chars)
+            self.invalidate_all()
     
     def invalidate_all(self) -> None:
         """Invalidate all cached wrap info."""
@@ -99,10 +125,6 @@ class VisualLineMapper:
         if end_line < 0:
             end_line = start_line
         
-        # If we invalidate any lines, the total cache might be wrong
-        # Ideally we update incrementally, but simpler to just clear total cache
-        # If edit is small, total estimation (sampled) might not change much, but
-        # correctness requires re-check.
         self._cached_total = None
         
         for line in range(start_line, min(end_line + 1, start_line + 50)):
@@ -111,158 +133,87 @@ class VisualLineMapper:
                 if line in self._cache_order:
                     self._cache_order.remove(line)
     
-    def configure_layout(self, layout: Pango.Layout) -> None:
-        """Configure a layout with the current wrapping settings."""
-        if not self._enabled:
-            layout.set_width(-1) # No wrap
-            return
-            
-        layout.set_width(int(self._viewport_width_px * Pango.SCALE))
-        layout.set_wrap(Pango.WrapMode.WORD_CHAR)
-        layout.set_auto_dir(True) # Ensure RTL checks happen
-
-    def _compute_wrap_info(self, line_num: int) -> WrapInfo:
-        """Compute wrap info for a single line using Pango."""
-        if not self._enabled:
-            return WrapInfo(line_num=line_num)
-        
+    def _compute_wrap_info_pango(self, line_num: int, cr) -> WrapInfo:
+        """Compute wrap info using Pango for accurate bidi/RTL measurement."""
         line_text = self._buffer.get_line(line_num)
         if not line_text:
             return WrapInfo(line_num=line_num)
         
-        # If we have no context, fallback to simplified char wrap (legacy)
-        if not self._pango_context:
-             # Fallback: estimate
-             est_chars = max(1, int(self._viewport_width_px / self._char_width))
-             count = (len(line_text) // est_chars) + 1
-             return WrapInfo(line_num=line_num, visual_line_count=count)
-             
-        # Create a temporary layout to measure
-        layout = Pango.Layout(self._pango_context)
+        # Create layout with wrap enabled
+        layout = PangoCairo.create_layout(cr)
         if self._font_desc:
             layout.set_font_description(self._font_desc)
-            
-        layout.set_text(line_text, -1)
-        self.configure_layout(layout)
         
+        # Enable automatic direction detection for bidi text
+        layout.set_auto_dir(True)
+        
+        if self._tab_array:
+            layout.set_tabs(self._tab_array)
+        
+        layout.set_text(line_text, -1)
+        
+        # Detect RTL text to adjust wrap width
+        import unicodedata
+        def is_rtl_text(text):
+            for ch in text:
+                bidi_type = unicodedata.bidirectional(ch)
+                if bidi_type in ("L", "LRE", "LRO"):
+                    return False
+                if bidi_type in ("R", "AL", "RLE", "RLO"):
+                    return True
+            return False
+        
+        # For RTL text, increase the wrap width to use more available space
+        # This prevents premature wrapping that leaves unused space
+        # Need larger bonus to compensate for padding subtracted from viewport
+        wrap_width = self._viewport_width_px
+        if is_rtl_text(line_text):
+            wrap_width += 50  # Substantial increase to fill available space for RTL text
+        
+        # Set wrap width in Pango units (pixels * SCALE)
+        layout.set_width(int(wrap_width * Pango.SCALE))
+        
+        # Use WORD_CHAR wrap: prefer word boundaries, fall back to character
+        layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+        
+        # Get line count from wrapped layout
         line_count = layout.get_line_count()
         
         if line_count <= 1:
-             return WrapInfo(line_num=line_num, visual_line_count=1)
-             
-        # Extract breakpoints (char indices)
+            return WrapInfo(line_num=line_num)
+        
+        # Extract wrap points from Pango layout
         break_points = []
-        iter = layout.get_iter()
-        while iter:
-            if not iter.next_line():
-                break
+        text_bytes = line_text.encode('utf-8')
+        
+        for i in range(line_count - 1):  # Don't need break point after last line
+            pango_line = layout.get_line_readonly(i)
+            end_byte = pango_line.start_index + pango_line.length
             
-            # The start of the NEXT line marks the end of the previous segment
-            line = iter.get_line_readonly()
-            byte_index = line.start_index
-            
-            # Convert byte index to char index
-            # This handles multi-byte characters correctly
-            curr_bytes = line_text.encode('utf-8')[:byte_index]
-            char_idx = len(curr_bytes.decode('utf-8', 'replace'))
-            break_points.append(char_idx)
-
+            # Convert byte offset to character offset
+            end_col = len(text_bytes[:end_byte].decode('utf-8', errors='replace'))
+            break_points.append(end_col)
+        
         return WrapInfo(
             line_num=line_num,
             break_points=break_points,
             visual_line_count=line_count
         )
     
-    def get_wrap_info(self, line_num: int) -> WrapInfo:
-        """Get wrap info for a line with LRU caching."""
-        if line_num < 0 or line_num >= self._buffer.total_lines:
-            return WrapInfo(line_num=line_num)
-        
-        if line_num in self._cache:
-            # Move to front of LRU
-            if line_num in self._cache_order:
-                self._cache_order.remove(line_num)
-            self._cache_order.append(line_num)
-            return self._cache[line_num]
-        
-        # Compute and cache
-        info = self._compute_wrap_info(line_num)
-        self._cache[line_num] = info
-        self._cache_order.append(line_num)
-        
-        # Evict old entries
-        while len(self._cache) > self._max_cache_size:
-            old = self._cache_order.pop(0)
-            self._cache.pop(old, None)
-        
-        return info
-    
-    def get_visual_line_count(self, line_num: int) -> int:
-        """Get the number of visual lines for a logical line."""
-        if not self._enabled:
-            return 1
-        return self.get_wrap_info(line_num).visual_line_count
-    
-    def get_total_visual_lines(self) -> int:
-        """
-        Estimate total visual lines.
-        Cached for performance during scrolling.
-        """
-        if not self._enabled:
-            return self._buffer.total_lines
-            
-        if hasattr(self, '_cached_total') and self._cached_total is not None:
-            return self._cached_total
-        
-        total = self._buffer.total_lines
-        if total == 0:
-            self._cached_total = 1
-            return 1
-        
-        result = 0
-        if total < 1000:
-            # Exact calculation for small/medium files
-            count = 0
-            for i in range(total):
-                count += self.get_visual_line_count(i)
-            result = int(count * 1.05)
-        else:
-            # Structural Sampling for large files
-            samples = 100
-            step = max(1, total // samples)
-            
-            sampled_vis_lines = 0
-            sampled_count = 0
-            
-            for i in range(0, total, step):
-                lines = self.get_visual_line_count(i)
-                sampled_vis_lines += lines
-                sampled_count += 1
-            
-            if sampled_count > 0:
-                avg_vis_per_logical = sampled_vis_lines / sampled_count
-                result = int(total * avg_vis_per_logical * 1.05)
-            else:
-                result = int(total * 1.05)
-                
-        self._cached_total = result
-        return result
-        """Compute wrap info for a single line."""
-        if not self._enabled:
-            return WrapInfo(line_num=line_num)
-        
+    def _compute_wrap_info_fallback(self, line_num: int) -> WrapInfo:
+        """Compute wrap info using simple character counting (fallback)."""
         line_text = self._buffer.get_line(line_num)
         if not line_text:
             return WrapInfo(line_num=line_num)
         
         line_len = len(line_text)
-        if line_len <= self._viewport_width:
+        if line_len <= self._viewport_width_chars:
             return WrapInfo(line_num=line_num)
         
-        # Find break points - fast character-based wrap
+        # Find break points - simple character-based wrap
         break_points = []
         pos = 0
-        width = self._viewport_width
+        width = self._viewport_width_chars
         
         while pos < line_len:
             remaining = line_len - pos
@@ -273,7 +224,7 @@ class VisualLineMapper:
             break_pos = target
             
             # Quick look-back for space (limited)
-            for i in range(min(target, line_len - 1), max(pos, target - 10), -1):
+            for i in range(min(target, line_len - 1), max(pos, target - 15), -1):
                 if line_text[i] in ' \t':
                     break_pos = i + 1
                     break
@@ -287,11 +238,41 @@ class VisualLineMapper:
             visual_line_count=len(break_points) + 1
         )
     
-    def get_wrap_info(self, line_num: int) -> WrapInfo:
+    def _compute_wrap_info(self, line_num: int, cr=None) -> WrapInfo:
+        """Compute wrap info for a single line."""
+        if not self._enabled:
+            return WrapInfo(line_num=line_num)
+        
+        # Use Pango for accurate measurement if available
+        if HAS_PANGO and cr is not None and self._font_desc is not None:
+            return self._compute_wrap_info_pango(line_num, cr)
+        
+        # Fallback to character-based
+        return self._compute_wrap_info_fallback(line_num)
+    
+    def get_wrap_info(self, line_num: int, cr=None) -> WrapInfo:
         """Get wrap info for a line with LRU caching."""
         if line_num < 0 or line_num >= self._buffer.total_lines:
             return WrapInfo(line_num=line_num)
         
+        # If Pango context provided, always compute fresh for accuracy
+        # (cache might have been computed without Pango)
+        if HAS_PANGO and cr is not None and self._font_desc is not None:
+            # Check if we have a Pango-computed cache entry
+            # For simplicity, recompute when cr is provided
+            info = self._compute_wrap_info(line_num, cr)
+            self._cache[line_num] = info
+            if line_num not in self._cache_order:
+                self._cache_order.append(line_num)
+            
+            # Evict old entries
+            while len(self._cache) > self._max_cache_size:
+                old = self._cache_order.pop(0)
+                self._cache.pop(old, None)
+            
+            return info
+        
+        # Use cached value if available
         if line_num in self._cache:
             # Move to front of LRU
             if line_num in self._cache_order:
@@ -299,7 +280,7 @@ class VisualLineMapper:
             self._cache_order.append(line_num)
             return self._cache[line_num]
         
-        # Compute and cache
+        # Compute and cache (fallback mode)
         info = self._compute_wrap_info(line_num)
         self._cache[line_num] = info
         self._cache_order.append(line_num)
@@ -311,38 +292,36 @@ class VisualLineMapper:
         
         return info
     
-    def get_visual_line_count(self, line_num: int) -> int:
+    def get_visual_line_count(self, line_num: int, cr=None) -> int:
         """Get the number of visual lines for a logical line."""
         if not self._enabled:
             return 1
-        return self.get_wrap_info(line_num).visual_line_count
+        return self.get_wrap_info(line_num, cr).visual_line_count
     
-    def get_total_visual_lines(self) -> int:
+    def get_total_visual_lines(self, cr=None) -> int:
         """
         Estimate total visual lines.
-        
-        For smooth scrolling, we estimate based on average line length.
-        This is fast and good enough for scrollbar positioning.
+        Cached for performance during scrolling.
         """
         if not self._enabled:
             return self._buffer.total_lines
+            
+        if self._cached_total is not None:
+            return self._cached_total
         
         total = self._buffer.total_lines
         if total == 0:
+            self._cached_total = 1
             return 1
         
         if total < 1000:
             # Exact calculation for small/medium files
             count = 0
             for i in range(total):
-                count += self.get_visual_line_count(i)
-            return count
+                count += self.get_visual_line_count(i, cr)
+            result = int(count * 1.05)  # Small buffer
         else:
             # Structural Sampling for large files
-            # Sample N lines distributed across the file
-            # Calculate EXACT visual lines for each sample
-            # This captures the true distribution of line lengths (sparse vs dense)
-            
             samples = 100
             step = max(1, total // samples)
             
@@ -350,24 +329,22 @@ class VisualLineMapper:
             sampled_count = 0
             
             for i in range(0, total, step):
-                # This computes the exact wrapping for the sampled line using current viewport
-                # It is far more accurate than average line length because it accounts for
-                # specific wrapping thresholds.
-                lines = self.get_visual_line_count(i)
+                lines = self.get_visual_line_count(i, cr)
                 sampled_vis_lines += lines
                 sampled_count += 1
             
             if sampled_count > 0:
                 avg_vis_per_logical = sampled_vis_lines / sampled_count
+                result = int(total * avg_vis_per_logical * 1.05)
+            else:
+                result = int(total * 1.05)
                 
-                # Apply safety margin (5%) and return
-                return int(total * avg_vis_per_logical * 1.05)
-            
-            return int(total * 1.05)
+        self._cached_total = result
+        return result
     
-    def get_line_segments(self, line_num: int) -> List[Tuple[int, int]]:
+    def get_line_segments(self, line_num: int, cr=None) -> List[Tuple[int, int]]:
         """Get the column ranges for each visual segment of a line."""
-        info = self.get_wrap_info(line_num)
+        info = self.get_wrap_info(line_num, cr)
         line_len = len(self._buffer.get_line(line_num))
         
         if not info.break_points:
@@ -382,12 +359,12 @@ class VisualLineMapper:
         
         return segments
     
-    def column_to_visual_offset(self, line_num: int, col: int) -> Tuple[int, int]:
+    def column_to_visual_offset(self, line_num: int, col: int, cr=None) -> Tuple[int, int]:
         """Convert a column position to visual offset within the line."""
         if not self._enabled:
             return (0, col)
         
-        info = self.get_wrap_info(line_num)
+        info = self.get_wrap_info(line_num, cr)
         
         if not info.break_points:
             return (0, col)
