@@ -681,9 +681,18 @@ class ChromeTabBar(Adw.WrapBox):
         self.set_margin_top(0)
         self.set_margin_bottom(0)
         self.set_child_spacing(0)
+        
+        # Align wrapped content to the left (not center)
+        self.set_halign(Gtk.Align.FILL)
+        # Don't justify - we manually calculate tab sizes for equal width
+        try:
+            self.set_justify(0)  # Adw.Justify.NONE - no stretching/spreading
+        except Exception:
+            pass  # Fallback for older libadwaita versions
 
         self.tabs = []
         self.separators = []   # separator BEFORE each tab + 1 final separator
+        self._cached_cols = 0  # Cache for column count optimization
         
         # Drop indicator for drag and drop
         self.drop_indicator = Gtk.Box()
@@ -758,7 +767,8 @@ class ChromeTabBar(Adw.WrapBox):
         if window and hasattr(window, 'update_ui_state'):
             window.update_ui_state()
 
-        GLib.timeout_add(50, self.update_tab_sizes)
+        # Note: Removed redundant GLib.timeout_add(50, self.update_tab_sizes)
+        # The immediate update_tab_sizes() call above is sufficient
 
 
     def remove_tab(self, tab):
@@ -907,7 +917,7 @@ class ChromeTabBar(Adw.WrapBox):
         return effective_cols, separator_width, min_tab_width, max_tab_width
 
     def update_tab_sizes(self, allocated_width=None):
-        """Update tab sizes to fill the window width perfectly with no gaps"""
+        """Update tab sizes dynamically - equal width filling rows"""
         if not self.tabs:
             return False
         
@@ -919,54 +929,60 @@ class ChromeTabBar(Adw.WrapBox):
             return False
         
         # Calculate available width for tabs
-        # Account for margin_start only - use all available space
         margin_start = 6
-        buffer = 0  # No buffer - use all available space
-        available_width = allocated_width - margin_start - buffer
+        available_width = allocated_width - margin_start
         
         if available_width <= 0:
             return False
         
-        effective_cols, separator_width, min_tab_width, max_tab_width = self._calculate_grid_cols(available_width)
+        # Sizing constants
+        MIN_TAB_WIDTH = 150
+        MAX_TAB_WIDTH = 400
+        TAB_HEIGHT = 32
+        SEPARATOR_WIDTH = 1
         
-        # Now calculate the exact width needed to fill the row using effective_cols
-        # Formula: N tabs + N-1 separators (visible). 
-        # But we previously hide first/last. Let's assume N-1 separators consume space.
-        # separator overhead = (effective_cols - 1) * separator_width
-        # But for safety, let's subtract ample buffer to prevent subpixel wrapping issues.
+        # 1. Determine columns (how many tabs fit per row)
+        # Capacity based on minimum width
+        capacity = max(1, (available_width + SEPARATOR_WIDTH) // (MIN_TAB_WIDTH + SEPARATOR_WIDTH))
         
-        layout_buffer = 4  # Reverted buffer as active tab margins were removed
+        # Effective columns (can't have more cols than tabs)
+        cols = min(len(self.tabs), capacity)
+        if cols < 1: cols = 1
         
-        total_separator_width = (effective_cols - 1) * separator_width
-        available_for_tabs = available_width - total_separator_width - layout_buffer
+        # 2. Calculate dynamic width to fill the available space evenly
+        # available = (cols * width) + ((cols - 1) * separator)
+        # width = (available - (cols-1)*sep) / cols
+        total_sep_width = (cols - 1) * SEPARATOR_WIDTH
+        available_for_tabs = available_width - total_sep_width - 4 # buffer
         
-        # Use divmod to get exact pixels and remainder
-        base_width, remainder = divmod(available_for_tabs, effective_cols)
+        raw_tab_width = available_for_tabs // cols
         
-        # Apply width to tabs, distributing remainder to first columns
-        for i, tab in enumerate(self.tabs):
-            col_idx = i % effective_cols
+        # Clamp width
+        final_tab_width = max(MIN_TAB_WIDTH, min(raw_tab_width, MAX_TAB_WIDTH))
+        
+        # 3. Apply size to ALL tabs
+        # This ensures every tab is exactly same width, preventing grid misalignment
+        for tab in self.tabs:
+            current_req = tab.get_size_request()
+            if current_req[0] != final_tab_width or current_req[1] != TAB_HEIGHT:
+                tab.set_size_request(final_tab_width, TAB_HEIGHT)
             
-            # Add 1px to the first 'remainder' columns to fill space perfectly
-            final_width = base_width + 1 if col_idx < remainder else base_width
-            
-            # Final clamp variables (safety)
-            final_width = max(min_tab_width, min(final_width, max_tab_width))
-            
-            # Recalculate max_chars per tab to ensure text ellipsize works and prevents expansion
-            # usage: ~12px per char (Conservative value to guarantee fit)
-            reserved_inner_width = 12 
-            available_text_width = max(1, final_width - reserved_inner_width)
-            max_chars = int(available_text_width / 12.0)
-
-            # set_size_request sets minimum size
-            # Combined with max_width_chars, this prevents the tab from expanding beyond its slot
-            tab.set_size_request(final_width, 32)
+            # Update label ellipsization
+            max_chars = int(max(1, (final_tab_width - 50) / 9))
             if hasattr(tab, 'label'):
                 tab.label.set_max_width_chars(max_chars)
         
-        # Ensure separators are updated (e.g. if columns changed)
-        self.update_separators()
+        # 4. Update separators if column count changed
+        if cols != getattr(self, '_cached_cols', 0):
+            self._cached_cols = cols
+            self.update_separators()
+        
+        return False
+        
+        # Update separators only when column count changes
+        if effective_cols != self._cached_cols:
+            self._cached_cols = effective_cols
+            self.update_separators()
         
         return False
     
@@ -976,20 +992,45 @@ class ChromeTabBar(Adw.WrapBox):
             GLib.idle_add(self.update_tab_sizes)
     
     def _setup_size_allocate_handler(self):
-        """Setup periodic monitoring of tab bar width"""
+        """Setup width change monitoring using signals for instant resize response"""
         self._last_allocated_width = 0
-        # Check tab bar width every 200ms and update if changed
-        GLib.timeout_add(200, self._check_tab_bar_width)
+        self._resize_timeout_id = None  # For debouncing rapid resize events
+        self._pending_width = 0
         
-    def _check_tab_bar_width(self):
-        """Periodically check if tab bar width changed and update tab sizes"""
+        # Connect to width property change for responsive resize
+        self.connect('notify::width', self._on_width_changed)
+        
+    def _on_width_changed(self, widget, param):
+        """Handle width changes with debouncing for smooth resize"""
         current_width = self.get_width()
         
-        if current_width != self._last_allocated_width and current_width > 0:
-            self._last_allocated_width = current_width
-            self.update_tab_sizes()
+        if current_width <= 0:
+            return
+            
+        # Only update if width actually changed significantly (avoid subpixel noise)
+        if abs(current_width - self._last_allocated_width) < 2:
+            return
         
-        return True  # Continue periodic checks
+        # Store pending width
+        self._pending_width = current_width
+        
+        # Debounce: Cancel existing timer and schedule new update
+        # This batches rapid resize events into a single update
+        if self._resize_timeout_id:
+            GLib.source_remove(self._resize_timeout_id)
+        
+        # Schedule update after 16ms (~60fps) of no resize events
+        self._resize_timeout_id = GLib.timeout_add(16, self._do_resize_update)
+    
+    def _do_resize_update(self):
+        """Execute the debounced resize update"""
+        self._resize_timeout_id = None
+        
+        if self._pending_width > 0 and self._pending_width != self._last_allocated_width:
+            self._last_allocated_width = self._pending_width
+            self.update_tab_sizes(allocated_width=self._pending_width)
+        
+        return False  # Don't repeat
     
     def _calculate_drop_position(self, x, y):
         """Calculate the drop position based on mouse X and Y coordinates"""
