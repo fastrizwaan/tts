@@ -12,6 +12,11 @@ This makes word wrap O(viewport_size) per frame, same as no-wrap mode.
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, TYPE_CHECKING
+import gi
+gi.require_version('Pango', '1.0')
+gi.require_version('PangoCairo', '1.0')
+from gi.repository import Pango, PangoCairo
+import cairo
 
 if TYPE_CHECKING:
     from virtual_buffer import VirtualBuffer
@@ -41,9 +46,13 @@ class VisualLineMapper:
     
     def __init__(self, buffer: 'VirtualBuffer'):
         self._buffer = buffer
-        self._viewport_width: int = 80
+        self._viewport_width_px: int = 800
         self._char_width: float = 10.0
         self._enabled: bool = False
+        
+        # Pango context and font for accurate measuring
+        self._pango_context = None 
+        self._font_desc = None
         
         # LRU cache for wrap info (limited size)
         self._cache: Dict[int, WrapInfo] = {}
@@ -60,19 +69,24 @@ class VisualLineMapper:
             self._enabled = value
             self.invalidate_all()
     
+    def update_context(self, context: Pango.Context, font_desc: Pango.FontDescription) -> None:
+        """Update the Pango context and font description used for measuring."""
+        if self._pango_context != context or self._font_desc != font_desc:
+            self._pango_context = context
+            self._font_desc = font_desc
+            self.invalidate_all()
+
     def set_viewport_width(self, width_pixels: float, char_width: float = 10.0) -> None:
         """Update viewport width in pixels."""
-        new_width = max(20, int(width_pixels / char_width))
-        if new_width != self._viewport_width or char_width != self._char_width:
-            self._viewport_width = new_width
+        if width_pixels != self._viewport_width_px or char_width != self._char_width:
+            self._viewport_width_px = int(width_pixels)
             self._char_width = char_width
             self.invalidate_all()
     
     def set_char_width(self, chars: int) -> None:
-        """Set viewport width directly in characters."""
-        if chars != self._viewport_width:
-            self._viewport_width = max(20, chars)
-            self.invalidate_all()
+        """Set viewport width directly in characters (approximate)."""
+        width_pixels = chars * self._char_width
+        self.set_viewport_width(width_pixels, self._char_width)
     
     def invalidate_all(self) -> None:
         """Invalidate all cached wrap info."""
@@ -97,8 +111,18 @@ class VisualLineMapper:
                 if line in self._cache_order:
                     self._cache_order.remove(line)
     
+    def configure_layout(self, layout: Pango.Layout) -> None:
+        """Configure a layout with the current wrapping settings."""
+        if not self._enabled:
+            layout.set_width(-1) # No wrap
+            return
+            
+        layout.set_width(int(self._viewport_width_px * Pango.SCALE))
+        layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+        layout.set_auto_dir(True) # Ensure RTL checks happen
+
     def _compute_wrap_info(self, line_num: int) -> WrapInfo:
-        """Compute wrap info for a single line."""
+        """Compute wrap info for a single line using Pango."""
         if not self._enabled:
             return WrapInfo(line_num=line_num)
         
@@ -106,36 +130,47 @@ class VisualLineMapper:
         if not line_text:
             return WrapInfo(line_num=line_num)
         
-        line_len = len(line_text)
-        if line_len <= self._viewport_width:
-            return WrapInfo(line_num=line_num)
+        # If we have no context, fallback to simplified char wrap (legacy)
+        if not self._pango_context:
+             # Fallback: estimate
+             est_chars = max(1, int(self._viewport_width_px / self._char_width))
+             count = (len(line_text) // est_chars) + 1
+             return WrapInfo(line_num=line_num, visual_line_count=count)
+             
+        # Create a temporary layout to measure
+        layout = Pango.Layout(self._pango_context)
+        if self._font_desc:
+            layout.set_font_description(self._font_desc)
+            
+        layout.set_text(line_text, -1)
+        self.configure_layout(layout)
         
-        # Find break points - fast character-based wrap
+        line_count = layout.get_line_count()
+        
+        if line_count <= 1:
+             return WrapInfo(line_num=line_num, visual_line_count=1)
+             
+        # Extract breakpoints (char indices)
         break_points = []
-        pos = 0
-        width = self._viewport_width
-        
-        while pos < line_len:
-            remaining = line_len - pos
-            if remaining <= width:
+        iter = layout.get_iter()
+        while iter:
+            if not iter.next_line():
                 break
             
-            target = pos + width
-            break_pos = target
+            # The start of the NEXT line marks the end of the previous segment
+            line = iter.get_line_readonly()
+            byte_index = line.start_index
             
-            # Quick look-back for space (limited)
-            for i in range(min(target, line_len - 1), max(pos, target - 10), -1):
-                if line_text[i] in ' \t':
-                    break_pos = i + 1
-                    break
-            
-            break_points.append(break_pos)
-            pos = break_pos
-        
+            # Convert byte index to char index
+            # This handles multi-byte characters correctly
+            curr_bytes = line_text.encode('utf-8')[:byte_index]
+            char_idx = len(curr_bytes.decode('utf-8', 'replace'))
+            break_points.append(char_idx)
+
         return WrapInfo(
             line_num=line_num,
             break_points=break_points,
-            visual_line_count=len(break_points) + 1
+            visual_line_count=line_count
         )
     
     def get_wrap_info(self, line_num: int) -> WrapInfo:

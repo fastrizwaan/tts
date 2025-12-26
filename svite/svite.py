@@ -1297,6 +1297,7 @@ class VirtualTextView(Gtk.DrawingArea):
         
     def update_metrics(self):
         """Update font metrics and notify mapper."""
+        import math
         # Create a temporary context to measure font
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
         cr = cairo.Context(surface)
@@ -1305,9 +1306,18 @@ class VirtualTextView(Gtk.DrawingArea):
         layout.set_text("M", -1)
         
         ink, logical = layout.get_extents()
-        self.line_h = int(logical.height / Pango.SCALE)
+        # Use ceil to avoid truncating partial pixels, which can cause visual overlap
+        # and hit-testing errors (clicking 'top' of line N mapping to 'bottom' of N-1)
+        self.line_h = math.ceil(logical.height / Pango.SCALE)
         self.char_width = logical.width / Pango.SCALE
         self.mapper.set_char_width(self.char_width)
+        
+        # Calculate fixed baseline offset (Ascent)
+        # usage: draw at y + self.ascent
+        baseline = layout.get_baseline() # Pango units
+        # logical.y is usually 0 for first line, but safe to subtract
+        logical_top = logical.y
+        self.ascent = (baseline - logical_top) / Pango.SCALE
         
         # Update tab array if needed
         pass
@@ -1972,7 +1982,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 # viewport_char_width * visual_offset
                 # Use value from mapper which ensures consistency with total_vis
                 # (especially during resize where get_width() might be stale)
-                width_chars = self.mapper._viewport_width
+                width_chars = int(self.mapper._viewport_width_px / max(0.1, self.mapper._char_width))
                 if width_chars < 1: width_chars = 1
                 
                 # width = self.get_width()
@@ -2253,6 +2263,12 @@ class VirtualTextView(Gtk.DrawingArea):
             
         except Exception:
             pass
+    def byte_index_to_char_index(self, text, byte_idx):
+        """Convert byte index to character index."""
+        try:
+            return len(text.encode('utf-8')[:byte_idx].decode('utf-8'))
+        except UnicodeDecodeError:
+            return len(text.encode('utf-8')[:byte_idx].decode('utf-8', 'replace'))
     def xy_to_line_col(self, x, y):
         """Convert widget coordinates to logical line/col."""
         if self.show_line_numbers:
@@ -2275,6 +2291,25 @@ class VirtualTextView(Gtk.DrawingArea):
         
         total_lines = self.buf.total()
         get_line = self.buf.get_line
+
+        # Ensure context update
+        if hasattr(self, 'get_pango_context'):
+             ctx = self.get_pango_context()
+             self.mapper.update_context(ctx, self.font_desc)
+             
+        # Create temp layout using the same font description as drawing
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surface)
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(self.font_desc)
+        
+        # Apply tab settings (must match create_text_layout)
+        if True:
+            # We need to make sure we use the same tab width calculation
+            tab_width_px = self.tab_width * self.char_width
+            tabs = Pango.TabArray.new(1, True)
+            tabs.set_tab(0, Pango.TabAlign.LEFT, int(tab_width_px))
+            layout.set_tabs(tabs)
         
         # Iterate until we find the line or go off screen
         while curr_ln < total_lines:
@@ -2293,23 +2328,31 @@ class VirtualTextView(Gtk.DrawingArea):
              
              if curr_y + height_px > target_y:
                  # Found it
-                 seg_idx = int((target_y - curr_y) // self.line_h) + start_seg
-                 
                  found_ln = curr_ln
                  
-                 # Map text_x to column
-                 if segments:
-                     # Clamp seg_idx to valid range to prevent IndexError
-                     seg_idx = max(0, min(seg_idx, len(segments) - 1))
-                     s_start, s_end = segments[seg_idx]
-                     text = get_line(curr_ln)[s_start:s_end]
-                     
-                     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
-                     cr = cairo.Context(surface)
-                     col_in_seg = self.pixel_to_column(cr, text, text_x)
-                     found_col = s_start + col_in_seg
+                 # Calculate Y relative to logical line top
+                 # Note: this layout_y is relative to the start of the logical line.
+                 rel_y_in_view = target_y - curr_y
+                 layout_y = (start_seg * self.line_h) + rel_y_in_view
+                 
+                 # Setup Layout
+                 text = get_line(curr_ln)
+                 layout.set_text(text, -1)
+                 self.mapper.configure_layout(layout)
+                 
+                 # Sync alignment logic
+                 if Pango.find_base_dir(text, -1) == Pango.Direction.RTL:
+                     layout.set_alignment(Pango.Alignment.RIGHT)
                  else:
-                     found_col = 0
+                     layout.set_alignment(Pango.Alignment.LEFT)
+
+                 # Hit Test
+                 # Returns (inside, index, trailing)
+                 inside, idx, trailing = layout.xy_to_index(int(text_x * Pango.SCALE), int(layout_y * Pango.SCALE))
+                 
+                 found_col = self.byte_index_to_char_index(text, idx)
+                 if trailing > 0:
+                     found_col += trailing
                      
                  break
              
@@ -2349,6 +2392,7 @@ class VirtualTextView(Gtk.DrawingArea):
              byte_pos += len(ch.encode('utf-8'))
              
         return len(text)
+
 
         
     def on_key(self, c, keyval, keycode, state):
@@ -4415,7 +4459,16 @@ class VirtualTextView(Gtk.DrawingArea):
         padding = 20 if self.vscroll.get_visible() else 10
         viewport_w = w - ln_width - padding
         self.mapper.set_viewport_width(viewport_w, self.char_width)
+        
+        # Ensure mapper uses the same font for metrics as drawing
+        if hasattr(self, 'get_pango_context'):
+             ctx = self.get_pango_context()
+             self.mapper.update_context(ctx, self.font_desc)
 
+        visible_lines = int(h / self.line_h) + 2
+
+        current_y = -int(getattr(self, "scroll_line_frac", 0) * self.line_h)
+        current_log_line = self.scroll_line
         visible_lines = int(h / self.line_h) + 2
 
         current_y = -int(getattr(self, "scroll_line_frac", 0) * self.line_h)
@@ -4434,201 +4487,283 @@ class VirtualTextView(Gtk.DrawingArea):
         total_lines = self.buf.total()
         max_line_px = 0
 
+        # Update mapper context once per draw to ensure accuracy
+        if hasattr(self, 'get_pango_context'):
+             ctx = self.get_pango_context()
+             self.mapper.update_context(ctx, ctx.get_font_description())
+
         while visual_lines_drawn < visible_lines and current_log_line < total_lines:
             line_text = self.buf.get_line(current_log_line)
-            segments = self.mapper.get_line_segments(current_log_line)
+            
+            # Configure layout for this line
+            layout.set_text(line_text, -1)
+            self.mapper.configure_layout(layout)
+            
+            # Explicitly check for RTL base direction to enforce Right alignment
+            # This is necessary because Pango defaults to Left alignment even in auto-dir mode
+            if Pango.find_base_dir(line_text, -1) == Pango.Direction.RTL:
+                layout.set_alignment(Pango.Alignment.RIGHT)
+            else:
+                layout.set_alignment(Pango.Alignment.LEFT)
 
             tokens = self.syntax.get_cached(current_log_line)
             if tokens is None:
                 if isinstance(self.syntax, StateAwareSyntaxEngine):
-                    tokens = self.syntax.tokenize(current_log_line, line_text)
+                     tokens = self.syntax.tokenize(current_log_line, line_text)
                 else:
                     tokens = []
-
-            if current_log_line == self.scroll_line and start_vis_offset >= len(segments):
-                start_vis_offset = max(0, len(segments) - 1)
+            
+            line_count = layout.get_line_count()
+            if current_log_line == self.scroll_line and start_vis_offset >= line_count:
+                start_vis_offset = max(0, line_count - 1)
                 self.scroll_visual_offset = start_vis_offset
 
-            for i, (seg_start, seg_end) in enumerate(segments):
-                if current_log_line == self.scroll_line and i < start_vis_offset:
-                    continue
-                if visual_lines_drawn >= visible_lines:
-                    break
+            # ---- syntax ----
+            attr_list = Pango.AttrList()
+            for s, e, tag in tokens:
+                color = self.get_color_for_token(tag)
+                if color:
+                     bs = self.visual_byte_index(line_text, s)
+                     be = self.visual_byte_index(line_text, e)
+                     if bs < be:
+                         attr = Pango.attr_foreground_new(
+                             int(color[0] * 65535),
+                             int(color[1] * 65535),
+                             int(color[2] * 65535),
+                         )
+                         attr.start_index = bs
+                         attr.end_index = be
+                         attr_list.insert(attr)
+            layout.set_attributes(attr_list)
+            
+            # Iterate visual lines from Pango
+            iter = layout.get_iter()
+            line_idx = 0
+            
+            # Iterate visual lines from Pango
+            iter = layout.get_iter()
+            line_idx = 0
+            
+            # Pango returns 0 lines for empty string? Usually it returns 1 empty line if set correctly?
+            # layout.set_text("") usually results in 0 lines in some versions, or 1 empty line.
+            # To be safe, if line_count is 0, we forcibly treat it as 1 visual line
+            if layout.get_line_count() == 0:
+                 # Check scroll visibility
+                 is_visible = True
+                 if current_log_line == self.scroll_line and 0 < start_vis_offset:
+                     is_visible = False
+                     
+                 if is_visible:
+                     base_x = ln_width + 2 - self.scroll_x
+                     
+                     # ---- current line highlight ----
+                     if self.highlight_current_line and current_log_line == self.buf.cursor_line:
+                         cr.set_source_rgba(*self.current_line_background_color)
+                         cr.rectangle(0, current_y, w, self.line_h)
+                         cr.fill()
 
-                seg_text = line_text[seg_start:seg_end]
-                layout.set_text(seg_text, -1)
+                     # ---- selection background ----
+                     # Empty line selection (newline char) logic matches 'else' block but simpler
+                     if sel_start_ln != -1:
+                        # Logic for newline selection ... (omitted for brevity, handled by rectangle clear usually)
+                         if sel_start_ln <= current_log_line <= sel_end_ln:
+                             # If explicitly selecting the newline logic
+                             pass
 
-                if not self.mapper.enabled:
-                    _, logical = layout.get_extents()
-                    max_line_px = max(max_line_px, logical.width / Pango.SCALE)
+                     # ---- line numbers ----
+                     if self.show_line_numbers:
+                         cr.set_source_rgb(0.5, 0.5, 0.5)
+                         txt = str(current_log_line + 1)
+                         cr.move_to(
+                             ln_width - len(txt) * self.char_width - 5,
+                             current_y + self.line_h - 5,
+                         )
+                         cr.show_text(txt)
 
-                # ---- line numbers (NO CLIP) ----
-                if i == 0 and self.show_line_numbers:
-                    cr.set_source_rgb(0.5, 0.5, 0.5)
-                    txt = str(current_log_line + 1)
-                    cr.move_to(
-                        ln_width - len(txt) * self.char_width - 5,
-                        current_y + self.line_h - 5,
-                    )
-                    cr.show_text(txt)
+                     # ---- cursor ----
+                     if show_cursor and current_log_line == self.buf.cursor_line:
+                         # Cursor at col 0
+                         cx = base_x # at start
+                         
+                         if getattr(self, 'is_dark', True):
+                             cursor_r, cursor_g, cursor_b = 1.0, 1.0, 1.0
+                         else:
+                             cursor_r, cursor_g, cursor_b = 0.0, 0.0, 0.0
+                             
+                         cr.set_source_rgba(
+                             cursor_r, cursor_g, cursor_b,
+                             self.cursor_phase if self.cursor_phase <= 1 else 2 - self.cursor_phase
+                         )
+                         cr.rectangle(cx, current_y, 1, self.line_h)
+                         cr.fill()
+                         
+                     current_y += self.line_h
+                     visual_lines_drawn += 1
 
-                base_x = ln_width + 2 - self.scroll_x
+            while iter:
+                 if visual_lines_drawn >= visible_lines:
+                     break
+                 
+                 # Check scroll visibility
+                 is_visible = True
+                 if current_log_line == self.scroll_line and line_idx < start_vis_offset:
+                     is_visible = False
+                     
+                 if is_visible:
+                     line = iter.get_line_readonly()
+                     
+                     base_x = ln_width + 2 - self.scroll_x
 
-                # ---- current line highlight ----
-                if self.highlight_current_line and current_log_line == self.buf.cursor_line:
-                    cr.set_source_rgba(*self.current_line_background_color)
-                    cr.rectangle(0, current_y, w, self.line_h)
-                    cr.fill()
+                     # DEBUG LINES
+                     # cr.set_source_rgba(1, 0, 0, 0.3)
+                     # cr.move_to(0, current_y)
+                     # cr.line_to(w, current_y)
+                     # cr.stroke()
+                     # cr.move_to(0, current_y + self.line_h)
+                     # cr.line_to(w, current_y + self.line_h)
+                     # cr.stroke()
+                     
+                     # ---- current line highlight ----
+                     if self.highlight_current_line and current_log_line == self.buf.cursor_line:
+                         cr.set_source_rgba(*self.current_line_background_color)
+                         cr.rectangle(0, current_y, w, self.line_h)
+                         cr.fill()
 
-                # ---- selection background ----
-                if sel_start_ln != -1:
-                    seg_sel_start = seg_sel_end = -1
-                    if sel_start_ln < current_log_line < sel_end_ln:
-                        seg_sel_start, seg_sel_end = 0, len(seg_text)
-                    elif current_log_line == sel_start_ln:
-                        s = max(sel_start_col, seg_start)
-                        if sel_start_ln == sel_end_ln:
-                            e = min(sel_end_col, seg_end)
-                        else:
-                            e = seg_end
-                        if s < e:
-                            seg_sel_start, seg_sel_end = s - seg_start, e - seg_start
-                    elif current_log_line == sel_end_ln:
-                        e = min(sel_end_col, seg_end)
-                        if e > seg_start:
-                            seg_sel_start, seg_sel_end = 0, e - seg_start
+                     # ---- selection background ----
+                     if sel_start_ln != -1:
+                         # Determine intersection of selection with this logical line
+                         s_byte = 0
+                         e_byte = len(line_text.encode('utf-8')) # Approximate max
+                         
+                         intersect = False
+                         if sel_start_ln < current_log_line < sel_end_ln:
+                             intersect = True
+                         elif current_log_line == sel_start_ln:
+                             s_char = sel_start_col
+                             e_char = len(line_text)
+                             if sel_start_ln == sel_end_ln:
+                                 e_char = sel_end_col
+                             if s_char < e_char:
+                                 s_byte = self.visual_byte_index(line_text, s_char)
+                                 e_byte = self.visual_byte_index(line_text, e_char)
+                                 intersect = True
+                         elif current_log_line == sel_end_ln:
+                             if sel_end_col > 0:
+                                 s_byte = 0
+                                 e_byte = self.visual_byte_index(line_text, sel_end_col)
+                                 intersect = True
+                         
+                         if intersect and s_byte < e_byte:
+                             ranges = line.get_x_ranges(s_byte, e_byte)
+                             cr.set_source_rgba(0.2, 0.4, 0.6, 0.4)
+                             
+                             # Handle flat list [x1, x2, x3, x4] or tuple list [(x1, x2), ...]
+                             flat_ranges = []
+                             if ranges:
+                                 if isinstance(ranges[0], int):
+                                     for i in range(0, len(ranges), 2):
+                                         if i + 1 < len(ranges):
+                                             flat_ranges.append((ranges[i], ranges[i+1]))
+                                 else:
+                                     flat_ranges = ranges
+                             
+                             for r_start, r_end in flat_ranges:
+                                 # r is (start_x, end_x) in Pango units
+                                 rx = base_x + r_start / Pango.SCALE
+                                 rw = (r_end - r_start) / Pango.SCALE
+                                 cr.rectangle(rx, current_y, rw, self.line_h)
+                                 cr.fill()
 
-                    if seg_sel_start != -1:
-                        idx_s = self.visual_byte_index(seg_text, seg_sel_start)
-                        idx_e = self.visual_byte_index(seg_text, seg_sel_end)
-                        line0 = layout.get_line(0)
-                        if line0:
-                            x1 = base_x + line0.index_to_x(idx_s, False) / Pango.SCALE
-                            x2 = base_x + line0.index_to_x(idx_e, False) / Pango.SCALE
-                            cr.set_source_rgba(0.2, 0.4, 0.6, 0.4)
-                            cr.rectangle(x1, current_y, x2 - x1, self.line_h)
-                            cr.fill()
+                     # ---- search highlights ----
+                     if self.search_matches and self.max_match_length > 0:
+                         # Iterate matches for this line
+                         # Optimization: Binary search matches (as before) or just iterate
+                         # The surrounding code is not fully visible, copying binary search logic is safest
+                         # Reuse existing binary search logic if possible or simplified scan
+                         
+                         # Simplified scan for logic (the original used bisect)
+                         # We'll just search matches in this line range
+                         try:
+                             start_idx = bisect.bisect_left(self.search_matches, (current_log_line, 0, 0, 0))
+                             for mi in range(start_idx, len(self.search_matches)):
+                                 m = self.search_matches[mi]
+                                 s_ln, s_col, e_ln, e_col = m[:4]
+                                 if s_ln > current_log_line: break
+                                 if s_ln == current_log_line:
+                                     # Match on this line
+                                     ms_byte = self.visual_byte_index(line_text, s_col)
+                                     me_byte = self.visual_byte_index(line_text, e_col) if e_ln == current_log_line else 1000000
+                                     
+                                     ranges = line.get_x_ranges(ms_byte, me_byte)
+                                     
+                                     # Handle flat list [x1, x2, x3, x4] or tuple list [(x1, x2), ...]
+                                     flat_ranges = []
+                                     if ranges:
+                                         if isinstance(ranges[0], int):
+                                             for i in range(0, len(ranges), 2):
+                                                 if i + 1 < len(ranges):
+                                                     flat_ranges.append((ranges[i], ranges[i+1]))
+                                         else:
+                                             flat_ranges = ranges
 
-                # ---- search highlights (FIXED) ----
-                # ---- search highlights (FIXED) ----
-                if self.search_matches and self.max_match_length > 0:
-                    try:
-                        search_start = max(0, seg_start - self.max_match_length)
-                        idx = bisect.bisect_left(
-                            self.search_matches,
-                            (current_log_line, search_start, 0, 0),
-                        )
-                        for mi in range(idx, len(self.search_matches)):
-                            m = self.search_matches[mi]
-                            s_ln, s_col, e_ln, e_col = m[:4]
-                            if s_ln > current_log_line:
-                                break
-                            if s_ln == current_log_line and s_col >= seg_end:
-                                break
-                            if not (s_ln <= current_log_line <= e_ln):
-                                continue
+                                     color = (1.0, 0.5, 0.0, 0.6) if self.current_match_idx == mi else (1.0, 1.0, 0.0, 0.4)
+                                     cr.set_source_rgba(*color)
+                                     for r_start, r_end in flat_ranges:
+                                         rx = base_x + r_start / Pango.SCALE
+                                         rw = (r_end - r_start) / Pango.SCALE
+                                         cr.rectangle(rx, current_y, rw, self.line_h)
+                                         cr.fill()
+                         except: pass
 
-                            ms = s_col if s_ln == current_log_line else 0
-                            me = e_col if e_ln == current_log_line else seg_end
-                            isect_s = max(ms, seg_start)
-                            isect_e = min(me, seg_end)
-                            if isect_s >= isect_e:
-                                continue
+                     # ---- line numbers ----
+                     if line_idx == 0 and self.show_line_numbers:
+                         cr.set_source_rgb(0.5, 0.5, 0.5)
+                         txt = str(current_log_line + 1)
+                         cr.move_to(
+                             ln_width - len(txt) * self.char_width - 5,
+                             current_y + self.line_h - 5,
+                         )
+                         cr.show_text(txt)
 
-                            rel_s = isect_s - seg_start
-                            rel_e = isect_e - seg_start
-                            b_s = self.visual_byte_index(seg_text, rel_s)
-                            b_e = self.visual_byte_index(seg_text, rel_e)
+                     # ---- text draw ----
+                     
+                     # PangoCairo.show_layout_line draws relative to the BASELINE.
+                     # We use the fixed ascent calculated from font metrics to ensure consistency with cursor
+                     
+                     cr.move_to(base_x, current_y + getattr(self, 'ascent', self.line_h * 0.8))
+                     fg = getattr(self, 'text_foreground_color', (0.9, 0.9, 0.9))
+                     cr.set_source_rgb(*fg)
+                     PangoCairo.show_layout_line(cr, line)
+                     
+                     # ---- cursor ----
+                     if show_cursor and current_log_line == self.buf.cursor_line:
+                         cursor_byte = self.visual_byte_index(line_text, self.buf.cursor_col)
+                         # Check if cursor is on this visual line
+                         # We use layout.index_to_line_x to find which visual line holds this index
+                         c_line_idx, c_x = layout.index_to_line_x(cursor_byte, False)
+                         
+                         if c_line_idx == line_idx:
+                             # Draw cursor
+                             cx = base_x + c_x / Pango.SCALE
+                             
+                             if is_dark:
+                                 cursor_r, cursor_g, cursor_b = 1.0, 1.0, 1.0
+                             else:
+                                 cursor_r, cursor_g, cursor_b = 0.0, 0.0, 0.0
+                                 
+                             cr.set_source_rgba(
+                                 cursor_r, cursor_g, cursor_b,
+                                 self.cursor_phase if self.cursor_phase <= 1 else 2 - self.cursor_phase
+                             )
+                             cr.rectangle(cx, current_y, 1, self.line_h)
+                             cr.fill()
 
-                            pos_s = layout.get_cursor_pos(b_s)[0]
-                            pos_e = layout.get_cursor_pos(b_e)[0]
+                     current_y += self.line_h
+                     visual_lines_drawn += 1
 
-                            x1 = base_x + pos_s.x / Pango.SCALE
-                            x2 = base_x + pos_e.x / Pango.SCALE
-
-                            color = (1.0, 0.5, 0.0, 0.6) if self.current_match_idx == mi else (1.0, 1.0, 0.0, 0.4)
-                            cr.set_source_rgba(*color)
-                            
-                            cr.rectangle(x1, current_y, x2 - x1, self.line_h)
-                            cr.fill()
-                    except Exception as e:
-                        # Log error but don't crash drawing (causes blank screen)
-                        # print(f"Search highlight draw error: {e}")
-                        pass
-
-                # ---- syntax ----
-                attr_list = Pango.AttrList()
-                for s, e, tag in tokens:
-                    ts, te = max(s, seg_start), min(e, seg_end)
-                    if ts < te:
-                        rs, re = ts - seg_start, te - seg_start
-                        bs = self.visual_byte_index(seg_text, rs)
-                        be = self.visual_byte_index(seg_text, re)
-                        color = self.get_color_for_token(tag)
-                        if color:
-                            attr = Pango.attr_foreground_new(
-                                int(color[0] * 65535),
-                                int(color[1] * 65535),
-                                int(color[2] * 65535),
-                            )
-                            attr.start_index = bs
-                            attr.end_index = be
-                            attr_list.insert(attr)
-
-                layout.set_attributes(attr_list)
-
-                # ---- text draw (single clip, correct) ----
-                cr.save()
-                cr.rectangle(ln_width, current_y, viewport_w, self.line_h)
-                cr.clip()
-                cr.move_to(base_x, current_y)
-                # Use the properly configured text foreground color
-                fg = getattr(self, 'text_foreground_color', (0.9, 0.9, 0.9))
-                cr.set_source_rgb(*fg)
-                PangoCairo.show_layout(cr, layout)
-                cr.restore()
-
-                layout.set_attributes(None)
-
-                # ---- cursor ----
-                if show_cursor and current_log_line == self.buf.cursor_line:
-                    # Fix double cursor: only draw if cursor is strictly inside segment range,
-                    # OR if it's at the end of the segment AND this is the last segment of the line.
-                    # e.g. "abc def" -> segments "abc ", "def" (wrap)
-                    # cursor at 4 ('d') -> in segment 2.
-                    # cursor at 3 (' ') -> end of segment 1.
-                    is_in_segment = (seg_start <= self.buf.cursor_col < seg_end)
-                    is_at_end_of_last_segment = (self.buf.cursor_col == seg_end and i == len(segments) - 1)
-                    
-                    if is_in_segment or is_at_end_of_last_segment:
-                        rel = self.buf.cursor_col - seg_start
-                        b = self.visual_byte_index(seg_text, rel)
-                        pos = layout.get_cursor_pos(b)[0]
-                        cx = base_x + pos.x / Pango.SCALE
-                        
-                        # Use theme-appropriate cursor color
-                        if is_dark:
-                            cursor_r, cursor_g, cursor_b = 1.0, 1.0, 1.0  # White for dark theme
-                        else:
-                            cursor_r, cursor_g, cursor_b = 0.0, 0.0, 0.0  # Black for light theme
-                        
-                        cr.set_source_rgba(
-                            cursor_r, cursor_g, cursor_b,
-                            self.cursor_phase if self.cursor_phase <= 1 else 2 - self.cursor_phase
-                        )
-
-                        cr.rectangle(
-                            cx,            # ← FLOAT, DO NOT ROUND
-                            current_y,
-                            1,             # 1px width is fine
-                            self.line_h
-                        )
-                        cr.fill()
-
-
-                current_y += self.line_h
-                visual_lines_drawn += 1
-
+                 line_idx += 1
+                 if not iter.next_line(): break
+            
             current_log_line += 1
 
         self.max_line_width = 0 if self.mapper.enabled else max_line_px
