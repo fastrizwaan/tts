@@ -2321,7 +2321,8 @@ class VirtualTextView(Gtk.DrawingArea):
         
         # Iterate until we find the line or go off screen
         while curr_ln < total_lines:
-             segments = self.mapper.get_line_segments(curr_ln)
+             # Pass 'cr' to ensure Pango-based wrapping for accurate height
+             segments = self.mapper.get_line_segments(curr_ln, cr)
              num_segs = len(segments)
              
              start_seg = 0
