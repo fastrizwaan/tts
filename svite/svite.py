@@ -4758,9 +4758,10 @@ class VirtualTextView(Gtk.DrawingArea):
                      
                      if base_dir == Pango.Direction.RTL:
                          line_width_px = line_extents[1].width / Pango.SCALE
-                         # If wrapped line is shorter than viewport, push it right.
-                         # Allow negative offsets (off-screen left) for unwrapped long lines
-                         final_x_offset = viewport_w - line_width_px
+                         # RTL lines align to max of viewport_w or longest line in document
+                         # This ensures RTL start matches LTR end when LTR extends past viewport
+                         effective_width = max(viewport_w, getattr(self, 'max_line_width', 0))
+                         final_x_offset = effective_width - line_width_px
                          
                      # Add Pango's internal logical x offset (alignment/indentation)
                      # (Usually 0 since we forced LEFT alignment for manual positioning, but good for completeness)
