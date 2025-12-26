@@ -6735,6 +6735,7 @@ class SettingsManager(GObject.Object):
             "auto-indent": True,
             "highlight-current-line": True,
             "highlight-brackets": True,
+            "show-status-bar": False,  # Status bar hidden by default
         }
         self.load()
 
@@ -7070,6 +7071,14 @@ class EditorWindow(Adw.ApplicationWindow):
 
         # Status bar at bottom
         self.status_bar = StatusBar(self)
+        
+        # Set initial visibility from settings (default hidden)
+        app = self.get_application()
+        if app and hasattr(app, 'settings_manager'):
+            self.status_bar.set_visible(app.settings_manager.get_setting("show-status-bar"))
+        else:
+            self.status_bar.set_visible(False)
+        
         toolbar_view.add_bottom_bar(self.status_bar)
 
         self.set_content(toolbar_view)
@@ -8551,6 +8560,7 @@ class EditorWindow(Adw.ApplicationWindow):
         view_submenu = Gio.Menu()
         view_submenu.append("Show Line Numbers", "win.toggle_line_numbers")
         view_submenu.append("Word Wrap", "win.toggle_word_wrap")
+        view_submenu.append("Show Status Bar", "win.toggle_status_bar")
         section6.append_submenu("View", view_submenu)
         
         # Encoding Submenu
@@ -8620,9 +8630,38 @@ class EditorWindow(Adw.ApplicationWindow):
         self.add_simple_action("save-as", self.on_save_as)
         self.add_simple_action("save-copy", self.on_save_copy)
         
-        # View Actions (Toggles)
-        self.add_simple_action("toggle_line_numbers", self.on_toggle_line_numbers)
-        self.add_simple_action("toggle_word_wrap", self.on_toggle_word_wrap)
+        # View Actions (Toggles with checkboxes)
+        # These need to be stateful actions to show checkboxes in the menu
+        app = self.get_application()
+        settings = app.settings_manager if app else None
+        
+        # Line Numbers toggle
+        line_nums_action = Gio.SimpleAction.new_stateful(
+            "toggle_line_numbers", 
+            None,
+            GLib.Variant.new_boolean(settings.get_setting("line-numbers") if settings else True)
+        )
+        line_nums_action.connect("activate", self.on_toggle_line_numbers)
+        self.add_action(line_nums_action)
+        
+        # Word Wrap toggle
+        word_wrap_action = Gio.SimpleAction.new_stateful(
+            "toggle_word_wrap",
+            None,
+            GLib.Variant.new_boolean(settings.get_setting("word-wrap") if settings else True)
+        )
+        word_wrap_action.connect("activate", self.on_toggle_word_wrap)
+        self.add_action(word_wrap_action)
+        
+        # Status Bar toggle
+        status_bar_action = Gio.SimpleAction.new_stateful(
+            "toggle_status_bar",
+            None,
+            GLib.Variant.new_boolean(settings.get_setting("show-status-bar") if settings else False)
+        )
+        status_bar_action.connect("activate", self.on_toggle_status_bar)
+        self.add_action(status_bar_action)
+        
         self.add_simple_action("zoom_in", self.on_zoom_in)
         self.add_simple_action("zoom_out", self.on_zoom_out)
         self.add_simple_action("zoom_reset", self.on_zoom_reset)
@@ -8831,7 +8870,9 @@ class EditorWindow(Adw.ApplicationWindow):
     def on_toggle_line_numbers(self, action, param):
         manager = self.get_application().settings_manager
         current = manager.get_setting("line-numbers")
-        manager.set_setting("line-numbers", not current)
+        new_value = not current
+        manager.set_setting("line-numbers", new_value)
+        action.set_state(GLib.Variant.new_boolean(new_value))
         self.grab_focus_editor()
 
     def on_toggle_word_wrap(self, action, param):
@@ -8842,7 +8883,18 @@ class EditorWindow(Adw.ApplicationWindow):
         
         manager = self.get_application().settings_manager
         current = manager.get_setting("word-wrap")
-        manager.set_setting("word-wrap", not current)
+        new_value = not current
+        manager.set_setting("word-wrap", new_value)
+        action.set_state(GLib.Variant.new_boolean(new_value))
+        self.grab_focus_editor()
+
+    def on_toggle_status_bar(self, action, param):
+        """Toggle status bar visibility"""
+        manager = self.get_application().settings_manager
+        current = manager.get_setting("show-status-bar")
+        new_value = not current
+        manager.set_setting("show-status-bar", new_value)
+        action.set_state(GLib.Variant.new_boolean(new_value))
         self.grab_focus_editor()
 
     def on_zoom_in(self, action, param):
@@ -8864,6 +8916,13 @@ class EditorWindow(Adw.ApplicationWindow):
         self.grab_focus_editor()
 
     def on_setting_changed_win(self, manager, key):
+        # Handle status bar visibility separately (window-level, not per-editor)
+        if key == "show-status-bar":
+            show = manager.get_setting("show-status-bar")
+            if hasattr(self, 'status_bar'):
+                self.status_bar.set_visible(show)
+            return
+            
         # Update all tabs
         for i in range(self.tab_view.get_n_pages()):
             page = self.tab_view.get_nth_page(i)
