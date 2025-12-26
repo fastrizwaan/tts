@@ -2078,10 +2078,18 @@ class VirtualTextView(Gtk.DrawingArea):
                 )
 
                 
-                self.hadj.set_lower(0)
+                self.hadj.set_lower(getattr(self, 'min_content_x', 0))
                 self.hadj.set_upper(content_w)
                 self.hadj.set_page_size(viewport_w)
-                self.hadj.set_value(min(self.scroll_x, max(0, content_w - viewport_w)))
+                
+                # Value clamping: min(scroll_x, upper-page) is standard
+                # But we handle negative min.
+                # Just ensure it's within [lower, upper - page_size]
+                low = getattr(self, 'min_content_x', 0)
+                up = content_w - viewport_w
+                val = max(low, min(self.scroll_x, up))
+                
+                self.hadj.set_value(val)
                 
                 self.hscroll.set_visible(content_w > viewport_w)
 
@@ -2315,8 +2323,11 @@ class VirtualTextView(Gtk.DrawingArea):
             self.mapper.set_tab_array(tabs)
         
         # Configure layout width to match viewport (for consistent wrapping)
-        layout.set_width(int(getattr(self.mapper, '_viewport_width_px', 800) * Pango.SCALE))
-        layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+        if self.mapper.enabled:
+            layout.set_width(int(getattr(self.mapper, '_viewport_width_px', 800) * Pango.SCALE))
+            layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+        else:
+            layout.set_width(-1)
         layout.set_auto_dir(True)
         
         # Iterate until we find the line or go off screen
@@ -2348,8 +2359,11 @@ class VirtualTextView(Gtk.DrawingArea):
                  text = get_line(curr_ln)
                  layout.set_text(text, -1)
                  # Configure layout manually (VisualLineMapper.configure_layout was removed)
-                 layout.set_width(int(getattr(self.mapper, '_viewport_width_px', 800) * Pango.SCALE))
-                 layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+                 if self.mapper.enabled:
+                     layout.set_width(int(getattr(self.mapper, '_viewport_width_px', 800) * Pango.SCALE))
+                     layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+                 else:
+                     layout.set_width(-1)
                  layout.set_auto_dir(True)
                  
                  # Explicitly check for RTL base direction
@@ -4389,7 +4403,11 @@ class VirtualTextView(Gtk.DrawingArea):
             
         if dx and not self.mapper.enabled:
             self.skip_cursor_moved = True # Prevent cursor move from clearing scroll_x
-            self.scroll_x = max(0, self.scroll_x + int(dx * 40))
+            
+            # Allow negative scrolling if min_content_x < 0
+            min_x = getattr(self, 'min_content_x', 0)
+            
+            self.scroll_x = max(min_x, self.scroll_x + int(dx * 40))
             self.queue_draw()
 
         return True
@@ -4517,6 +4535,7 @@ class VirtualTextView(Gtk.DrawingArea):
         visual_lines_drawn = 0
         total_lines = self.buf.total()
         max_line_px = 0
+        min_line_px = 0
 
         # Update mapper context once per draw to ensure accuracy
         if hasattr(self, 'get_pango_context'):
@@ -4531,8 +4550,11 @@ class VirtualTextView(Gtk.DrawingArea):
             
             # Configure layout manually (VisualLineMapper.configure_layout was removed)
             # Match settings from word_wrap.py
-            layout.set_width(int(viewport_w * Pango.SCALE))
-            layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+            if self.mapper.enabled:
+                layout.set_width(int(viewport_w * Pango.SCALE))
+                layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+            else:
+                layout.set_width(-1) # No wrap
             # Auto-direction for shaping
             layout.set_auto_dir(True)
             
@@ -4663,11 +4685,20 @@ class VirtualTextView(Gtk.DrawingArea):
                      
                      if base_dir == Pango.Direction.RTL:
                          line_width_px = line_extents[1].width / Pango.SCALE
+                         # If wrapped line is shorter than viewport, push it right.
+                         # Allow negative offsets (off-screen left) for unwrapped long lines
                          final_x_offset = viewport_w - line_width_px
                          
                      # Add Pango's internal logical x offset (alignment/indentation)
                      # (Usually 0 since we forced LEFT alignment for manual positioning, but good for completeness)
                      final_x_offset += line_extents[1].x / Pango.SCALE
+                     
+                     # Update max/min for scrollbar
+                     current_line_visual_width = final_x_offset + (line_extents[1].width / Pango.SCALE)
+                     if current_line_visual_width > max_line_px:
+                         max_line_px = current_line_visual_width
+                     if final_x_offset < min_line_px:
+                         min_line_px = final_x_offset
 
                      # DEBUG LINES
                      # cr.set_source_rgba(1, 0, 0, 0.3)
@@ -4750,8 +4781,18 @@ class VirtualTextView(Gtk.DrawingArea):
                                      ms_byte = self.visual_byte_index(line_text, s_col)
                                      me_byte = self.visual_byte_index(line_text, e_col) if e_ln == current_log_line else 1000000
                                      
-                                     ranges = line.get_x_ranges(ms_byte, me_byte)
+                                     # svite_fix: get_x_ranges is returning broken data (len 1 list)
+                                     # We manually calculate range using index_to_x
+                                     ranges = []
+                                     try:
+                                         x1 = line.index_to_x(ms_byte, False)
+                                         x2 = line.index_to_x(me_byte, False)
+                                         ranges = [x1, x2]
+                                     except:
+                                          pass
                                      
+                                     # DEBUG SEARCH (Removed)
+                                      
                                      # Handle flat list [x1, x2, x3, x4] or tuple list [(x1, x2), ...]
                                      flat_ranges = []
                                      if ranges:
@@ -4826,6 +4867,7 @@ class VirtualTextView(Gtk.DrawingArea):
             current_log_line += 1
 
         self.max_line_width = 0 if self.mapper.enabled else max_line_px
+        self.min_content_x = 0 if self.mapper.enabled else min_line_px
 
         if self.needs_scrollbar_init and w > 0 and h > 0:
             self.needs_scrollbar_init = False
