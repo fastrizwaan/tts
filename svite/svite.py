@@ -2571,16 +2571,24 @@ class VirtualTextView(Gtk.DrawingArea):
             return True
 
         if keyval == Gdk.KEY_Tab:
+            # Get use_spaces and tab_width from parent EditorPage
+            editor = getattr(self, "_editor", None)
+            use_spaces = editor.use_spaces if editor else True
+            tab_width = editor.tab_width if editor else 4
+            
             if shift_pressed:
                 self.buf.unindent_selection()
             elif self.buf.selection.has_selection() and \
                  self.buf.selection.start_line != self.buf.selection.end_line:
-                self.buf.indent_selection()
+                # Indent with tabs or spaces based on use_spaces setting
+                indent_str = " " * tab_width if use_spaces else "\t"
+                self.buf.indent_selection(indent_str)
             else:
-                if getattr(self, "use_tabs", True):
-                    self.buf.insert_text("\t")
+                # use_spaces=True means insert spaces, False means insert real tab
+                if use_spaces:
+                    self.buf.insert_text(" " * tab_width)
                 else:
-                    self.buf.insert_text(" " * self.tab_width)
+                    self.buf.insert_text("\t")
             self.queue_draw()
             return True
 
@@ -4998,6 +5006,12 @@ class StatusBar(Gtk.Box):
         self.set_margin_top(0)
         self.set_margin_bottom(0)
         
+        # Connect to settings change signal for real-time sync
+        # Settings is on the Application, not EditorWindow
+        app = editor_window.get_application()
+        if app and hasattr(app, 'settings_manager'):
+            app.settings_manager.connect("setting-changed", self._on_setting_changed)
+        
         # File type dropdown
         self.file_type_button = Gtk.MenuButton()
         self.file_type_label = Gtk.Label()
@@ -5014,7 +5028,16 @@ class StatusBar(Gtk.Box):
         # Tab width dropdown
         self.tab_width_button = Gtk.MenuButton()
         self.tab_width_label = Gtk.Label()
-        self.tab_width_label.set_markup("<span font_weight='normal'>Tab Width: 4</span>")
+        
+        # Read tab width from settings (default 4)
+        init_tab = 4
+        app = editor_window.get_application()
+        if app and hasattr(app, 'settings_manager'):
+            init_tab = app.settings_manager.get_setting("tab-width")
+            if init_tab not in [2, 4, 8]:
+                init_tab = 4
+        self.tab_width_label.set_markup(f"<span font_weight='normal'>Tab Width: {init_tab}</span>")
+        
         self.tab_width_label.set_use_markup(True)
         self.tab_width_button.set_child(self.tab_width_label)
         self.tab_width_button.add_css_class("flat")
@@ -5196,8 +5219,12 @@ class StatusBar(Gtk.Box):
         box.set_margin_start(3)
         box.set_margin_end(3)
         
-        # Store current tab width (default is 4)
-        self.current_tab_width = 4
+        # Store current tab width from settings (default is 4)
+        settings_tab = 4
+        app = self.editor_window.get_application()
+        if app and hasattr(app, 'settings_manager'):
+            settings_tab = app.settings_manager.get_setting("tab-width")
+        self.current_tab_width = settings_tab if settings_tab in [2, 4, 8] else 4
         
         # Create radio buttons for tab widths
         tab_widths = [2, 4, 8]
@@ -5231,8 +5258,8 @@ class StatusBar(Gtk.Box):
                 radio = Gtk.CheckButton()
                 radio.set_group(first_radio)
             
-            # Set active if this is the default width (4)
-            if width == 4:
+            # Set active if this is the current tab width from settings
+            if width == self.current_tab_width:
                 radio.set_active(True)
             
             # Store reference
@@ -5272,7 +5299,15 @@ class StatusBar(Gtk.Box):
         use_spaces_row.append(use_spaces_label)
         
         self.tab_width_use_spaces_check = Gtk.CheckButton()
-        self.tab_width_use_spaces_check.set_active(True)
+        
+        # Read use-tabs from settings (use-spaces is the inverse)
+        use_spaces_init = True  # default
+        app = self.editor_window.get_application()
+        if app and hasattr(app, 'settings_manager'):
+            use_tabs = app.settings_manager.get_setting("use-tabs")
+            use_spaces_init = not use_tabs
+        self.tab_width_use_spaces_check.set_active(use_spaces_init)
+        
         self.tab_width_use_spaces_check.connect("toggled", self._on_tab_width_use_spaces_toggled)
         use_spaces_row.append(self.tab_width_use_spaces_check)
         
@@ -5297,6 +5332,12 @@ class StatusBar(Gtk.Box):
                 editor.tab_width = width
                 editor.view.tab_width = width
                 
+                # Also save to settings for sync with settings dialog
+                if hasattr(self.editor_window, 'get_application'):
+                    app = self.editor_window.get_application()
+                    if app and hasattr(app, 'settings_manager'):
+                        app.settings_manager.set_setting("tab-width", width)
+                
                 # Update label with bold if changed from default
                 is_changed = width != editor.default_tab_width
                 if is_changed:
@@ -5308,11 +5349,58 @@ class StatusBar(Gtk.Box):
     
     def _on_tab_width_use_spaces_toggled(self, check_button):
         """Handle use spaces toggle from tab width popover"""
+        use_spaces = check_button.get_active()
+        
         # Apply to current editor
         editor = self.editor_window.get_current_page()
         if editor:
-            editor.use_spaces = check_button.get_active()
+            editor.use_spaces = use_spaces
+        
+        # Save to settings as use-tabs (inverted)
+        app = self.editor_window.get_application()
+        if app and hasattr(app, 'settings_manager'):
+            app.settings_manager.set_setting("use-tabs", not use_spaces)
 
+    def _on_setting_changed(self, settings_manager, key):
+        """Handle real-time settings changes from settings dialog"""
+        if key == "tab-width":
+            width = settings_manager.get_setting("tab-width")
+            if width not in [2, 4, 8]:
+                width = 4
+            
+            # Update label
+            self.tab_width_label.set_markup(f"<span font_weight='normal'>Tab Width: {width}</span>")
+            
+            # Update radio button (block signal to avoid feedback loop)
+            if hasattr(self, 'tab_width_radios') and width in self.tab_width_radios:
+                radio = self.tab_width_radios[width]
+                radio.handler_block_by_func(self._on_tab_width_radio_toggled)
+                radio.set_active(True)
+                radio.handler_unblock_by_func(self._on_tab_width_radio_toggled)
+            
+            # Update current editor
+            editor = self.editor_window.get_current_page()
+            if editor:
+                editor.tab_width = width
+                if hasattr(editor, 'view'):
+                    editor.view.tab_width = width
+                    editor.view.queue_draw()
+        
+        elif key == "use-tabs":
+            # use-tabs is the OPPOSITE of use-spaces
+            use_tabs = settings_manager.get_setting("use-tabs")
+            use_spaces = not use_tabs
+            
+            # Update Use Spaces checkbox (block signal to avoid feedback loop)
+            if hasattr(self, 'tab_width_use_spaces_check'):
+                self.tab_width_use_spaces_check.handler_block_by_func(self._on_tab_width_use_spaces_toggled)
+                self.tab_width_use_spaces_check.set_active(use_spaces)
+                self.tab_width_use_spaces_check.handler_unblock_by_func(self._on_tab_width_use_spaces_toggled)
+            
+            # Update current editor
+            editor = self.editor_window.get_current_page()
+            if editor:
+                editor.use_spaces = use_spaces
     
     def _create_encoding_menu(self):
         """Create encoding dropdown"""
@@ -6807,11 +6895,23 @@ class SettingsDialog(Adw.PreferencesWindow):
         # Tab Width
         row_tab = Adw.ActionRow()
         row_tab.set_title("Tab Width")
-        spin_tab = Gtk.SpinButton.new_with_range(2, 8, 1)
-        spin_tab.set_value(self.settings.get_setting("tab-width"))
-        spin_tab.set_valign(Gtk.Align.CENTER)
-        spin_tab.connect("value-changed", lambda w: self.settings.set_setting("tab-width", int(w.get_value())))
-        row_tab.add_suffix(spin_tab)
+        
+        # Use dropdown with specific values 2, 4, 8 to match status bar
+        tab_combo = Gtk.DropDown.new_from_strings(["2", "4", "8"])
+        tab_combo.set_valign(Gtk.Align.CENTER)
+        
+        # Set current value
+        current_tab = self.settings.get_setting("tab-width")
+        tab_index = {2: 0, 4: 1, 8: 2}.get(current_tab, 1)  # Default to 4
+        tab_combo.set_selected(tab_index)
+        
+        def on_tab_changed(combo, _):
+            selected = combo.get_selected()
+            width = [2, 4, 8][selected]
+            self.settings.set_setting("tab-width", width)
+        
+        tab_combo.connect("notify::selected", on_tab_changed)
+        row_tab.add_suffix(tab_combo)
         group_editor.add(row_tab)
 
         self.add(page_editor)

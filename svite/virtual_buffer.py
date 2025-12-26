@@ -1634,8 +1634,8 @@ class VirtualBuffer:
 
     # ==================== Indentation ====================
 
-    def indent_selection(self):
-        """Indent selected lines."""
+    def indent_selection(self, indent_str="    "):
+        """Indent selected lines with the given indent string (tab or spaces)."""
         if not self.selection.has_selection():
              return
 
@@ -1646,8 +1646,6 @@ class VirtualBuffer:
         # e.g. selecting line 1 fully: (1, 0) to (2, 0). Should only affect line 1.
         if end_ln > start_ln and end_col == 0:
             end_ln -= 1
-            
-        indent_str = "    " # Default to 4 spaces
         
         with self.batch_notifications():
              for ln in range(start_ln, end_ln + 1):
