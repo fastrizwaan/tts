@@ -1997,7 +1997,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 # Use reduced padding as requested (20px instead of 25px)
                 # The user requested "reduce the padding" (was 40, then 25, now 10, now 20 polish).
                 # User specifically asked for 10px for non-scrollbar mode.
-                padding = 20 if self.vscroll.get_visible() else 10
+                padding = 30 if self.vscroll.get_visible() else 10
                 viewport_w = max(1, width - ln_width - padding)
                 # width_chars = max(1, int(viewport_w / max(0.1, self.char_width)))
                 
@@ -2046,7 +2046,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 # Need max line width.. rough estimate or scanning
                 # For now assume mostly visible or fixed large width
                 # Horizontal (NO-WRAP)
-                padding = 20 if self.vscroll.get_visible() else 10
+                padding = 30 if self.vscroll.get_visible() else 10
                 viewport_w = width - padding
                 
                 # Compute line number gutter width (must match draw_view)
@@ -4234,7 +4234,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.update_scrollbar()
             # Right edge
             else:
-                 padding = 20 if self.vscroll.get_visible() else 10
+                 padding = 30 if self.vscroll.get_visible() else 10
                  visible_w = width - ln_width - padding
                  # Check right edge with 10px margin to ensure cursor (1-2px) is strictly visible
                  if cursor_x_approx + 10 > scrolled_x + visible_w:
@@ -4503,7 +4503,7 @@ class VirtualTextView(Gtk.DrawingArea):
         else:
             ln_width = 0
 
-        padding = 20 if self.vscroll.get_visible() else 10
+        padding = 30 if self.vscroll.get_visible() else 10
         viewport_w = w - ln_width - padding
         self.mapper.set_viewport_width(viewport_w, self.char_width)
         
@@ -4728,7 +4728,8 @@ class VirtualTextView(Gtk.DrawingArea):
                      # ---- CLIP TEXT REGION ----
                      # Prevent text from overwriting gutter or scrollbar area
                      cr.save()
-                     cr.rectangle(ln_width, current_y, viewport_w, self.line_h)
+                     # Extend clip slightly (+5) to ensure cursor at the right edge is visible
+                     cr.rectangle(ln_width, current_y, viewport_w + 5, self.line_h)
                      cr.clip()
 
                      # ---- selection background ----
