@@ -4715,6 +4715,22 @@ class VirtualTextView(Gtk.DrawingArea):
                          cr.rectangle(0, current_y, w, self.line_h)
                          cr.fill()
 
+                     # ---- line numbers (Moved to be unclipped) ----
+                     if line_idx == 0 and self.show_line_numbers:
+                         cr.set_source_rgb(0.5, 0.5, 0.5)
+                         txt = str(current_log_line + 1)
+                         cr.move_to(
+                             ln_width - len(txt) * self.char_width - 5,
+                             current_y + self.line_h - 5,
+                         )
+                         cr.show_text(txt)
+
+                     # ---- CLIP TEXT REGION ----
+                     # Prevent text from overwriting gutter or scrollbar area
+                     cr.save()
+                     cr.rectangle(ln_width, current_y, viewport_w, self.line_h)
+                     cr.clip()
+
                      # ---- selection background ----
                      if sel_start_ln != -1:
                          # Determine intersection of selection with this logical line
@@ -4813,15 +4829,6 @@ class VirtualTextView(Gtk.DrawingArea):
                                          cr.fill()
                          except: pass
 
-                     # ---- line numbers ----
-                     if line_idx == 0 and self.show_line_numbers:
-                         cr.set_source_rgb(0.5, 0.5, 0.5)
-                         txt = str(current_log_line + 1)
-                         cr.move_to(
-                             ln_width - len(txt) * self.char_width - 5,
-                             current_y + self.line_h - 5,
-                         )
-                         cr.show_text(txt)
 
                      # ---- text draw ----
                      
@@ -4857,6 +4864,9 @@ class VirtualTextView(Gtk.DrawingArea):
                              )
                              cr.rectangle(cx, current_y, 1, self.line_h)
                              cr.fill()
+                             
+                     # Restore clip (end of text drawing for this line)
+                     cr.restore()
 
                      current_y += self.line_h
                      visual_lines_drawn += 1
