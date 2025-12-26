@@ -8872,7 +8872,12 @@ class EditorWindow(Adw.ApplicationWindow):
         current = manager.get_setting("line-numbers")
         new_value = not current
         manager.set_setting("line-numbers", new_value)
-        action.set_state(GLib.Variant.new_boolean(new_value))
+        
+        if action is None:
+            action = self.lookup_action("toggle_line_numbers")
+            
+        if action:
+            action.set_state(GLib.Variant.new_boolean(new_value))
         self.grab_focus_editor()
 
     def on_toggle_word_wrap(self, action, param):
@@ -8885,7 +8890,12 @@ class EditorWindow(Adw.ApplicationWindow):
         current = manager.get_setting("word-wrap")
         new_value = not current
         manager.set_setting("word-wrap", new_value)
-        action.set_state(GLib.Variant.new_boolean(new_value))
+        
+        if action is None:
+            action = self.lookup_action("toggle_word_wrap")
+            
+        if action:
+            action.set_state(GLib.Variant.new_boolean(new_value))
         self.grab_focus_editor()
 
     def on_toggle_status_bar(self, action, param):
@@ -8894,7 +8904,12 @@ class EditorWindow(Adw.ApplicationWindow):
         current = manager.get_setting("show-status-bar")
         new_value = not current
         manager.set_setting("show-status-bar", new_value)
-        action.set_state(GLib.Variant.new_boolean(new_value))
+        
+        if action is None:
+            action = self.lookup_action("toggle_status_bar")
+            
+        if action:
+            action.set_state(GLib.Variant.new_boolean(new_value))
         self.grab_focus_editor()
 
     def on_zoom_in(self, action, param):

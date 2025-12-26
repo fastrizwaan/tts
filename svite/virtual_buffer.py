@@ -1992,13 +1992,32 @@ class VirtualBuffer:
         if not matches:
             return 0
             
+        pattern = None
+        if is_regex:
+            try:
+                flags = 0 if case_sensitive else re.IGNORECASE
+                pattern = re.compile(query, flags)
+            except re.error:
+                pass
+
         self.begin_action()
         try:
             # Reverse order to prevent index invalidation
             count = 0
             for i in range(len(matches) - 1, -1, -1):
                 start_ln, start_col, end_ln, end_col = matches[i]
-                self.replace(start_ln, start_col, end_ln, end_col, replacement, _record_undo=True)
+                
+                final_replacement = replacement
+                if is_regex and pattern:
+                    try:
+                        # Get exact match text
+                        match_text = self.get_text_range(start_ln, start_col, end_ln, end_col)
+                        norm_replacement = normalize_replacement_string(replacement)
+                        final_replacement = pattern.sub(norm_replacement, match_text)
+                    except Exception as e:
+                        print(f"Regex replacement error: {e}")
+                
+                self.replace(start_ln, start_col, end_ln, end_col, final_replacement, _record_undo=True)
                 count += 1
         finally:
             self.end_action()
