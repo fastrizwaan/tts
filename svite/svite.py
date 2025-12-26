@@ -2285,9 +2285,21 @@ class VirtualTextView(Gtk.DrawingArea):
             ln_width = 0
         text_x = x - ln_width - 2 + self.scroll_x
         
-        if text_x < 0: text_x = 0
+        # NOTE: Do NOT clamp text_x to 0!
+        # For RTL text with negative scroll_x, text_x can be negative
+        # and that's valid for the coordinate system.
             
         target_y = y
+        
+        # Calculate viewport_w FRESH (matching draw_view exactly)
+        # This fixes stale viewport width causing RTL cursor offset issues
+        width = self.get_width()
+        padding = 30 if self.vscroll.get_visible() else 10
+        viewport_w = width - ln_width - padding
+        
+        # CRITICAL: Update mapper with fresh viewport_w BEFORE using it!
+        # This ensures mapper.get_line_segments() matches Pango's layout.get_line_count()
+        self.mapper.set_viewport_width(viewport_w, self.char_width)
         
         # Start at scroll_line
         curr_ln = self.scroll_line
@@ -2323,8 +2335,9 @@ class VirtualTextView(Gtk.DrawingArea):
             self.mapper.set_tab_array(tabs)
         
         # Configure layout width to match viewport (for consistent wrapping)
+        # Use our freshly calculated viewport_w
         if self.mapper.enabled:
-            layout.set_width(int(getattr(self.mapper, '_viewport_width_px', 800) * Pango.SCALE))
+            layout.set_width(int(viewport_w * Pango.SCALE))
             layout.set_wrap(Pango.WrapMode.WORD_CHAR)
         else:
             layout.set_width(-1)
@@ -2332,9 +2345,20 @@ class VirtualTextView(Gtk.DrawingArea):
         
         # Iterate until we find the line or go off screen
         while curr_ln < total_lines:
-             # Pass 'cr' to ensure Pango-based wrapping for accurate height
-             segments = self.mapper.get_line_segments(curr_ln, cr)
-             num_segs = len(segments)
+             # FIX: Use Pango's line count instead of mapper segments
+             # This ensures consistency with what draw_view uses for rendering
+             text = get_line(curr_ln)
+             layout.set_text(text, -1)
+             # Configure layout for this line
+             if self.mapper.enabled:
+                 layout.set_width(int(viewport_w * Pango.SCALE))
+                 layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+             else:
+                 layout.set_width(-1)
+             layout.set_auto_dir(True)
+             
+             # Get actual line count from Pango (not mapper)
+             num_segs = layout.get_line_count()
              
              start_seg = 0
              if curr_ln == self.scroll_line:
@@ -2355,16 +2379,7 @@ class VirtualTextView(Gtk.DrawingArea):
                  rel_y_in_view = target_y - curr_y
                  layout_y = (start_seg * self.line_h) + rel_y_in_view
                  
-                 # Setup Layout
-                 text = get_line(curr_ln)
-                 layout.set_text(text, -1)
-                 # Configure layout manually (VisualLineMapper.configure_layout was removed)
-                 if self.mapper.enabled:
-                     layout.set_width(int(getattr(self.mapper, '_viewport_width_px', 800) * Pango.SCALE))
-                     layout.set_wrap(Pango.WrapMode.WORD_CHAR)
-                 else:
-                     layout.set_width(-1)
-                 layout.set_auto_dir(True)
+                 # Layout already configured for this line above
                  
                  # Explicitly check for RTL base direction
                  base_dir = Pango.find_base_dir(text, -1)
@@ -2372,27 +2387,84 @@ class VirtualTextView(Gtk.DrawingArea):
                  # Force LEFT to ensure consistent 0-based Pango coordinates
                  layout.set_alignment(Pango.Alignment.LEFT)
                  
-                 # Calculate manual RTL shift
+                 # FIX: Pango's line heights differ from self.line_h!
+                 # Solution: Use self.line_h to find which line (matching widget drawing),
+                 # then use line.x_to_index() which doesn't need Y at all.
+                 
+                 # Calculate which visual line was clicked using self.line_h
+                 # This MUST match how the widget draws lines
+                 line_count = layout.get_line_count()
+                 visual_line_idx = int(layout_y / self.line_h)
+                 visual_line_idx = max(0, min(visual_line_idx, line_count - 1))
+                 
+                 # Get that specific Pango line
+                 target_pango_line = layout.get_line_readonly(visual_line_idx)
+                 
+                 # Calculate RTL offset for THIS specific line (matching draw_view)
+                 # NOTE: For non-wrapped lines wider than viewport, offset will be NEGATIVE
+                 # This matches draw_view which allows negative offsets for long RTL lines
                  manual_x_offset = 0
-                 if base_dir == Pango.Direction.RTL:
-                     # Get layout width (this line's width)
-                     # (Use logic extents width)
-                     line_w = layout.get_extents()[1].width / Pango.SCALE
+                 line_extents = target_pango_line.get_extents() if target_pango_line else None
+                 
+                 if base_dir == Pango.Direction.RTL and line_extents:
+                     line_w = line_extents[1].width / Pango.SCALE
                      
-                     # Viewport width from mapper or heuristic
-                     vp_w = getattr(self.mapper, '_viewport_width_px', 800)
+                     # Use freshly calculated viewport_w
+                     vp_w = viewport_w
                      
+                     # Push this line to the right edge
+                     # For non-wrapped lines: offset is negative (line extends past viewport)
+                     # For wrapped lines: offset is positive (line is shorter than viewport)
                      manual_x_offset = vp_w - line_w
+                 
+                 # Add Pango's internal logical x offset (matching draw_view line 4730)
+                 # This is added for BOTH RTL and LTR
+                 if line_extents:
+                     manual_x_offset += line_extents[1].x / Pango.SCALE
 
-                 # Hit Test
-                 # Input X is relative to visual viewport Left=0.
-                 # Layout is drawn at X = manual_x_offset.
-                 # So we must subtract this offset to find the X relative to the layout.
+                 # Hit Test using line.x_to_index() - avoids Pango Y mismatch!
                  hit_x = text_x - manual_x_offset
+                 line_w = line_extents[1].width / Pango.SCALE if line_extents else 0
                  
-                 # Returns (inside, index, trailing)
-                 inside, idx, trailing = layout.xy_to_index(int(hit_x * Pango.SCALE), int(layout_y * Pango.SCALE))
+                 # For end-of-line clicks, use the line's start/length to find correct position
+                 # This is important for RTL where clicking past left edge should go to END not START
+                 if target_pango_line:
+                     line_start_idx = target_pango_line.start_index
+                     line_length = target_pango_line.length
+                     
+                     # Check if clicking past the end of RTL text (left side = end for RTL)
+                     if base_dir == Pango.Direction.RTL and hit_x < 0:
+                         # Position at end of this visual line
+                         idx = line_start_idx + line_length
+                         trailing = 0
+                         inside = False
+                     # Check if clicking past the start of RTL text (right side = start for RTL)  
+                     elif base_dir == Pango.Direction.RTL and hit_x > line_w and line_w > 0:
+                         # Position at start of this visual line
+                         idx = line_start_idx
+                         trailing = 0
+                         inside = False
+                     # Check if clicking past end of LTR text (right side = end for LTR)
+                     elif base_dir != Pango.Direction.RTL and hit_x > line_w and line_w > 0:
+                         # Position at end of this visual line
+                         idx = line_start_idx + line_length
+                         trailing = 0
+                         inside = False
+                     # Check if clicking past start of LTR text (left side = start for LTR)
+                     elif base_dir != Pango.Direction.RTL and hit_x < 0:
+                         # Position at start of this visual line
+                         idx = line_start_idx
+                         trailing = 0
+                         inside = False
+                     else:
+                         # Normal case - let Pango figure it out
+                         inside, idx, trailing = target_pango_line.x_to_index(int(hit_x * Pango.SCALE))
+                 else:
+                     # Fallback
+                     inside, idx, trailing = layout.xy_to_index(int(hit_x * Pango.SCALE), int(layout_y * Pango.SCALE))
                  
+
+
                  found_col = self.byte_index_to_char_index(text, idx)
                  if trailing > 0:
                      found_col += trailing
@@ -2409,6 +2481,7 @@ class VirtualTextView(Gtk.DrawingArea):
              found_ln = max(0, total_lines - 1)
              found_col = len(get_line(found_ln))
              
+
         return found_ln, found_col
 
     def pixel_to_column(self, cr, text, px):
@@ -4845,9 +4918,18 @@ class VirtualTextView(Gtk.DrawingArea):
                      # ---- cursor ----
                      if show_cursor and current_log_line == self.buf.cursor_line:
                          cursor_byte = self.visual_byte_index(line_text, self.buf.cursor_col)
-                         # Check if cursor is on this visual line
-                         # We use layout.index_to_line_x to find which visual line holds this index
-                         c_line_idx, c_x = layout.index_to_line_x(cursor_byte, False)
+                         
+                         # For end-of-line cursor (cursor_col == len(text)):
+                         # Use trailing=True on the LAST character to get position AFTER it
+                         # This is important for RTL where "after last char" is visually on the LEFT
+                         text_len_bytes = len(line_text.encode('utf-8'))
+                         if cursor_byte >= text_len_bytes and text_len_bytes > 0:
+                             # Cursor at or past end of text - use trailing on last byte
+                             c_line_idx, c_x = layout.index_to_line_x(text_len_bytes - 1, True)
+                         else:
+                             c_line_idx, c_x = layout.index_to_line_x(cursor_byte, False)
+                         
+
                          
                          if c_line_idx == line_idx:
                              # Draw cursor
