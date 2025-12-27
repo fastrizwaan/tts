@@ -2523,24 +2523,14 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # Undo (Ctrl+Z)
         if ctrl_pressed and not shift_pressed and not alt_pressed and (name == "z" or name == "Z"):
-            pos = self.undo_manager.undo(self.buf)
-            if pos:
-                self.buf.set_cursor(pos.line, pos.col)
-            self.update_scrollbar()
-            self.keep_cursor_visible()
-            self.queue_draw()
+            self.on_undo_action()
             return True
             
         # Redo (Ctrl+Y or Ctrl+Shift+Z)
         if ctrl_pressed and \
            ((not shift_pressed and (name == "y" or name == "Y")) or \
             (shift_pressed and (name == "z" or name == "Z"))):
-            pos = self.undo_manager.redo(self.buf)
-            if pos:
-                self.buf.set_cursor(pos.line, pos.col)
-            self.update_scrollbar()
-            self.keep_cursor_visible()
-            self.queue_draw()
+            self.on_redo_action()
             return True
 
         # Alt+Z - Toggle word wrap
@@ -3008,31 +2998,117 @@ class VirtualTextView(Gtk.DrawingArea):
             self.queue_draw()
 
     def on_undo_action(self):
-        """Undo action handler"""
-        pos = self.undo_manager.undo(self.buf)
-        if pos:
-            self.buf.set_cursor(pos.line, pos.col)
-        self.update_scrollbar()
-        self.keep_cursor_visible()
-        self.queue_draw()
-        
-        # Update modification state
-        if hasattr(self, '_editor'):
-            editor = self._editor
-            is_modified = editor.check_modification_state()
+        """Undo action handler with async support"""
+        gen = self.undo_manager.undo_async(self.buf)
+        if not gen:
+            return
             
-            # Notify observers
-            if editor:
-                editor.notify_observers()
-
+        self._process_async_command(gen, "Undoing...")
+        
     def on_redo_action(self):
-        """Redo action handler"""
-        pos = self.undo_manager.redo(self.buf)
-        if pos:
-            self.buf.set_cursor(pos.line, pos.col)
-        self.update_scrollbar()
-        self.keep_cursor_visible()
-        self.queue_draw()
+        """Redo action handler with async support"""
+        gen = self.undo_manager.redo_async(self.buf)
+        if not gen:
+            return
+            
+        self._process_async_command(gen, "Redoing...")
+        
+    def _process_async_command(self, generator, msg="Processing..."):
+        """Process an async command generator with UI feedback"""
+        # Use header bar progress instead of center overlay
+        if hasattr(self, '_editor') and self._editor:
+            self._editor.set_loading(True)
+            self._editor.progress = 0.0
+            self._editor.notify_observers()
+            
+            # Update window subtitle if we can access the window
+            window = self.get_ancestor(Adw.ApplicationWindow)
+            if window and hasattr(window, 'window_title'):
+                self._original_subtitle = window.window_title.get_subtitle()
+                window.window_title.set_subtitle(f"{msg} 0%")
+            
+        # Suppress notifications for performance
+        if hasattr(self.buf, 'begin_suppress_notifications'):
+            self.buf.begin_suppress_notifications()
+            
+        def cleanup():
+            if hasattr(self.buf, 'end_suppress_notifications'):
+                self.buf.end_suppress_notifications()
+            
+            # Restore header bar state
+            if hasattr(self, '_editor') and self._editor:
+                self._editor.set_loading(False)
+                self._editor.notify_observers()
+                
+                # Restore subtitle
+                window = self.get_ancestor(Adw.ApplicationWindow)
+                if window and hasattr(window, 'window_title'):
+                    original = getattr(self, '_original_subtitle', '')
+                    window.window_title.set_subtitle(original)
+                    if hasattr(window, 'update_header_title'):
+                        window.update_header_title()
+            
+            # Force final update
+            self.on_buffer_changed()
+            self._check_modification_state()
+
+        def process_chunk():
+            try:
+                # Process a chunk of work
+                start_time = time.time()
+                while time.time() - start_time < 0.016: # 16ms budget
+                    try:
+                        result = next(generator)
+                        
+                        if result[0] == 'done':
+                            # Completed
+                            pos = result[1]
+                            if pos:
+                                self.buf.set_cursor(pos.line, pos.col)
+                            self.update_scrollbar()
+                            self.keep_cursor_visible()
+                            
+                            cleanup()
+                            return False # Stop idle
+                            
+                        elif result[0] == 'progress':
+                            # Update progress
+                            current, total = result[1], result[2]
+                            if total > 0:
+                                fraction = current / total
+                                percent = int(fraction * 100)
+                                
+                                # Update header progress bar
+                                if hasattr(self, '_editor') and self._editor:
+                                    self._editor.progress = fraction
+                                    self._editor.notify_observers()
+                                    
+                                # Update subtitle
+                                window = self.get_ancestor(Adw.ApplicationWindow)
+                                if window and hasattr(window, 'window_title'):
+                                    window.window_title.set_subtitle(f"{msg} {percent}%")
+                                
+                    except StopIteration:
+                        cleanup()
+                        return False 
+                        
+                return True # Continue next idle tick
+                
+            except Exception as e:
+                print(f"Async command error: {e}")
+                cleanup()
+                return False
+                
+        # Force a small delay to allow the UI to render
+        GLib.timeout_add(50, process_chunk)
+        
+    def _check_modification_state(self):
+        """Update modification state after undo/redo"""
+        if hasattr(self, '_editor') and self._editor:
+            editor = self._editor
+            # Force check
+            editor.check_modification_state()
+            editor.notify_observers()
 
     def find_word_boundaries(self, line, col):
         """Find word boundaries at the given position. Words include alphanumeric and underscore."""

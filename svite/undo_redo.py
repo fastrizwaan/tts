@@ -112,6 +112,20 @@ class Command(ABC):
         """
         return None
 
+    def undo_generator(self, buffer: 'VirtualBuffer'):
+        """
+        Async undo via generator. 
+        Yields ('progress', current, total) or ('done', position).
+        """
+        yield ('done', self.undo(buffer))
+
+    def redo_generator(self, buffer: 'VirtualBuffer'):
+        """
+        Async redo via generator.
+        Yields ('progress', current, total) or ('done', position).
+        """
+        yield ('done', self.redo(buffer))
+
 
 class InsertCommand(Command):
     """Command for text insertion."""
@@ -301,6 +315,34 @@ class BatchCommand(Command):
     def get_command_type(self) -> CommandType:
         return CommandType.BATCH
 
+    def undo_generator(self, buffer: 'VirtualBuffer'):
+        """Undo all commands in reverse order with progress."""
+        last_pos = Position(0, 0)
+        total = len(self.commands)
+        
+        # Reverse iterate
+        for i, cmd in enumerate(reversed(self.commands)):
+            # Yield progress every 100 items to avoid UI overhead
+            if i % 100 == 0:
+                yield ('progress', i, total)
+                
+            last_pos = cmd.undo(buffer)
+            
+        yield ('done', last_pos)
+
+    def redo_generator(self, buffer: 'VirtualBuffer'):
+        """Redo all commands in order with progress."""
+        last_pos = Position(0, 0)
+        total = len(self.commands)
+        
+        for i, cmd in enumerate(self.commands):
+            if i % 100 == 0:
+                yield ('progress', i, total)
+                
+            last_pos = cmd.execute(buffer)
+            
+        yield ('done', last_pos)
+
 
 class UndoRedoManager:
     """
@@ -384,6 +426,30 @@ class UndoRedoManager:
         self._undo_stack.append(command)
         
         return position
+
+    def undo_async(self, buffer: 'VirtualBuffer'):
+        """
+        Async undo. Returns generator or None.
+        Generator yields progress and finally ('done', position).
+        """
+        if not self.can_undo:
+            return None
+            
+        command = self._undo_stack.pop()
+        self._redo_stack.append(command) # Move to redo stack immediately
+        return command.undo_generator(buffer)
+
+    def redo_async(self, buffer: 'VirtualBuffer'):
+        """
+        Async redo. Returns generator or None.
+        Generator yields progress and finally ('done', position).
+        """
+        if not self.can_redo:
+            return None
+            
+        command = self._redo_stack.pop()
+        self._undo_stack.append(command) # Move to undo stack immediately
+        return command.redo_generator(buffer)
     
     def begin_batch(self) -> None:
         """Start a batch of commands that will be undone/redone together."""

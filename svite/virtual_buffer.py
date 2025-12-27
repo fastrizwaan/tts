@@ -867,6 +867,15 @@ class VirtualBuffer:
         if callback in self._observers:
             self._observers.remove(callback)
             
+    def begin_suppress_notifications(self):
+        """Start suppressing change notifications."""
+        self._suppress_notifications += 1
+
+    def end_suppress_notifications(self):
+        """Stop suppressing change notifications."""
+        if self._suppress_notifications > 0:
+            self._suppress_notifications -= 1
+
     def _notify_observers(self):
         """Notify all observers of a change."""
         if self._suppress_notifications > 0:
