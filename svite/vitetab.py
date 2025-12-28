@@ -42,7 +42,7 @@ VITE_TAB_CSS = """
 
 .chrome-tab .progress-bar progress {
     min-height: 2px;
-    background-color: @accent_color;
+    background-color: #3584e4;
     border-radius: 0;
 }
 
