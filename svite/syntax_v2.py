@@ -409,6 +409,55 @@ class JsonPatterns:
     KEY_STRING = re.compile(r'"(?:[^"\\]|\\.)*"\s*(?=:)')
 
 
+class XmlPatterns:
+    """Pre-compiled regex patterns for XML/XSL syntax highlighting.
+    
+    Based on VSCode's XML TextMate grammar.
+    """
+    
+    # Comments: <!-- ... -->
+    COMMENT_START = re.compile(r'<!--')
+    COMMENT_END = re.compile(r'-->')
+    
+    # CDATA: <![CDATA[ ... ]]>
+    CDATA_START = re.compile(r'<!\[CDATA\[')
+    CDATA_END = re.compile(r'\]\]>')
+    
+    # Processing instruction: <?xml ... ?>
+    PI_START = re.compile(r'<\?')
+    PI_END = re.compile(r'\?>')
+    PI_TARGET = re.compile(r'<\?\s*([-_a-zA-Z0-9]+)')
+    
+    # DOCTYPE: <!DOCTYPE ...>
+    DOCTYPE = re.compile(r'<!DOCTYPE\b')
+    
+    # Tag patterns
+    # Opening tag: <tagname or <ns:tagname
+    TAG_OPEN = re.compile(r'<(?![-!?/])(?:([-\w.]+)(:))?([-\w.:]+)')
+    # Closing tag: </tagname>
+    TAG_CLOSE = re.compile(r'</(?:([-\w.]+)(:))?([-\w.:]+)\s*>')
+    # Self-closing end: />
+    TAG_SELF_CLOSE = re.compile(r'/>')
+    # Tag end: >
+    TAG_END = re.compile(r'>')
+    # Tag start bracket
+    TAG_BRACKET_OPEN = re.compile(r'</?')
+    TAG_BRACKET_CLOSE = re.compile(r'/?>') 
+    
+    # Attributes: name="value" or name='value'
+    ATTRIBUTE_NAME = re.compile(r'(?:^|\s+)(?:([-\w.]+)(:))?([-\w.:]+)\s*(?==)')
+    
+    # Strings (attribute values)
+    DOUBLE_QUOTED = re.compile(r'"[^"]*"')
+    SINGLE_QUOTED = re.compile(r"'[^']*'")
+    
+    # Entity references: &amp; &#123; &#x1F;
+    ENTITY = re.compile(r'&(?:[:a-zA-Z_][:a-zA-Z0-9_.-]*|#[0-9]+|#x[0-9a-fA-F]+);')
+    
+    # Equal sign
+    EQUALS = re.compile(r'=')
+
+
 # =============================================================================
 # STATE-AWARE SYNTAX ENGINE
 # =============================================================================
@@ -453,6 +502,8 @@ class StateAwareSyntaxEngine:
             self._patterns = YamlPatterns
         elif self.language == 'json':
             self._patterns = JsonPatterns
+        elif self.language in ('xml', 'xsl'):
+            self._patterns = XmlPatterns
         else:
             self._patterns = None
 
@@ -555,6 +606,8 @@ class StateAwareSyntaxEngine:
             return self._tokenize_yaml(line_num, text)
         elif self.language == 'json':
             return self._tokenize_json(line_num, text)
+        elif self.language in ('xml', 'xsl'):
+            return self._tokenize_xml(line_num, text)
         else:
             return self._tokenize_simple(text)
     
@@ -1300,6 +1353,204 @@ class StateAwareSyntaxEngine:
             pos += 1
         
         # JSON doesn't need multi-line state tracking
+        self.state_chain.set_end_state(line_num, TokenState.ROOT)
+        
+        return tokens
+    
+    def _tokenize_xml(self, line_num: int, text: str) -> List[Tuple[int, int, str]]:
+        """
+        Tokenize XML/XSL content.
+        
+        Handles tags, attributes, comments, CDATA, processing instructions,
+        DOCTYPE, and entity references.
+        """
+        P = self._patterns
+        tokens = []
+        pos = 0
+        length = len(text)
+        
+        while pos < length:
+            ch = text[pos]
+            
+            # Skip whitespace
+            if ch in ' \t\n\r':
+                pos += 1
+                continue
+            
+            # 1. Comment start: <!--
+            m = P.COMMENT_START.match(text, pos)
+            if m:
+                # Find end of comment
+                end_match = P.COMMENT_END.search(text, m.end())
+                if end_match:
+                    tokens.append((pos, end_match.end(), 'comment'))
+                    pos = end_match.end()
+                else:
+                    # Comment continues to end of line
+                    tokens.append((pos, length, 'comment'))
+                    pos = length
+                continue
+            
+            # 2. CDATA: <![CDATA[ ... ]]>
+            m = P.CDATA_START.match(text, pos)
+            if m:
+                end_match = P.CDATA_END.search(text, m.end())
+                if end_match:
+                    tokens.append((pos, m.end(), 'xml_cdata_start'))
+                    tokens.append((m.end(), end_match.start(), 'string'))
+                    tokens.append((end_match.start(), end_match.end(), 'xml_cdata_end'))
+                    pos = end_match.end()
+                else:
+                    tokens.append((pos, length, 'string'))
+                    pos = length
+                continue
+            
+            # 3. Processing instruction: <?xml ... ?>
+            m = P.PI_TARGET.match(text, pos)
+            if m:
+                # Highlight <? and target name
+                tokens.append((pos, pos + 2, 'xml_pi_bracket'))
+                tokens.append((pos + 2, m.end(), 'xml_pi_target'))
+                pos = m.end()
+                
+                # Find ?>
+                pi_end = P.PI_END.search(text, pos)
+                if pi_end:
+                    # Parse attributes in between
+                    inner_text = text[pos:pi_end.start()]
+                    inner_pos = 0
+                    while inner_pos < len(inner_text):
+                        # Attribute name
+                        attr_m = P.ATTRIBUTE_NAME.match(inner_text, inner_pos)
+                        if attr_m:
+                            attr_start = pos + attr_m.start()
+                            attr_end = pos + attr_m.end()
+                            # Find the actual attribute name part (group 3)
+                            if attr_m.group(3):
+                                name_start = inner_text.find(attr_m.group(3), inner_pos)
+                                if name_start >= 0:
+                                    tokens.append((pos + name_start, pos + name_start + len(attr_m.group(3)), 'xml_attribute'))
+                            inner_pos = attr_m.end()
+                            continue
+                        
+                        # String value
+                        dq_m = P.DOUBLE_QUOTED.match(inner_text, inner_pos)
+                        if dq_m:
+                            tokens.append((pos + dq_m.start(), pos + dq_m.end(), 'string'))
+                            inner_pos = dq_m.end()
+                            continue
+                        
+                        sq_m = P.SINGLE_QUOTED.match(inner_text, inner_pos)
+                        if sq_m:
+                            tokens.append((pos + sq_m.start(), pos + sq_m.end(), 'string'))
+                            inner_pos = sq_m.end()
+                            continue
+                        
+                        inner_pos += 1
+                    
+                    tokens.append((pi_end.start(), pi_end.end(), 'xml_pi_bracket'))
+                    pos = pi_end.end()
+                continue
+            
+            # 4. DOCTYPE: <!DOCTYPE ...>
+            m = P.DOCTYPE.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'xml_doctype'))
+                pos = m.end()
+                continue
+            
+            # 5. Closing tag: </tagname>
+            m = P.TAG_CLOSE.match(text, pos)
+            if m:
+                tokens.append((pos, pos + 2, 'xml_bracket'))  # </
+                # Namespace
+                if m.group(1):
+                    ns_start = pos + 2
+                    tokens.append((ns_start, ns_start + len(m.group(1)), 'xml_tag'))
+                    tokens.append((ns_start + len(m.group(1)), ns_start + len(m.group(1)) + 1, 'xml_bracket'))  # :
+                # Tag name
+                tag_name = m.group(3)
+                tag_start = text.find(tag_name, pos + 2)
+                if tag_start >= 0:
+                    tokens.append((tag_start, tag_start + len(tag_name), 'xml_tag'))
+                tokens.append((m.end() - 1, m.end(), 'xml_bracket'))  # >
+                pos = m.end()
+                continue
+            
+            # 6. Opening tag: <tagname ...>
+            m = P.TAG_OPEN.match(text, pos)
+            if m:
+                tokens.append((pos, pos + 1, 'xml_bracket'))  # <
+                # Namespace
+                if m.group(1):
+                    ns_start = pos + 1
+                    tokens.append((ns_start, ns_start + len(m.group(1)), 'xml_tag'))
+                    tokens.append((ns_start + len(m.group(1)), ns_start + len(m.group(1)) + 1, 'xml_bracket'))  # :
+                # Tag name
+                tag_name = m.group(3)
+                tag_start = text.find(tag_name, pos + 1)
+                if tag_start >= 0:
+                    tokens.append((tag_start, tag_start + len(tag_name), 'xml_tag'))
+                pos = m.end()
+                continue
+            
+            # 7. Self-closing end: />
+            m = P.TAG_SELF_CLOSE.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'xml_bracket'))
+                pos = m.end()
+                continue
+            
+            # 8. Tag end: >
+            m = P.TAG_END.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'xml_bracket'))
+                pos = m.end()
+                continue
+            
+            # 9. Attribute name
+            m = P.ATTRIBUTE_NAME.match(text, pos)
+            if m:
+                # Find the attribute name (group 3)
+                if m.group(3):
+                    name_match = m.group(3)
+                    name_start = text.find(name_match, pos)
+                    if name_start >= 0:
+                        tokens.append((name_start, name_start + len(name_match), 'xml_attribute'))
+                pos = m.end()
+                continue
+            
+            # 10. Equal sign
+            m = P.EQUALS.match(text, pos)
+            if m:
+                pos = m.end()
+                continue
+            
+            # 11. Double-quoted string
+            m = P.DOUBLE_QUOTED.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'string'))
+                pos = m.end()
+                continue
+            
+            # 12. Single-quoted string
+            m = P.SINGLE_QUOTED.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'string'))
+                pos = m.end()
+                continue
+            
+            # 13. Entity reference: &amp;
+            m = P.ENTITY.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'xml_entity'))
+                pos = m.end()
+                continue
+            
+            # No match - skip character
+            pos += 1
+        
+        # XML doesn't need complex multi-line state for basic highlighting
         self.state_chain.set_end_state(line_num, TokenState.ROOT)
         
         return tokens

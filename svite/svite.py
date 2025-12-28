@@ -467,6 +467,9 @@ def detect_language(path):
         '.yaml': 'yaml',
         '.yml': 'yaml',
         '.json': 'json',
+        '.xml': 'xml',
+        '.xsl': 'xsl',
+        '.xslt': 'xsl',
     }
     return mapping.get(ext, None)
 
@@ -4204,6 +4207,17 @@ class VirtualTextView(Gtk.DrawingArea):
                 'json_null': hex_to_pango("#d19a66"),         # Orange (constant)
                 'json_bracket': hex_to_pango("#abb2bf"),      # Default text
                 'json_comma': hex_to_pango("#abb2bf"),        # Default text
+                
+                # XML-specific colors
+                'xml_tag': hex_to_pango("#e06c75"),            # Red (tag names)
+                'xml_attribute': hex_to_pango("#d19a66"),      # Orange (attribute names)
+                'xml_bracket': hex_to_pango("#abb2bf"),        # Default text (< > />) 
+                'xml_entity': hex_to_pango("#c678dd"),         # Purple (entity refs)
+                'xml_cdata_start': hex_to_pango("#5c6370"),    # Grey (CDATA markers)
+                'xml_cdata_end': hex_to_pango("#5c6370"),      # Grey
+                'xml_pi_bracket': hex_to_pango("#abb2bf"),     # Default text (<? ?>)
+                'xml_pi_target': hex_to_pango("#c678dd"),      # Purple (xml in <?xml)
+                'xml_doctype': hex_to_pango("#c678dd"),        # Purple
             }
         else:
             self.text_foreground_color = (0.2, 0.2, 0.2)
@@ -4289,6 +4303,17 @@ class VirtualTextView(Gtk.DrawingArea):
                 'json_null': hex_to_pango("#986801"),         # Orange (constant)
                 'json_bracket': hex_to_pango("#383a42"),      # Default text
                 'json_comma': hex_to_pango("#383a42"),        # Default text
+                
+                # XML-specific colors
+                'xml_tag': hex_to_pango("#e45649"),            # Red (tag names)
+                'xml_attribute': hex_to_pango("#986801"),      # Orange (attribute names)
+                'xml_bracket': hex_to_pango("#383a42"),        # Default text (< > />) 
+                'xml_entity': hex_to_pango("#a626a4"),         # Purple (entity refs)
+                'xml_cdata_start': hex_to_pango("#a0a1a7"),    # Grey (CDATA markers)
+                'xml_cdata_end': hex_to_pango("#a0a1a7"),      # Grey
+                'xml_pi_bracket': hex_to_pango("#383a42"),     # Default text (<? ?>)
+                'xml_pi_target': hex_to_pango("#a626a4"),      # Purple (xml in <?xml)
+                'xml_doctype': hex_to_pango("#a626a4"),        # Purple
             }
         
         self.queue_draw()
