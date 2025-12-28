@@ -625,16 +625,17 @@ class BashPatterns:
     BACKTICK_QUOTED = re.compile(r'`[^`]*`')
     
     # Keywords
+    # Use strict lookahead to avoid matching start of hyphenated words (e.g. if-else)
     KEYWORD = re.compile(
         r'\b(if|then|else|elif|fi|case|esac|for|select|while|until|do|done|in|'
         r'function|time|coproc|declare|typeset|local|readonly|export|unset|'
-        r'set|shopt|trap|source|alias|unalias|break|continue|return|exit|eval|exec)\b'
+        r'set|shopt|trap|source|alias|unalias|break|continue|return|exit|eval|exec)(?![a-zA-Z0-9_-])'
     )
     
     # Builtins/Common Commands (subset)
     COMMAND = re.compile(
         r'\b(echo|printf|cd|pwd|ls|cp|mv|rm|mkdir|rmdir|touch|cat|grep|sed|awk|'
-        r'find|chmod|chown|kill|ps|jobs|bg|fg|history|read|wait|sleep|true|false)\b'
+        r'find|chmod|chown|kill|ps|jobs|bg|fg|history|read|wait|sleep|true|false)(?![a-zA-Z0-9_-])'
     )
     
     # Variables
@@ -642,13 +643,20 @@ class BashPatterns:
     VARIABLE = re.compile(r'\$(\w+|{[:#]?\w+(?:[^\}]*)?}|[0-9*@#?!$-])')
     
     # Test operators
-    TEST_OP = re.compile(r'(-(?:eq|ne|gt|lt|ge|le|a|o|f|d|e|s|L|h|r|w|x|n|z))\b')
+    TEST_OP = re.compile(r'(-(?:eq|ne|gt|lt|ge|le|a|o|f|d|e|s|L|h|r|w|x|n|z))(?![a-zA-Z0-9_-])')
     
     # Redirection & Pipes
-    OPERATOR = re.compile(r'\|&?|>>?|<<[-<]?|&&|\|\||;;|!|\*')
+    OPERATOR = re.compile(r'\|&?|>>?|<<[-<]?|&&|\|\||;;|!|\*|[(){};]|\$\(')
     
     # Numeric
     NUMBER = re.compile(r'\b\d+\b')
+    
+    # Escape sequences
+    ESCAPE = re.compile(r'\\.')
+    
+    # Generic Word (for command/arg fallback)
+    # Allow alphanumeric, underscore, dot, colon, slash, hyphen (but hyphen at start handled by SWITCH)
+    GENERIC_WORD = re.compile(r'[a-zA-Z0-9_./:][a-zA-Z0-9_./:-]*')
 
 
 class StateAwareSyntaxEngine:
@@ -2395,6 +2403,15 @@ class StateAwareSyntaxEngine:
         pos = 0
         length = len(text)
         
+        # Command Position States
+        # Command Position States
+        CMD = 0
+        ARG = 1
+        ASSIGN_VAL = 2
+        LIST = 3 # For 'in' lists
+        
+        cmd_state = CMD
+
         while pos < length:
             if state == TokenState.ROOT:
                 # 1. Comments
@@ -2403,13 +2420,21 @@ class StateAwareSyntaxEngine:
                     tokens.append((pos, m.end(), 'comment'))
                     pos = m.end()
                     continue
+
+                # Check for escape sequence (outside string)
+                m = P.ESCAPE.match(text, pos)
+                if m:
+                    tokens.append((pos, m.end(), 'escape'))
+                    pos = m.end()
+                    continue
                 
                 # 2. Strings
-                # Double Quote - always enter string state for interpolation
+                # Double Quote
                 if text[pos] == '"':
                     tokens.append((pos, pos + 1, 'string'))
                     state = TokenState.IN_DQ_STRING
                     pos += 1
+                    cmd_state = CMD if cmd_state == ASSIGN_VAL else (LIST if cmd_state == LIST else ARG)
                     continue
                     
                 # Single Quote
@@ -2417,12 +2442,14 @@ class StateAwareSyntaxEngine:
                 if m:
                     tokens.append((pos, m.end(), 'string_single'))
                     pos = m.end()
+                    cmd_state = CMD if cmd_state == ASSIGN_VAL else (LIST if cmd_state == LIST else ARG)
                     continue
                 m = P.STRICT_SINGLE_QUOTED_START.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'string_single'))
                     state = TokenState.IN_SQ_STRING
                     pos = m.end()
+                    cmd_state = CMD if cmd_state == ASSIGN_VAL else (LIST if cmd_state == LIST else ARG)
                     continue
                 
                 # Backticks
@@ -2430,6 +2457,7 @@ class StateAwareSyntaxEngine:
                 if m:
                     tokens.append((pos, m.end(), 'string_interpolated'))
                     pos = m.end()
+                    cmd_state = CMD if cmd_state == ASSIGN_VAL else (LIST if cmd_state == LIST else ARG)
                     continue
 
                 # 3. Variables
@@ -2437,28 +2465,32 @@ class StateAwareSyntaxEngine:
                 if m:
                     tokens.append((pos, m.end(), 'variable'))
                     pos = m.end()
+                    cmd_state = CMD if cmd_state == ASSIGN_VAL else (LIST if cmd_state == LIST else ARG)
                     continue
                 
                 # 4. Assignments (VAR=)
                 m = P.ASSIGNMENT.match(text, pos)
                 if m:
-                    # Capture variable name
                     name_start = m.start(1)
                     name_end = m.end(1)
                     tokens.append((name_start, name_end, 'variable')) 
                     pos = m.end() # '=' is next
+                    if pos < length and text[pos] == '=':
+                         tokens.append((pos, pos+1, 'operator'))
+                         pos += 1
+                    # After assignment, we expect a value
+                    cmd_state = ASSIGN_VAL
                     continue
 
                 # 5. Function Definitions
-                # name()
                 m = P.FUNCTION_DEF.match(text, pos)
                 if m:
                     name_start = m.start(1)
                     name_end = m.end(1)
                     tokens.append((name_start, name_end, 'function'))
                     pos = m.end()
+                    cmd_state = CMD 
                     continue
-                # function name
                 m = P.FUNCTION_DEF_KEYWORD.match(text, pos)
                 if m:
                      kw_start = m.start(1)
@@ -2468,59 +2500,93 @@ class StateAwareSyntaxEngine:
                      tokens.append((kw_start, kw_end, 'keyword'))
                      tokens.append((name_start, name_end, 'function'))
                      pos = m.end()
+                     cmd_state = CMD
                      continue
 
                 # 6. Keywords
                 m = P.KEYWORD.match(text, pos)
                 if m:
-                    tokens.append((pos, m.end(), 'keyword'))
+                    word = m.group(1)
                     
-                    # Check for 'for' loop variable: "for X in"
-                    word = text[pos:m.end()]
+                    # In LIST state, keywords (except do/done) are just strings
+                    if cmd_state == LIST and word not in ('do', 'done'):
+                        tokens.append((pos, m.end(), 'string'))
+                        pos = m.end()
+                        continue
+                        
+                    tokens.append((pos, m.end(), 'keyword'))
                     pos = m.end()
                     
-                    if word == 'for':
+                    # Reset command pos for control flow
+                    if word == 'in':
+                        cmd_state = LIST
+                    elif word in ('if', 'then', 'else', 'elif', 'do', 'while', 'until', 'time', 'coproc'):
+                        cmd_state = CMD
+                    # for loop special handling
+                    elif word == 'for':
                         # Look ahead for variable name
                         t_pos = pos
                         while t_pos < length and text[t_pos].isspace():
                             t_pos += 1
-                        # Capture variable
                         var_start = t_pos
                         while t_pos < length and (text[t_pos].isalnum() or text[t_pos] == '_'):
                             t_pos += 1
                         if t_pos > var_start:
                              tokens.append((var_start, t_pos, 'variable')) 
                              pos = t_pos
+                        cmd_state = ARG # Expecting 'in'
+                    else:
+                        cmd_state = CMD 
+                        
                     continue
                 
-                # 7. Switches (-f, --help)
+                # 7. Switches (-f)
                 m = P.SWITCH.match(text, pos)
                 if m:
-                    start = m.start(1)
-                    end = m.end(1)
-                    tokens.append((start, end, 'number')) # Orange
+                    # In LIST state, -f is string
+                    color = 'string' if cmd_state == LIST else 'number'
+                    tokens.append((pos, m.end(), color))
                     pos = m.end()
+                    cmd_state = CMD if cmd_state == ASSIGN_VAL else (LIST if cmd_state == LIST else ARG)
                     continue
                 
                 # 5. Commands (Builtins)
                 m = P.COMMAND.match(text, pos)
                 if m:
-                    tokens.append((pos, m.end(), 'function'))
+                    if cmd_state == LIST:
+                        tokens.append((pos, m.end(), 'string'))
+                    else:
+                        tokens.append((pos, m.end(), 'function')) # Blue
                     pos = m.end()
+                    cmd_state = CMD if cmd_state == ASSIGN_VAL else (LIST if cmd_state == LIST else ARG)
                     continue
                     
                 # 6. Test Operators
                 m = P.TEST_OP.match(text, pos)
                 if m:
-                    tokens.append((pos, m.end(), 'operator'))
+                    if cmd_state == LIST:
+                         tokens.append((pos, m.end(), 'string'))
+                    else:
+                         tokens.append((pos, m.end(), 'operator'))
                     pos = m.end()
+                    cmd_state = CMD if cmd_state == ASSIGN_VAL else (LIST if cmd_state == LIST else ARG)
                     continue
 
-                # 7. Other Operators
+                # 7. Operators
                 m = P.OPERATOR.match(text, pos)
                 if m:
+                    op = m.group(0)
                     tokens.append((pos, m.end(), 'operator'))
                     pos = m.end()
+                    
+                    # Reset command pos after pipe, sequence, background, open-paren
+                    if op in ('|', '||', '&&', ';', '&', '(', '{', '$('):
+                        cmd_state = CMD
+                    elif op in (')'):
+                        cmd_state = ARG
+                    elif op == '}':
+                         cmd_state = CMD
+                    
                     continue
                     
                 # 8. Numbers
@@ -2528,11 +2594,30 @@ class StateAwareSyntaxEngine:
                 if m:
                     tokens.append((pos, m.end(), 'number'))
                     pos = m.end()
+                    cmd_state = CMD if cmd_state == ASSIGN_VAL else (LIST if cmd_state == LIST else ARG)
+                    continue
+                
+                # 9. Generic Word
+                m = P.GENERIC_WORD.match(text, pos)
+                if m:
+                    if cmd_state == CMD:
+                        word_type = 'function'
+                        cmd_state = ARG
+                    elif cmd_state == ASSIGN_VAL:
+                        word_type = 'string'
+                        cmd_state = CMD
+                    elif cmd_state == LIST:
+                        word_type = 'string'
+                    else:
+                        word_type = 'string'
+                        
+                    tokens.append((pos, m.end(), word_type))
+                    pos = m.end()
                     continue
 
                 # Skip unknown character
                 pos += 1
-                
+            
             elif state == TokenState.IN_DQ_STRING:
                 # Find end quote or escaped
                 next_q = -1

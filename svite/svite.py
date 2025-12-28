@@ -450,31 +450,48 @@ def detect_rtl_line(text):
         if t in ("R", "AL", "RLE", "RLO"):
             return True
     return False
-def detect_language(path):
-    """Detect language from file extension."""
-    if not path: return None
-    ext = os.path.splitext(path)[1].lower()
-    mapping = {
-        '.py': 'python',
-        '.js': 'javascript',
-        '.c': 'c',
-        '.h': 'c',
-        '.rs': 'rust',
-        '.html': 'html',
-        '.htm': 'html',
-        '.css': 'css',
-        '.dsl': 'dsl',
-        '.yaml': 'yaml',
-        '.yml': 'yaml',
-        '.json': 'json',
-        '.xml': 'xml',
-        '.xsl': 'xsl',
-        '.xslt': 'xsl',
-        '.sh': 'bash',
-        '.bash': 'bash',
-        '.zsh': 'bash',
-    }
-    return mapping.get(ext, None)
+def detect_language(path, first_line=None):
+    """Detect language from file extension or shebang."""
+    # 1. Extension
+    if path:
+        ext = os.path.splitext(path)[1].lower()
+        mapping = {
+            '.py': 'python',
+            '.js': 'javascript',
+            '.c': 'c',
+            '.h': 'c',
+            '.rs': 'rust',
+            '.html': 'html',
+            '.htm': 'html',
+            '.css': 'css',
+            '.dsl': 'dsl',
+            '.yaml': 'yaml',
+            '.yml': 'yaml',
+            '.json': 'json',
+            '.xml': 'xml',
+            '.xsl': 'xsl',
+            '.xslt': 'xsl',
+            '.sh': 'bash',
+            '.bash': 'bash',
+            '.zsh': 'bash',
+        }
+        lang = mapping.get(ext, None)
+        if lang:
+            return lang
+
+    # 2. Shebang
+    if first_line and first_line.startswith('#!'):
+        if 'python' in first_line:
+            return 'python'
+        elif 'bash' in first_line or 'sh' in first_line or 'zsh' in first_line:
+            return 'bash'
+        elif 'node' in first_line or 'js' in first_line:
+            return 'javascript'
+        elif 'perl' in first_line:
+            # We don't have perl highlighter yet, fallback?
+            pass
+            
+    return None
 
 # ============================================================
 #   FULL INDEXING BUT MEMORY-SAFE
@@ -9560,7 +9577,8 @@ class EditorWindow(Adw.ApplicationWindow):
                  editor.current_file_path = path
                  
                  # Update syntax highlighting
-                 lang = detect_language(path)
+                 first_line = editor.buf.get_line(0) if editor.buf.total() > 0 else ""
+                 lang = detect_language(path, first_line)
                  editor.view.buf.set_language(lang)
                  editor.view.queue_draw()
         
@@ -9717,7 +9735,8 @@ class EditorWindow(Adw.ApplicationWindow):
             editor.view.scroll_x = 0
             
             # Enable Syntax Highlighting
-            lang = detect_language(path)
+            # New file created (empty) - so first line is empty
+            lang = detect_language(path, "")
             editor.view.buf.set_language(lang)
             # editor.view.syntax = editor.view.buf.syntax_engine
             
@@ -9777,7 +9796,8 @@ class EditorWindow(Adw.ApplicationWindow):
             editor.view.renderer.needs_full_width_scan = True
             
             # Syntax Highlighting
-            lang = detect_language(path)
+            first_line = editor.view.buf.get_line(0) if editor.view.buf.total() > 0 else ""
+            lang = detect_language(path, first_line)
             editor.view.buf.set_language(lang)
             
             # Optimization caches
