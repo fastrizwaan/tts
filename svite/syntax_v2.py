@@ -594,6 +594,63 @@ class XmlPatterns:
 # STATE-AWARE SYNTAX ENGINE
 # =============================================================================
 
+
+class BashPatterns:
+    """Pre-compiled regex patterns for Bash/Shell syntax highlighting."""
+    
+    # Comments
+    COMMENT = re.compile(r'#.*$')
+    
+    # Assignments (NAME= or export NAME=)
+    # Match LHS variable name followed by =
+    # No ^ anchor - we check position manually in tokenizer
+    ASSIGNMENT = re.compile(r'([a-zA-Z_]\w*)(?=\=)')
+    
+    # Function Definition: name() { or function name {
+    FUNCTION_DEF = re.compile(r'([a-zA-Z_]\w*)(?=\s*\(\))')
+    FUNCTION_DEF_KEYWORD = re.compile(r'(function)\s+([a-zA-Z_]\w*)')
+    
+    # Switches/Flags (-f, --help, -1)
+    SWITCH = re.compile(r'(-[a-zA-Z0-9-]+)')
+    
+    # Strings
+    DOUBLE_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
+    SINGLE_QUOTED = re.compile(r"'(?:[^']|'\\''[^']*)*'") 
+    STRICT_SINGLE_QUOTED = re.compile(r"'[^']*'") 
+    
+    DOUBLE_QUOTED_START = re.compile(r'"(?:[^"\\]|\\.)*$')
+    STRICT_SINGLE_QUOTED_START = re.compile(r"'[^']*$")
+    
+    # Backticks
+    BACKTICK_QUOTED = re.compile(r'`[^`]*`')
+    
+    # Keywords
+    KEYWORD = re.compile(
+        r'\b(if|then|else|elif|fi|case|esac|for|select|while|until|do|done|in|'
+        r'function|time|coproc|declare|typeset|local|readonly|export|unset|'
+        r'set|shopt|trap|source|alias|unalias|break|continue|return|exit|eval|exec)\b'
+    )
+    
+    # Builtins/Common Commands (subset)
+    COMMAND = re.compile(
+        r'\b(echo|printf|cd|pwd|ls|cp|mv|rm|mkdir|rmdir|touch|cat|grep|sed|awk|'
+        r'find|chmod|chown|kill|ps|jobs|bg|fg|history|read|wait|sleep|true|false)\b'
+    )
+    
+    # Variables
+    # $VAR, ${VAR}, $1, $?
+    VARIABLE = re.compile(r'\$(\w+|{[:#]?\w+(?:[^\}]*)?}|[0-9*@#?!$-])')
+    
+    # Test operators
+    TEST_OP = re.compile(r'(-(?:eq|ne|gt|lt|ge|le|a|o|f|d|e|s|L|h|r|w|x|n|z))\b')
+    
+    # Redirection & Pipes
+    OPERATOR = re.compile(r'\|&?|>>?|<<[-<]?|&&|\|\||;;|!|\*')
+    
+    # Numeric
+    NUMBER = re.compile(r'\b\d+\b')
+
+
 class StateAwareSyntaxEngine:
     """
     High-performance syntax highlighting engine with proper multi-line support.
@@ -638,6 +695,8 @@ class StateAwareSyntaxEngine:
             self._patterns = XmlPatterns
         elif self.language in ('javascript', 'js'):
             self._patterns = JavaScriptPatterns
+        elif self.language in ('bash', 'sh', 'shell', 'zsh'):
+            self._patterns = BashPatterns
         else:
             self._patterns = None
 
@@ -744,6 +803,8 @@ class StateAwareSyntaxEngine:
             return self._tokenize_xml(line_num, text)
         elif self.language in ('javascript', 'js'):
             return self._tokenize_javascript(line_num, text)
+        elif self.language in ('bash', 'sh', 'shell', 'zsh'):
+            return self._tokenize_bash(line_num, text)
         else:
             return self._tokenize_simple(text)
     
@@ -2324,6 +2385,218 @@ class StateAwareSyntaxEngine:
         
         return tokens
     
+    def _tokenize_bash(self, line_num: int, text: str) -> List[Tuple[int, int, str]]:
+        """
+        Tokenize Bash/Shell scripts.
+        """
+        P = self._patterns
+        tokens = []
+        state = self.state_chain.get_start_state(line_num)
+        pos = 0
+        length = len(text)
+        
+        while pos < length:
+            if state == TokenState.ROOT:
+                # 1. Comments
+                m = P.COMMENT.match(text, pos)
+                if m:
+                    tokens.append((pos, m.end(), 'comment'))
+                    pos = m.end()
+                    continue
+                
+                # 2. Strings
+                # Double Quote - always enter string state for interpolation
+                if text[pos] == '"':
+                    tokens.append((pos, pos + 1, 'string'))
+                    state = TokenState.IN_DQ_STRING
+                    pos += 1
+                    continue
+                    
+                # Single Quote
+                m = P.STRICT_SINGLE_QUOTED.match(text, pos)
+                if m:
+                    tokens.append((pos, m.end(), 'string_single'))
+                    pos = m.end()
+                    continue
+                m = P.STRICT_SINGLE_QUOTED_START.match(text, pos)
+                if m:
+                    tokens.append((pos, m.end(), 'string_single'))
+                    state = TokenState.IN_SQ_STRING
+                    pos = m.end()
+                    continue
+                
+                # Backticks
+                m = P.BACKTICK_QUOTED.match(text, pos)
+                if m:
+                    tokens.append((pos, m.end(), 'string_interpolated'))
+                    pos = m.end()
+                    continue
+
+                # 3. Variables
+                m = P.VARIABLE.match(text, pos)
+                if m:
+                    tokens.append((pos, m.end(), 'variable'))
+                    pos = m.end()
+                    continue
+                
+                # 4. Assignments (VAR=)
+                m = P.ASSIGNMENT.match(text, pos)
+                if m:
+                    # Capture variable name
+                    name_start = m.start(1)
+                    name_end = m.end(1)
+                    tokens.append((name_start, name_end, 'variable')) 
+                    pos = m.end() # '=' is next
+                    continue
+
+                # 5. Function Definitions
+                # name()
+                m = P.FUNCTION_DEF.match(text, pos)
+                if m:
+                    name_start = m.start(1)
+                    name_end = m.end(1)
+                    tokens.append((name_start, name_end, 'function'))
+                    pos = m.end()
+                    continue
+                # function name
+                m = P.FUNCTION_DEF_KEYWORD.match(text, pos)
+                if m:
+                     kw_start = m.start(1)
+                     kw_end = m.end(1)
+                     name_start = m.start(2)
+                     name_end = m.end(2)
+                     tokens.append((kw_start, kw_end, 'keyword'))
+                     tokens.append((name_start, name_end, 'function'))
+                     pos = m.end()
+                     continue
+
+                # 6. Keywords
+                m = P.KEYWORD.match(text, pos)
+                if m:
+                    tokens.append((pos, m.end(), 'keyword'))
+                    
+                    # Check for 'for' loop variable: "for X in"
+                    word = text[pos:m.end()]
+                    pos = m.end()
+                    
+                    if word == 'for':
+                        # Look ahead for variable name
+                        t_pos = pos
+                        while t_pos < length and text[t_pos].isspace():
+                            t_pos += 1
+                        # Capture variable
+                        var_start = t_pos
+                        while t_pos < length and (text[t_pos].isalnum() or text[t_pos] == '_'):
+                            t_pos += 1
+                        if t_pos > var_start:
+                             tokens.append((var_start, t_pos, 'variable')) 
+                             pos = t_pos
+                    continue
+                
+                # 7. Switches (-f, --help)
+                m = P.SWITCH.match(text, pos)
+                if m:
+                    start = m.start(1)
+                    end = m.end(1)
+                    tokens.append((start, end, 'number')) # Orange
+                    pos = m.end()
+                    continue
+                
+                # 5. Commands (Builtins)
+                m = P.COMMAND.match(text, pos)
+                if m:
+                    tokens.append((pos, m.end(), 'function'))
+                    pos = m.end()
+                    continue
+                    
+                # 6. Test Operators
+                m = P.TEST_OP.match(text, pos)
+                if m:
+                    tokens.append((pos, m.end(), 'operator'))
+                    pos = m.end()
+                    continue
+
+                # 7. Other Operators
+                m = P.OPERATOR.match(text, pos)
+                if m:
+                    tokens.append((pos, m.end(), 'operator'))
+                    pos = m.end()
+                    continue
+                    
+                # 8. Numbers
+                m = P.NUMBER.match(text, pos)
+                if m:
+                    tokens.append((pos, m.end(), 'number'))
+                    pos = m.end()
+                    continue
+
+                # Skip unknown character
+                pos += 1
+                
+            elif state == TokenState.IN_DQ_STRING:
+                # Find end quote or escaped
+                next_q = -1
+                search_start = pos
+                while True:
+                    try:
+                        next_q = text.index('"', search_start)
+                        # Check escape
+                        backslashes = 0
+                        idx = next_q - 1
+                        while idx >= 0 and text[idx] == '\\':
+                            backslashes += 1
+                            idx -= 1
+                        if backslashes % 2 == 0:
+                            break # Not escaped
+                        search_start = next_q + 1
+                    except ValueError:
+                        next_q = -1
+                        break
+                
+                # Also look for variables inside DQ
+                m_var = P.VARIABLE.search(text, pos)
+                
+                end_pos = length
+                new_state = state
+                
+                if next_q != -1:
+                    end_pos = next_q
+                    new_state = TokenState.ROOT
+                
+                if m_var and (next_q == -1 or m_var.start() < next_q):
+                    # Found variable before end of string
+                    if m_var.start() > pos:
+                        tokens.append((pos, m_var.start(), 'string'))
+                    tokens.append((m_var.start(), m_var.end(), 'variable'))
+                    pos = m_var.end()
+                    # State remains same
+                    continue
+                
+                # No variable, just string
+                tokens.append((pos, end_pos, 'string'))
+                if next_q != -1:
+                    tokens.append((end_pos, end_pos + 1, 'string'))
+                    pos = end_pos + 1
+                    state = TokenState.ROOT
+                else:
+                    pos = length
+            
+            elif state == TokenState.IN_SQ_STRING:
+                # Find end quote
+                next_q = text.find("'", pos)
+                if next_q != -1:
+                     tokens.append((pos, next_q + 1, 'string_single'))
+                     pos = next_q + 1
+                     state = TokenState.ROOT
+                else:
+                    tokens.append((pos, length, 'string_single'))
+                    pos = length
+
+        # Update state chain
+        self.state_chain.set_end_state(line_num, state)
+             
+        return tokens
+
     def _tokenize_simple(self, text: str) -> List[Tuple[int, int, str]]:
         """
         Simple fallback tokenizer for unsupported languages.

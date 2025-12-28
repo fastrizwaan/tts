@@ -470,6 +470,9 @@ def detect_language(path):
         '.xml': 'xml',
         '.xsl': 'xsl',
         '.xslt': 'xsl',
+        '.sh': 'bash',
+        '.bash': 'bash',
+        '.zsh': 'bash',
     }
     return mapping.get(ext, None)
 
@@ -4131,6 +4134,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 'class': hex_to_pango("#e5c07b"),        # Yellow/Gold
                 'decorator': hex_to_pango("#56b6c2"),    # Cyan
                 'personal': hex_to_pango("#e06c75"),     # Red
+                'variable': hex_to_pango("#e06c75"),     # Red (for Bash $VAR, assignments)
                 'tag': hex_to_pango("#e06c75"),          # Red
                 'attribute': hex_to_pango("#d19a66"),    # Orange
                 'property': hex_to_pango("#56b6c2"),     # Cyan
@@ -4236,6 +4240,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 'class': hex_to_pango("#c18401"),
                 'decorator': hex_to_pango("#a626a4"),
                 'personal': hex_to_pango("#e45649"),
+                'variable': hex_to_pango("#e45649"),     # Red (for Bash $VAR, assignments)
                 'tag': hex_to_pango("#e45649"),
                 'attribute': hex_to_pango("#986801"),
                 'property': hex_to_pango("#0184bc"),
