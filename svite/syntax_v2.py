@@ -376,6 +376,39 @@ class YamlPatterns:
     BLOCK_CONTENT = re.compile(r'^(\s+)(.+)$')
 
 
+class JsonPatterns:
+    """Pre-compiled regex patterns for JSON syntax highlighting.
+    
+    JSON has a simpler structure than YAML:
+    - Keys are always quoted strings
+    - Values can be strings, numbers, booleans, null, objects, or arrays
+    """
+    
+    # String (double-quoted only in JSON)
+    STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+    STRING_UNTERMINATED = re.compile(r'"(?:[^"\\]|\\.)*$')
+    
+    # Numbers (integers and floats, with optional exponent)
+    NUMBER = re.compile(r'-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?')
+    
+    # Boolean values
+    BOOLEAN = re.compile(r'\b(?:true|false)\b')
+    
+    # Null value
+    NULL = re.compile(r'\bnull\b')
+    
+    # Structural characters
+    OBJECT_START = re.compile(r'\{')
+    OBJECT_END = re.compile(r'\}')
+    ARRAY_START = re.compile(r'\[')
+    ARRAY_END = re.compile(r'\]')
+    COLON = re.compile(r':')
+    COMMA = re.compile(r',')
+    
+    # Key pattern - string followed by colon (we'll use this to identify keys vs values)
+    KEY_STRING = re.compile(r'"(?:[^"\\]|\\.)*"\s*(?=:)')
+
+
 # =============================================================================
 # STATE-AWARE SYNTAX ENGINE
 # =============================================================================
@@ -418,6 +451,8 @@ class StateAwareSyntaxEngine:
             self._patterns = PythonPatterns
         elif self.language == 'yaml':
             self._patterns = YamlPatterns
+        elif self.language == 'json':
+            self._patterns = JsonPatterns
         else:
             self._patterns = None
 
@@ -518,6 +553,8 @@ class StateAwareSyntaxEngine:
             return self._tokenize_python(line_num, text)
         elif self.language == 'yaml':
             return self._tokenize_yaml(line_num, text)
+        elif self.language == 'json':
+            return self._tokenize_json(line_num, text)
         else:
             return self._tokenize_simple(text)
     
@@ -1162,6 +1199,108 @@ class StateAwareSyntaxEngine:
                 break
         
         self.state_chain.set_end_state(line_num, block_state)
+        
+        return tokens
+    
+    def _tokenize_json(self, line_num: int, text: str) -> List[Tuple[int, int, str]]:
+        """
+        Tokenize JSON content.
+        
+        JSON is simpler than YAML:
+        - Keys are always quoted strings followed by colon
+        - Values can be strings, numbers, booleans, null, objects, or arrays
+        """
+        P = self._patterns
+        tokens = []
+        pos = 0
+        length = len(text)
+        
+        while pos < length:
+            ch = text[pos]
+            
+            # Skip whitespace
+            if ch in ' \t\n\r':
+                pos += 1
+                continue
+            
+            # 1. Key string (string followed by colon) - highlight as json_key
+            m = P.KEY_STRING.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'json_key'))
+                pos = m.end()
+                continue
+            
+            # 2. Regular string (value) - highlight as string
+            m = P.STRING.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'string'))
+                pos = m.end()
+                continue
+            
+            # 3. Colon
+            m = P.COLON.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'json_colon'))
+                pos = m.end()
+                continue
+            
+            # 4. Boolean values
+            m = P.BOOLEAN.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'bool_ops'))
+                pos = m.end()
+                continue
+            
+            # 5. Null value
+            m = P.NULL.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'json_null'))
+                pos = m.end()
+                continue
+            
+            # 6. Numbers
+            m = P.NUMBER.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'number'))
+                pos = m.end()
+                continue
+            
+            # 7. Structural characters (brackets, braces, comma)
+            m = P.OBJECT_START.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'json_bracket'))
+                pos = m.end()
+                continue
+            
+            m = P.OBJECT_END.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'json_bracket'))
+                pos = m.end()
+                continue
+            
+            m = P.ARRAY_START.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'json_bracket'))
+                pos = m.end()
+                continue
+            
+            m = P.ARRAY_END.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'json_bracket'))
+                pos = m.end()
+                continue
+            
+            m = P.COMMA.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'json_comma'))
+                pos = m.end()
+                continue
+            
+            # No match - skip character
+            pos += 1
+        
+        # JSON doesn't need multi-line state tracking
+        self.state_chain.set_end_state(line_num, TokenState.ROOT)
         
         return tokens
     
