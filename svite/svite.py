@@ -5281,7 +5281,7 @@ class StatusBar(Gtk.Box):
         # File types
         file_types = [
             "Plain Text", "Python", "JavaScript", "Shell", "C", "C++", "Rust",
-            "HTML", "CSS", "JSON", "XML", "Markdown", "YAML", "TOML",
+            "HTML", "CSS", "JSON", "XML", "XSLT", "Markdown", "YAML", "TOML",
             "Java", "Go", "Ruby", "PHP", "TypeScript", "SQL"
         ]
         
@@ -5621,6 +5621,8 @@ class StatusBar(Gtk.Box):
                 '.css': 'CSS',
                 '.json': 'JSON',
                 '.xml': 'XML',
+                '.xsl': 'XSLT',
+                '.xslt': 'XSLT',
                 '.md': 'Markdown',
                 '.yaml': 'YAML',
                 '.yml': 'YAML',
