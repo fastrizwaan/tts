@@ -4559,7 +4559,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 if total_vis <= visible_lines:
                     return
 
-                scroll_speed = 3
+                scroll_speed = 4
                 delta = int(dy * scroll_speed)
                 
                 # 1. Get Limit
@@ -4620,7 +4620,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 if total_lines <= visible_lines:
                     return
 
-                scroll_speed = 3
+                scroll_speed = 4
                 delta = int(dy * scroll_speed)
                 
                 # Use shared limit logic
