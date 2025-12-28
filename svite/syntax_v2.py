@@ -49,6 +49,10 @@ class TokenState:
     IN_YAML_BLOCK_LITERAL = 18  # Inside | block scalar
     IN_YAML_BLOCK_FOLDED = 19   # Inside > block scalar
     
+    # XML states
+    IN_XML_CDATA = 20           # Inside CDATA section
+    IN_XML_COMMENT = 21         # Inside multi-line comment
+    
     @classmethod
     def is_string_state(cls, state: int) -> bool:
         """Check if state represents being inside a string."""
@@ -445,7 +449,8 @@ class XmlPatterns:
     TAG_BRACKET_CLOSE = re.compile(r'/?>') 
     
     # Attributes: name="value" or name='value'
-    ATTRIBUTE_NAME = re.compile(r'(?:^|\s+)(?:([-\w.]+)(:))?([-\w.:]+)\s*(?==)')
+    # Match attribute name with optional namespace prefix
+    ATTRIBUTE_NAME = re.compile(r'\s*([-\w.]+(?::[-\w.]+)?)\s*=')
     
     # Strings (attribute values)
     DOUBLE_QUOTED = re.compile(r'"[^"]*"')
@@ -1362,12 +1367,42 @@ class StateAwareSyntaxEngine:
         Tokenize XML/XSL content.
         
         Handles tags, attributes, comments, CDATA, processing instructions,
-        DOCTYPE, and entity references.
+        DOCTYPE, and entity references. Supports multi-line CDATA and comments.
         """
         P = self._patterns
         tokens = []
         pos = 0
         length = len(text)
+        
+        # Check if we're continuing from a multi-line state
+        start_state = self.state_chain.get_start_state(line_num)
+        
+        # Handle CDATA continuation
+        if start_state == TokenState.IN_XML_CDATA:
+            end_match = P.CDATA_END.search(text)
+            if end_match:
+                # CDATA content before ]]>
+                if end_match.start() > 0:
+                    tokens.append((0, end_match.start(), 'string'))
+                tokens.append((end_match.start(), end_match.end(), 'xml_cdata_end'))
+                pos = end_match.end()
+                # Continue normal parsing after CDATA ends
+            else:
+                # Still inside CDATA - entire line is string content
+                tokens.append((0, length, 'string'))
+                self.state_chain.set_end_state(line_num, TokenState.IN_XML_CDATA)
+                return tokens
+        
+        # Handle multi-line comment continuation
+        if start_state == TokenState.IN_XML_COMMENT:
+            end_match = P.COMMENT_END.search(text)
+            if end_match:
+                tokens.append((0, end_match.end(), 'comment'))
+                pos = end_match.end()
+            else:
+                tokens.append((0, length, 'comment'))
+                self.state_chain.set_end_state(line_num, TokenState.IN_XML_COMMENT)
+                return tokens
         
         while pos < length:
             ch = text[pos]
@@ -1386,9 +1421,10 @@ class StateAwareSyntaxEngine:
                     tokens.append((pos, end_match.end(), 'comment'))
                     pos = end_match.end()
                 else:
-                    # Comment continues to end of line
+                    # Comment continues to next line
                     tokens.append((pos, length, 'comment'))
-                    pos = length
+                    self.state_chain.set_end_state(line_num, TokenState.IN_XML_COMMENT)
+                    return tokens
                 continue
             
             # 2. CDATA: <![CDATA[ ... ]]>
@@ -1397,12 +1433,17 @@ class StateAwareSyntaxEngine:
                 end_match = P.CDATA_END.search(text, m.end())
                 if end_match:
                     tokens.append((pos, m.end(), 'xml_cdata_start'))
-                    tokens.append((m.end(), end_match.start(), 'string'))
+                    if end_match.start() > m.end():
+                        tokens.append((m.end(), end_match.start(), 'string'))
                     tokens.append((end_match.start(), end_match.end(), 'xml_cdata_end'))
                     pos = end_match.end()
                 else:
-                    tokens.append((pos, length, 'string'))
-                    pos = length
+                    # CDATA continues to next line
+                    tokens.append((pos, m.end(), 'xml_cdata_start'))
+                    if m.end() < length:
+                        tokens.append((m.end(), length, 'string'))
+                    self.state_chain.set_end_state(line_num, TokenState.IN_XML_CDATA)
+                    return tokens
                 continue
             
             # 3. Processing instruction: <?xml ... ?>
@@ -1423,13 +1464,12 @@ class StateAwareSyntaxEngine:
                         # Attribute name
                         attr_m = P.ATTRIBUTE_NAME.match(inner_text, inner_pos)
                         if attr_m:
-                            attr_start = pos + attr_m.start()
-                            attr_end = pos + attr_m.end()
-                            # Find the actual attribute name part (group 3)
-                            if attr_m.group(3):
-                                name_start = inner_text.find(attr_m.group(3), inner_pos)
+                            # group(1) is the attribute name
+                            attr_name = attr_m.group(1)
+                            if attr_name:
+                                name_start = inner_text.find(attr_name, inner_pos)
                                 if name_start >= 0:
-                                    tokens.append((pos + name_start, pos + name_start + len(attr_m.group(3)), 'xml_attribute'))
+                                    tokens.append((pos + name_start, pos + name_start + len(attr_name), 'xml_attribute'))
                             inner_pos = attr_m.end()
                             continue
                         
@@ -1508,15 +1548,16 @@ class StateAwareSyntaxEngine:
                 pos = m.end()
                 continue
             
-            # 9. Attribute name
+            # 9. Attribute name (pattern: \s*name\s*=)
             m = P.ATTRIBUTE_NAME.match(text, pos)
             if m:
-                # Find the attribute name (group 3)
-                if m.group(3):
-                    name_match = m.group(3)
-                    name_start = text.find(name_match, pos)
+                # group(1) is the attribute name (including namespace if present)
+                attr_name = m.group(1)
+                if attr_name:
+                    # Find where the name actually starts (after leading whitespace)
+                    name_start = text.find(attr_name, pos)
                     if name_start >= 0:
-                        tokens.append((name_start, name_start + len(name_match), 'xml_attribute'))
+                        tokens.append((name_start, name_start + len(attr_name), 'xml_attribute'))
                 pos = m.end()
                 continue
             
