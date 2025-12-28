@@ -53,6 +53,10 @@ class TokenState:
     IN_XML_CDATA = 20           # Inside CDATA section
     IN_XML_COMMENT = 21         # Inside multi-line comment
     
+    # HTML embedded language states
+    IN_HTML_SCRIPT = 22         # Inside <script>...</script>
+    IN_HTML_STYLE = 23          # Inside <style>...</style>
+    
     @classmethod
     def is_string_state(cls, state: int) -> bool:
         """Check if state represents being inside a string."""
@@ -413,6 +417,91 @@ class JsonPatterns:
     KEY_STRING = re.compile(r'"(?:[^"\\]|\\.)*"\s*(?=:)')
 
 
+class JavaScriptPatterns:
+    """Pre-compiled regex patterns for JavaScript syntax highlighting.
+    
+    Based on VSCode's JavaScript TextMate grammar.
+    """
+    
+    # Keywords
+    KEYWORD = re.compile(
+        r'\b(async|await|break|case|catch|class|const|continue|debugger|default|'
+        r'delete|do|else|export|extends|finally|for|from|function|get|if|import|'
+        r'in|instanceof|let|new|of|return|set|static|super|switch|this|throw|try|'
+        r'typeof|var|void|while|with|yield)\b'
+    )
+    
+    # Boolean and null literals
+    CONSTANT = re.compile(r'\b(true|false|null|undefined|NaN|Infinity)\b')
+    
+    # Built-in objects and constructors
+    BUILTIN = re.compile(
+        r'\b(Array|Boolean|Date|Error|Function|JSON|Map|Math|Number|Object|'
+        r'Promise|Proxy|Reflect|RegExp|Set|String|Symbol|WeakMap|WeakSet|'
+        r'console|document|window|global|module|exports|require|process)\b'
+    )
+    
+    # Function definition: function name( or name(
+    FUNCTION_DEF = re.compile(r'\b(function)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)')
+    
+    # Arrow function parameter
+    ARROW_FUNC = re.compile(r'=>')
+    
+    # Method/function call: name(
+    FUNCTION_CALL = re.compile(r'\b([a-zA-Z_$][a-zA-Z0-9_$]*)\s*(?=\()')
+    
+    # Numbers (integers, floats, hex, binary, octal, exponential)
+    NUMBER = re.compile(
+        r'\b(?:'
+        r'0[xX][0-9a-fA-F]+|'  # Hex
+        r'0[bB][01]+|'         # Binary
+        r'0[oO][0-7]+|'        # Octal
+        r'[0-9]+\.?[0-9]*(?:[eE][+-]?[0-9]+)?|'  # Decimal/float
+        r'\.[0-9]+(?:[eE][+-]?[0-9]+)?'          # .5 style
+        r')\b'
+    )
+    
+    # Strings (single and double quoted)
+    STRING_DOUBLE = re.compile(r'"(?:[^"\\]|\\.)*"')
+    STRING_SINGLE = re.compile(r"'(?:[^'\\]|\\.)*'")
+    STRING_DOUBLE_UNTERM = re.compile(r'"(?:[^"\\]|\\.)*$')
+    STRING_SINGLE_UNTERM = re.compile(r"'(?:[^'\\]|\\.)*$")
+    
+    # Template literal (backtick strings)
+    TEMPLATE_START = re.compile(r'`')
+    TEMPLATE_END = re.compile(r'`')
+    TEMPLATE_EXPR_START = re.compile(r'\$\{')
+    TEMPLATE_EXPR_END = re.compile(r'\}')
+    
+    # Comments
+    COMMENT_LINE = re.compile(r'//.*$')
+    COMMENT_BLOCK_START = re.compile(r'/\*')
+    COMMENT_BLOCK_END = re.compile(r'\*/')
+    
+    # Regex literal - simplified matching
+    REGEX = re.compile(r'/(?![/*])(?:[^/\\\n]|\\.)+/[gimsuvy]*')
+    
+    # Operators
+    OPERATOR = re.compile(r'===|!==|==|!=|<=|>=|&&|\|\||<<|>>|>>>|\+\+|--|[+\-*/%&|^~<>!?:]')
+    
+    # Punctuation
+    PAREN_OPEN = re.compile(r'\(')
+    PAREN_CLOSE = re.compile(r'\)')
+    BRACE_OPEN = re.compile(r'\{')
+    BRACE_CLOSE = re.compile(r'\}')
+    BRACKET_OPEN = re.compile(r'\[')
+    BRACKET_CLOSE = re.compile(r'\]')
+    SEMICOLON = re.compile(r';')
+    COMMA = re.compile(r',')
+    DOT = re.compile(r'\.')
+    
+    # Property access: .propertyName
+    PROPERTY = re.compile(r'\.([a-zA-Z_$][a-zA-Z0-9_$]*)')
+    
+    # Variable/identifier
+    IDENTIFIER = re.compile(r'[a-zA-Z_$][a-zA-Z0-9_$]*')
+
+
 class XmlPatterns:
     """Pre-compiled regex patterns for XML/XSL syntax highlighting.
     
@@ -507,8 +596,10 @@ class StateAwareSyntaxEngine:
             self._patterns = YamlPatterns
         elif self.language == 'json':
             self._patterns = JsonPatterns
-        elif self.language in ('xml', 'xsl'):
+        elif self.language in ('xml', 'xsl', 'html'):
             self._patterns = XmlPatterns
+        elif self.language in ('javascript', 'js'):
+            self._patterns = JavaScriptPatterns
         else:
             self._patterns = None
 
@@ -611,8 +702,10 @@ class StateAwareSyntaxEngine:
             return self._tokenize_yaml(line_num, text)
         elif self.language == 'json':
             return self._tokenize_json(line_num, text)
-        elif self.language in ('xml', 'xsl'):
+        elif self.language in ('xml', 'xsl', 'html'):
             return self._tokenize_xml(line_num, text)
+        elif self.language in ('javascript', 'js'):
+            return self._tokenize_javascript(line_num, text)
         else:
             return self._tokenize_simple(text)
     
@@ -1362,6 +1455,320 @@ class StateAwareSyntaxEngine:
         
         return tokens
     
+    def _tokenize_javascript(self, line_num: int, text: str) -> List[Tuple[int, int, str]]:
+        """
+        Tokenize JavaScript code.
+        
+        Handles keywords, builtins, strings, comments, numbers, operators,
+        functions, template literals.
+        """
+        P = self._patterns
+        tokens = []
+        pos = 0
+        length = len(text)
+        
+        # Check for multi-line block comment continuation
+        start_state = self.state_chain.get_start_state(line_num)
+        if start_state == TokenState.IN_ML_COMMENT:
+            end_match = P.COMMENT_BLOCK_END.search(text)
+            if end_match:
+                tokens.append((0, end_match.end(), 'comment'))
+                pos = end_match.end()
+            else:
+                tokens.append((0, length, 'comment'))
+                self.state_chain.set_end_state(line_num, TokenState.IN_ML_COMMENT)
+                return tokens
+        
+        while pos < length:
+            ch = text[pos]
+            
+            # Skip whitespace
+            if ch in ' \t\n\r':
+                pos += 1
+                continue
+            
+            # 1. Line comment: //
+            m = P.COMMENT_LINE.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'comment'))
+                pos = m.end()
+                continue
+            
+            # 2. Block comment start: /*
+            m = P.COMMENT_BLOCK_START.match(text, pos)
+            if m:
+                end_match = P.COMMENT_BLOCK_END.search(text, m.end())
+                if end_match:
+                    tokens.append((pos, end_match.end(), 'comment'))
+                    pos = end_match.end()
+                else:
+                    tokens.append((pos, length, 'comment'))
+                    self.state_chain.set_end_state(line_num, TokenState.IN_ML_COMMENT)
+                    return tokens
+                continue
+            
+            # 3. Double-quoted string
+            m = P.STRING_DOUBLE.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'string'))
+                pos = m.end()
+                continue
+            
+            # 4. Single-quoted string
+            m = P.STRING_SINGLE.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'string'))
+                pos = m.end()
+                continue
+            
+            # 5. Template literal (backtick)
+            if ch == '`':
+                # Find matching closing backtick (simplified - no nesting)
+                end_pos = text.find('`', pos + 1)
+                if end_pos >= 0:
+                    tokens.append((pos, end_pos + 1, 'string'))
+                    pos = end_pos + 1
+                else:
+                    tokens.append((pos, length, 'string'))
+                    pos = length
+                continue
+            
+            # 6. Function definition
+            m = P.FUNCTION_DEF.match(text, pos)
+            if m:
+                tokens.append((pos, pos + len('function'), 'keywords'))
+                func_name = m.group(2)
+                name_start = text.find(func_name, pos + len('function'))
+                if name_start >= 0:
+                    tokens.append((name_start, name_start + len(func_name), 'function'))
+                pos = m.end()
+                continue
+            
+            # 7. Keywords
+            m = P.KEYWORD.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'keywords'))
+                pos = m.end()
+                continue
+            
+            # 8. Constants (true, false, null, undefined)
+            m = P.CONSTANT.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'bool_ops'))
+                pos = m.end()
+                continue
+            
+            # 9. Built-in objects
+            m = P.BUILTIN.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'builtins'))
+                pos = m.end()
+                continue
+            
+            # 10. Numbers
+            m = P.NUMBER.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'number'))
+                pos = m.end()
+                continue
+            
+            # 11. Arrow function
+            m = P.ARROW_FUNC.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'keywords'))
+                pos = m.end()
+                continue
+            
+            # 12. Function call: name(
+            m = P.FUNCTION_CALL.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'function'))
+                pos = m.end()
+                continue
+            
+            # 13. Operators
+            m = P.OPERATOR.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'operator'))
+                pos = m.end()
+                continue
+            
+            # 14. Property access: .name
+            m = P.PROPERTY.match(text, pos)
+            if m:
+                tokens.append((pos, pos + 1, 'operator'))  # dot
+                prop_name = m.group(1)
+                tokens.append((pos + 1, pos + 1 + len(prop_name), 'identifier'))
+                pos = m.end()
+                continue
+            
+            # 15. Punctuation (skip but don't highlight)
+            if ch in '(){}[];,:':
+                pos += 1
+                continue
+            
+            # 16. Identifier
+            m = P.IDENTIFIER.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'identifier'))
+                pos = m.end()
+                continue
+            
+            # No match - skip character
+            pos += 1
+        
+        # Set end state
+        self.state_chain.set_end_state(line_num, TokenState.ROOT)
+        
+        return tokens
+    
+    def _tokenize_javascript_inline(self, text: str) -> List[Tuple[int, int, str]]:
+        """
+        Tokenize JavaScript without state tracking - for embedded script content.
+        Returns tokens for a single line/segment.
+        """
+        P = JavaScriptPatterns
+        tokens = []
+        pos = 0
+        length = len(text)
+        
+        while pos < length:
+            ch = text[pos]
+            
+            # Skip whitespace
+            if ch in ' \t\n\r':
+                pos += 1
+                continue
+            
+            # Line comment
+            m = P.COMMENT_LINE.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'comment'))
+                pos = m.end()
+                continue
+            
+            # Block comment (simplified - no multi-line tracking)
+            m = P.COMMENT_BLOCK_START.match(text, pos)
+            if m:
+                end_match = P.COMMENT_BLOCK_END.search(text, m.end())
+                if end_match:
+                    tokens.append((pos, end_match.end(), 'comment'))
+                    pos = end_match.end()
+                else:
+                    tokens.append((pos, length, 'comment'))
+                    pos = length
+                continue
+            
+            # Double-quoted string
+            m = P.STRING_DOUBLE.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'string'))
+                pos = m.end()
+                continue
+            
+            # Single-quoted string
+            m = P.STRING_SINGLE.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'string'))
+                pos = m.end()
+                continue
+            
+            # Template literal
+            if ch == '`':
+                end_pos = text.find('`', pos + 1)
+                if end_pos >= 0:
+                    tokens.append((pos, end_pos + 1, 'string'))
+                    pos = end_pos + 1
+                else:
+                    tokens.append((pos, length, 'string'))
+                    pos = length
+                continue
+            
+            # Function definition
+            m = P.FUNCTION_DEF.match(text, pos)
+            if m:
+                tokens.append((pos, pos + len('function'), 'keywords'))
+                func_name = m.group(2)
+                name_start = text.find(func_name, pos + len('function'))
+                if name_start >= 0:
+                    tokens.append((name_start, name_start + len(func_name), 'function'))
+                pos = m.end()
+                continue
+            
+            # Keywords
+            m = P.KEYWORD.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'keywords'))
+                pos = m.end()
+                continue
+            
+            # Constants
+            m = P.CONSTANT.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'bool_ops'))
+                pos = m.end()
+                continue
+            
+            # Built-ins
+            m = P.BUILTIN.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'builtins'))
+                pos = m.end()
+                continue
+            
+            # Numbers
+            m = P.NUMBER.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'number'))
+                pos = m.end()
+                continue
+            
+            # Arrow function
+            m = P.ARROW_FUNC.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'keywords'))
+                pos = m.end()
+                continue
+            
+            # Function call
+            m = P.FUNCTION_CALL.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'function'))
+                pos = m.end()
+                continue
+            
+            # Operators
+            m = P.OPERATOR.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'operator'))
+                pos = m.end()
+                continue
+            
+            # Property access
+            m = P.PROPERTY.match(text, pos)
+            if m:
+                tokens.append((pos, pos + 1, 'operator'))
+                prop_name = m.group(1)
+                tokens.append((pos + 1, pos + 1 + len(prop_name), 'identifier'))
+                pos = m.end()
+                continue
+            
+            # Punctuation
+            if ch in '(){}[];,:':
+                pos += 1
+                continue
+            
+            # Identifier
+            m = P.IDENTIFIER.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'identifier'))
+                pos = m.end()
+                continue
+            
+            pos += 1
+        
+        return tokens
+    
     def _tokenize_xml(self, line_num: int, text: str) -> List[Tuple[int, int, str]]:
         """
         Tokenize XML/XSL content.
@@ -1402,6 +1809,28 @@ class StateAwareSyntaxEngine:
             else:
                 tokens.append((0, length, 'comment'))
                 self.state_chain.set_end_state(line_num, TokenState.IN_XML_COMMENT)
+                return tokens
+        
+        # Handle script tag continuation - use JavaScript tokenizer
+        if start_state == TokenState.IN_HTML_SCRIPT:
+            # Look for closing </script> tag
+            close_match = re.search(r'</script\s*>', text, re.IGNORECASE)
+            if close_match:
+                # Tokenize JavaScript content before </script>
+                if close_match.start() > 0:
+                    js_tokens = self._tokenize_javascript_inline(text[:close_match.start()])
+                    tokens.extend(js_tokens)
+                # Tokenize the closing tag
+                tokens.append((close_match.start(), close_match.start() + 2, 'xml_bracket'))  # </
+                tokens.append((close_match.start() + 2, close_match.end() - 1, 'xml_tag'))  # script
+                tokens.append((close_match.end() - 1, close_match.end(), 'xml_bracket'))  # >
+                pos = close_match.end()
+                # Continue with normal XML parsing
+            else:
+                # Still inside script - tokenize entire line as JavaScript
+                js_tokens = self._tokenize_javascript_inline(text)
+                tokens.extend(js_tokens)
+                self.state_chain.set_end_state(line_num, TokenState.IN_HTML_SCRIPT)
                 return tokens
         
         while pos < length:
@@ -1531,6 +1960,63 @@ class StateAwareSyntaxEngine:
                 tag_start = text.find(tag_name, pos + 1)
                 if tag_start >= 0:
                     tokens.append((tag_start, tag_start + len(tag_name), 'xml_tag'))
+                
+                # Check for script or style tag (HTML only)
+                if self.language == 'html' and tag_name.lower() == 'script':
+                    # Find the > that closes the opening tag
+                    tag_end = text.find('>', m.end())
+                    if tag_end >= 0:
+                        # Tokenize attributes before >
+                        attr_text = text[m.end():tag_end]
+                        attr_pos = 0
+                        while attr_pos < len(attr_text):
+                            attr_m = P.ATTRIBUTE_NAME.match(attr_text, attr_pos)
+                            if attr_m:
+                                attr_name = attr_m.group(1)
+                                if attr_name:
+                                    name_real_start = text.find(attr_name, m.end() + attr_pos)
+                                    if name_real_start >= 0:
+                                        tokens.append((name_real_start, name_real_start + len(attr_name), 'xml_attribute'))
+                                attr_pos = attr_m.end()
+                                continue
+                            dq_m = P.DOUBLE_QUOTED.match(attr_text, attr_pos)
+                            if dq_m:
+                                tokens.append((m.end() + dq_m.start(), m.end() + dq_m.end(), 'string'))
+                                attr_pos = dq_m.end()
+                                continue
+                            sq_m = P.SINGLE_QUOTED.match(attr_text, attr_pos)
+                            if sq_m:
+                                tokens.append((m.end() + sq_m.start(), m.end() + sq_m.end(), 'string'))
+                                attr_pos = sq_m.end()
+                                continue
+                            attr_pos += 1
+                        
+                        tokens.append((tag_end, tag_end + 1, 'xml_bracket'))  # >
+                        
+                        # Check if </script> is on this same line
+                        close_match = re.search(r'</script\s*>', text[tag_end + 1:], re.IGNORECASE)
+                        if close_match:
+                            js_start = tag_end + 1
+                            js_end = tag_end + 1 + close_match.start()
+                            if js_end > js_start:
+                                js_tokens = self._tokenize_javascript_inline(text[js_start:js_end])
+                                for s, e, t in js_tokens:
+                                    tokens.append((js_start + s, js_start + e, t))
+                            # Tokenize closing </script>
+                            close_abs = tag_end + 1 + close_match.start()
+                            tokens.append((close_abs, close_abs + 2, 'xml_bracket'))  # </
+                            tokens.append((close_abs + 2, close_abs + close_match.end() - close_match.start() - 1, 'xml_tag'))  # script
+                            tokens.append((tag_end + 1 + close_match.end() - 1, tag_end + 1 + close_match.end(), 'xml_bracket'))  # >
+                            pos = tag_end + 1 + close_match.end()
+                        else:
+                            # Script continues to next line
+                            self.state_chain.set_end_state(line_num, TokenState.IN_HTML_SCRIPT)
+                            pos = length
+                            return tokens
+                    else:
+                        pos = m.end()
+                    continue
+                
                 pos = m.end()
                 continue
             
