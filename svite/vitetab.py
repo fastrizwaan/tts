@@ -12,12 +12,13 @@ VITE_TAB_CSS = """
    ======================== */
 
 .chrome-tab {
-    background: transparent;
+    background: @headerbar_bg_color;
     color: alpha(@window_fg_color, 0.85);
     min-height: 32px;
     padding-left: 0px;
     padding-right: 0px;
     border-radius: 9px 9px 9px 9px;
+    margin-left: 0px;
     margin-bottom: 1px;
 
 }
@@ -73,7 +74,7 @@ VITE_TAB_CSS = """
 
 .chrome-tab:hover {
     color: @window_fg_color;
-    background: alpha(@window_fg_color, 0.10);
+    background: alpha(@window_fg_color, 0.1);
 
 }
 
@@ -146,7 +147,7 @@ VITE_TAB_CSS = """
 }
 
 .chrome-tab:hover .chrome-tab-close-button {
-    background-color: alpha(@window_fg_color, 0.0);
+    background-color: alpha(@window_fg_color, 0.01); /* Visible background on hover */
     color: @window_fg_color;
 }
 /* These 3 needs to be 0.0 */
@@ -167,8 +168,8 @@ VITE_TAB_CSS = """
 }
 
 .chrome-tab-separator.hidden {
-    min-width: 0px;
-    background-color: transparent;
+    opacity: 0;
+    /* Keep width to prevent layout shift */
 }
 .chrome-tab-separator:first-child {
     background-color: transparent;
@@ -199,16 +200,40 @@ VITE_TAB_CSS = """
 .chrome-tab-close-button:hover  {
     opacity: 1.0;
     color: @window_fg_color;
+    background-color: alpha(@window_fg_color, 0.24); /* Stronger background on direct hover */
 }
 
 .chrome-tab.active .chrome-tab-close-button:hover {
     opacity: 1;
-    background-color: alpha(@window_fg_color, 0.13);
+    background-color: alpha(@window_fg_color, 0.12);
     color: @window_fg_color;
 }
-.chrome-tab .chrome-tab-close-button:hover {
+.chrome-tab .chrome-tab-close-button:hover  {
+    opacity: 1.0;
+    color: @window_fg_color;
+    background-color: alpha(@window_fg_color, 0.12); 
+}
+
+.chrome-tab-fade {
+    background: linear-gradient(to right, transparent 0%, @headerbar_bg_color 100%);
+    min-width: 50px;
+    padding-right: 0px;
+    padding-left: 0px;
+    opacity: 1; /* Always visible, but subtle via gradient */
+    transition: opacity 0.1s;
+}
+
+.chrome-tab:hover .chrome-tab-fade {
     opacity: 1;
-    background-color: alpha(@window_fg_color, 0.13);
+    /* Active tab color: mix of headerbar_bg and 10% fg (matches line 83) */
+    background: linear-gradient(to right, transparent 0%, mix(@headerbar_bg_color, @window_fg_color, 0.1) 60%, mix(@headerbar_bg_color, @window_fg_color, 0.1) 100%);
+}
+
+
+.chrome-tab.active .chrome-tab-fade {
+    opacity: 1;
+    /* Active tab color: mix of headerbar_bg and 10% fg (matches line 83) */
+    background: linear-gradient(to right, transparent 0%, mix(@headerbar_bg_color, @window_fg_color, 0.1) 60%, mix(@headerbar_bg_color, @window_fg_color, 0.1) 100%);
 }
 """
 
@@ -231,9 +256,10 @@ class ChromeTab(Gtk.Box):
         FIXED_H = 32
         self.set_hexpand(False)
         self.set_vexpand(False)
-        self.set_halign(Gtk.Align.START)  # Don't fill - use exact size from set_size_request
+        self.set_halign(Gtk.Align.FILL)  # Fill allocated space to ensure equal width
         self.set_valign(Gtk.Align.CENTER)
         self.add_css_class("chrome-tab")
+        self.set_overflow(Gtk.Overflow.HIDDEN) # Clip overflowing text
         self.set_size_request(150, FIXED_H)
         
         # Overlay for label and close button
@@ -243,16 +269,26 @@ class ChromeTab(Gtk.Box):
         
         # Title label - main child of overlay
         self.label = Gtk.Label()
-        self.label.set_text(title)
-        self.label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.label.set_text(title) # Restore set_text!
+        # Wrapper for label to clip text without expanding tab
+        self.scroll_wrapper = Gtk.ScrolledWindow()
+        self.scroll_wrapper.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.NEVER) # EXTERNAL allows propagate_natural_width=False to work
+        self.scroll_wrapper.set_has_frame(False)
+        self.scroll_wrapper.set_hexpand(True)
+        self.scroll_wrapper.set_propagate_natural_width(False) # CRITICAL: Allows shrinking below content size
+        self.scroll_wrapper.set_min_content_width(1) # Ensure wrapper can be very small
+        self.scroll_wrapper.set_can_target(False) # Pass clicks through to tab
+        self.scroll_wrapper.set_margin_start(15)
+        self.scroll_wrapper.set_margin_end(15) # 6px margin as requested
+        
+        self.label.set_ellipsize(Pango.EllipsizeMode.NONE) # No ellipsis, just run
         self.label.set_single_line_mode(True)
         self.label.set_hexpand(True)
-        self.label.set_halign(Gtk.Align.CENTER)
+        self.label.set_halign(Gtk.Align.CENTER) # Center align text as requested
         self.label.set_xalign(0.5)
-        # Constrain label width strictly
-        self.label.set_width_chars(1)
         
-        self.overlay.set_child(self.label)
+        self.scroll_wrapper.set_child(self.label)
+        self.overlay.set_child(self.scroll_wrapper)
         
         # State tracking
         self._is_modified = False
@@ -270,13 +306,34 @@ class ChromeTab(Gtk.Box):
             self.close_button.set_halign(Gtk.Align.END)
             self.close_button.set_valign(Gtk.Align.CENTER)
             self.close_button.set_hexpand(False)
-            self.close_button.set_margin_end(6)
+            self.close_button.set_margin_end(0) # Moved right (was 2)
             self.close_button.connect('clicked', self._on_close_clicked)
             
             # Hide initially (opacity 0 to keep layout if needed, or just invisible)
             # Using set_opacity gives smoother transition possibility
             self.close_button.set_opacity(0)
             
+            # Fade Overlay - Added BEFORE close button (so it's under close button if stacked, wait, overlay stack. 
+            # We want fade ON TOP of label. Label is child. 
+            # We want fade UNDER close button? Or ON TOP? 
+            # Close button needs to be clickable. Fade is just visual.
+            # Add fade first.
+            self.fade_overlay = Gtk.Box()
+            self.fade_overlay.set_halign(Gtk.Align.END)
+            # Use margin right to perfectly align under close button but not cover it partially? 
+            # Actually, standard design: fade GOES UNDER close button.
+            # Close button sits on RIGHT edge. Fade sits on RIGHT edge. They overlap.
+            self.fade_overlay.set_hexpand(False)
+            self.fade_overlay.set_size_request(50, -1) # Wide fade
+            self.fade_overlay.add_css_class("chrome-tab-fade")
+            self.fade_overlay.set_margin_end(0) # Flush right
+            # For clickthrough? Gtk.Box consumes clicks? 
+            # Set pickable=False to allow clicks to pass to close button if overlapped? 
+            # But Close Button is added AFTER, so it's on top.
+            self.fade_overlay.set_can_target(False)
+            
+            self.overlay.add_overlay(self.fade_overlay)
+
             self.overlay.add_overlay(self.close_button)
             self.overlay.set_measure_overlay(self.close_button, False)
             
@@ -677,13 +734,16 @@ class ChromeTabBar(Adw.WrapBox):
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
 
-        self.set_margin_start(6)
+        self.set_margin_start(6)  # User requested 3px margin start
+        self.set_margin_end(0)
         self.set_margin_top(0)
         self.set_margin_bottom(0)
         self.set_child_spacing(0)
         
-        # Align wrapped content to the left (not center)
+        # Make the tab bar expand to fill available horizontal space
+        self.set_hexpand(True)
         self.set_halign(Gtk.Align.FILL)
+        
         # Don't justify - we manually calculate tab sizes for equal width
         try:
             self.set_justify(0)  # Adw.Justify.NONE - no stretching/spreading
@@ -867,21 +927,21 @@ class ChromeTabBar(Adw.WrapBox):
         self.emit('tab-reordered', tab, new_index)
 
     def update_separators(self):
-        # Reset all
+        # Reset all (show all initially)
         for sep in self.separators:
+            sep.set_visible(True)
             sep.remove_css_class("hidden")
 
         # Hide edge separators permanently
         if self.separators:
-            self.separators[0].add_css_class("hidden")
+            self.separators[0].set_visible(False)
             if len(self.separators) > 1:
-                self.separators[-1].add_css_class("hidden")
+                self.separators[-1].set_visible(False)
 
         # Hide separator at the end of every row
         allocated_width = self.get_width()
         if allocated_width > 0:
-            margin_start = 6
-            available_width = allocated_width - margin_start
+            available_width = allocated_width - 3  # Account for margin_start=3
             cols, _, _, _ = self._calculate_grid_cols(available_width)
             
             # If we have multiple rows, hide the separator at the end of each row
@@ -890,7 +950,7 @@ class ChromeTabBar(Adw.WrapBox):
             if cols > 0:
                 for i in range(cols, len(self.separators), cols):
                     if i < len(self.separators):
-                        self.separators[i].add_css_class("hidden")
+                        self.separators[i].set_visible(False)
 
         # Hide around active tab
         for i, tab in enumerate(self.tabs):
@@ -929,7 +989,7 @@ class ChromeTabBar(Adw.WrapBox):
             return False
         
         # Calculate available width for tabs
-        margin_start = 6
+        margin_start = 3
         available_width = allocated_width - margin_start
         
         if available_width <= 0:
@@ -937,7 +997,7 @@ class ChromeTabBar(Adw.WrapBox):
         
         # Sizing constants
         MIN_TAB_WIDTH = 150
-        MAX_TAB_WIDTH = 400
+        MAX_TAB_WIDTH = 4000  # Allow tabs to grow to fill entire viewport
         TAB_HEIGHT = 32
         SEPARATOR_WIDTH = 1
         
@@ -953,7 +1013,8 @@ class ChromeTabBar(Adw.WrapBox):
         # available = (cols * width) + ((cols - 1) * separator)
         # width = (available - (cols-1)*sep) / cols
         total_sep_width = (cols - 1) * SEPARATOR_WIDTH
-        available_for_tabs = available_width - total_sep_width - 4 # buffer
+        total_sep_width = (cols - 1) * SEPARATOR_WIDTH
+        available_for_tabs = available_width - total_sep_width # exact fit
         
         raw_tab_width = available_for_tabs // cols
         
@@ -967,10 +1028,13 @@ class ChromeTabBar(Adw.WrapBox):
             if current_req[0] != final_tab_width or current_req[1] != TAB_HEIGHT:
                 tab.set_size_request(final_tab_width, TAB_HEIGHT)
             
+            
             # Update label ellipsization
-            max_chars = int(max(1, (final_tab_width - 50) / 9))
-            if hasattr(tab, 'label'):
-                tab.label.set_max_width_chars(max_chars)
+            # Dynamic sizing handled by ScrolledWindow clipping
+            pass
+            # max_chars = int(max(1, (final_tab_width - 40) / 9))
+            # if hasattr(tab, 'label'):
+            #     tab.label.set_max_width_chars(max_chars)
         
         # 4. Update separators if column count changed
         if cols != getattr(self, '_cached_cols', 0):
