@@ -996,11 +996,19 @@ class StateAwareSyntaxEngine:
                     m = P.END_TRIPLE_DQ.match(text, pos)
                 else:
                     m = P.END_TRIPLE_SQ.match(text, pos)
-            else:
+            elif is_raw:
+                # Raw strings need lookbehind to avoid escaped quotes
                 if delimiter == '"':
                     m = P.END_DQ.match(text, pos)
                 else:
                     m = P.END_SQ.match(text, pos)
+            else:
+                # Normal strings: escapes processed consumed manually below
+                # So we just match the quote (if we reached here, it's not escaped)
+                if delimiter == '"':
+                    m = P.DQ.match(text, pos)
+                else:
+                    m = P.SQ.match(text, pos)
             
             if m:
                 # Found end delimiter
