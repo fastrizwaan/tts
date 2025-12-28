@@ -784,6 +784,10 @@ class ChromeTabBar(Adw.WrapBox):
         self._size_allocate_handler_id = None
         self._setup_size_allocate_handler()
         
+        # Force update when mapped (window loaded)
+        self.connect('map', lambda w: self.update_tab_sizes())
+        
+        
     def add_tab(self, tab):
         idx = len(self.tabs)
 
@@ -814,13 +818,23 @@ class ChromeTabBar(Adw.WrapBox):
         if current_width <= 0 and hasattr(self, '_last_allocated_width'):
             current_width = self._last_allocated_width
             
-        if current_width > 0:
-            # Re-run full update logic immediately, passing known width
-            self.update_tab_sizes(allocated_width=current_width)
-        else:
-            # Fallback for very first render if no width known yet
-            # forcing a reasonable default based on window size guess or just allow layout to happen
-            GLib.idle_add(self.update_tab_sizes)
+        # Update logic: Use max of cached, current, or window width heuristic
+        # Biases towards "Start Large then shrink" which is smoother than expanding from 0
+        win_width = 0
+        window = self.get_ancestor(Gtk.Window)
+        if window:
+            win_width = window.get_width() # Use full window width as strong hint
+            
+        cached = getattr(self, '_last_allocated_width', 0)
+        current = self.get_width()
+        target_width = max(cached, current, win_width)
+            
+        if target_width > 0:
+            self.update_tab_sizes(allocated_width=target_width)
+        
+        # Always schedule updates to ensure final consistency after layout
+        GLib.idle_add(self.update_tab_sizes)
+        GLib.timeout_add(50, self.update_tab_sizes) # Add delay to allow layout to settle
         
         # Update window UI state (visibility of tab bar)
         window = self.get_ancestor(Adw.ApplicationWindow)
@@ -940,8 +954,9 @@ class ChromeTabBar(Adw.WrapBox):
 
         # Hide separator at the end of every row
         allocated_width = self.get_width()
+        allocated_width = self.get_width()
         if allocated_width > 0:
-            available_width = allocated_width - 3  # Account for margin_start=3
+            available_width = allocated_width - 6  # Account for margin_start=6
             cols, _, _, _ = self._calculate_grid_cols(available_width)
             
             # If we have multiple rows, hide the separator at the end of each row
@@ -987,9 +1002,13 @@ class ChromeTabBar(Adw.WrapBox):
         
         if allocated_width <= 0:
             return False
+            
+        # Update cache immediately so subsequent calls (e.g. add_tab) use this valid width
+        if hasattr(self, '_last_allocated_width'):
+            self._last_allocated_width = allocated_width
         
         # Calculate available width for tabs
-        margin_start = 3
+        margin_start = 6
         available_width = allocated_width - margin_start
         
         if available_width <= 0:
