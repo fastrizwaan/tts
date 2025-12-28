@@ -463,7 +463,9 @@ def detect_language(path):
         '.html': 'html',
         '.htm': 'html',
         '.css': 'css',
-        '.dsl': 'dsl'
+        '.dsl': 'dsl',
+        '.yaml': 'yaml',
+        '.yml': 'yaml',
     }
     return mapping.get(ext, None)
 
@@ -4177,6 +4179,23 @@ class VirtualTextView(Gtk.DrawingArea):
                 'escape': hex_to_pango("#5c6370"),          # Muted grey
                 'tilde': hex_to_pango("#5c6370"),           # Muted grey
                 'at_sign': hex_to_pango("#5c6370"),         # Muted grey
+                
+                # YAML-specific colors
+                'yaml_key': hex_to_pango("#e06c75"),         # Red (entity name)
+                'yaml_colon': hex_to_pango("#abb2bf"),       # Default text
+                'yaml_value': hex_to_pango("#98c379"),       # Green (same as string)
+                'yaml_doc_marker': hex_to_pango("#abb2bf"),  # Default text
+                'yaml_directive': hex_to_pango("#c678dd"),   # Purple (keyword)
+                'yaml_anchor': hex_to_pango("#e5c07b"),      # Yellow (variable)
+                'yaml_alias': hex_to_pango("#e5c07b"),       # Yellow (variable)
+                'yaml_tag': hex_to_pango("#56b6c2"),         # Cyan (type)
+                'yaml_null': hex_to_pango("#d19a66"),        # Orange (constant)
+                'yaml_timestamp': hex_to_pango("#d19a66"),   # Orange (constant)
+                'yaml_merge': hex_to_pango("#c678dd"),       # Purple (keyword)
+                'yaml_sequence_indicator': hex_to_pango("#c678dd"),  # Purple
+                'yaml_flow_indicator': hex_to_pango("#abb2bf"),      # Default text
+                'yaml_block_indicator': hex_to_pango("#98c379"),     # Green (same as string/value)
+                'yaml_explicit_key': hex_to_pango("#c678dd"),        # Purple
             }
         else:
             self.text_foreground_color = (0.2, 0.2, 0.2)
@@ -4238,6 +4257,23 @@ class VirtualTextView(Gtk.DrawingArea):
                 'raw_string_content': hex_to_pango("#50a14f"),
                 'f_string_content': hex_to_pango("#50a14f"),
                 'string_content': hex_to_pango("#50a14f"),
+                
+                # YAML-specific colors
+                'yaml_key': hex_to_pango("#e45649"),         # Red (entity name)
+                'yaml_colon': hex_to_pango("#383a42"),       # Default text
+                'yaml_value': hex_to_pango("#50a14f"),       # Green (same as string)
+                'yaml_doc_marker': hex_to_pango("#383a42"),  # Default text
+                'yaml_directive': hex_to_pango("#a626a4"),   # Purple (keyword)
+                'yaml_anchor': hex_to_pango("#c18401"),      # Yellow (variable)
+                'yaml_alias': hex_to_pango("#c18401"),       # Yellow (variable)
+                'yaml_tag': hex_to_pango("#0184bc"),         # Cyan (type)
+                'yaml_null': hex_to_pango("#986801"),        # Orange (constant)
+                'yaml_timestamp': hex_to_pango("#986801"),   # Orange (constant)
+                'yaml_merge': hex_to_pango("#a626a4"),       # Purple (keyword)
+                'yaml_sequence_indicator': hex_to_pango("#a626a4"),  # Purple
+                'yaml_flow_indicator': hex_to_pango("#383a42"),      # Default text
+                'yaml_block_indicator': hex_to_pango("#50a14f"),     # Green (same as string/value)
+                'yaml_explicit_key': hex_to_pango("#a626a4"),        # Purple
             }
         
         self.queue_draw()

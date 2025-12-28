@@ -45,6 +45,10 @@ class TokenState:
     IN_R_TRIPLE_SQ = 16     # Inside r'''...''' string
     IN_R_TRIPLE_DQ = 17     # Inside r"""...""" string
     
+    # YAML block scalar states
+    IN_YAML_BLOCK_LITERAL = 18  # Inside | block scalar
+    IN_YAML_BLOCK_FOLDED = 19   # Inside > block scalar
+    
     @classmethod
     def is_string_state(cls, state: int) -> bool:
         """Check if state represents being inside a string."""
@@ -270,6 +274,107 @@ class PythonPatterns:
     PERSONAL = re.compile(r'\b(Adw|Gtk)\b')
 
 
+class YamlPatterns:
+    """Pre-compiled regex patterns for YAML syntax highlighting.
+    
+    Based on VSCode's YAML TextMate grammars:
+    - yaml-1.2.tmLanguage.json (primary)
+    - yaml-1.1.tmLanguage.json (additional patterns)
+    """
+    
+    # Comments - must start with # preceded by whitespace or at line start
+    COMMENT = re.compile(r'(?:^|\s)#.*$')
+    
+    # Document markers
+    DOC_START = re.compile(r'^---(?:\s|$)')
+    DOC_END = re.compile(r'^\.\.\.(?:\s|$)')
+    
+    # Directives (e.g., %YAML 1.2, %TAG)
+    DIRECTIVE = re.compile(r'^%(?:YAML|TAG)\b.*$')
+    
+    # Block scalar indicators (| and >)
+    BLOCK_SCALAR = re.compile(r'[|>][+-]?(?:\d)?(?:\s*$)')
+    
+    # Anchor (&name) and Alias (*name)
+    ANCHOR = re.compile(r'&[^\s,\[\]{}]+')
+    ALIAS = re.compile(r'\*[^\s,\[\]{}]+')
+    
+    # Tags (!, !!, !<...>, !tag!suffix)
+    TAG_VERBATIM = re.compile(r'!<[^>]+>')
+    TAG_NAMED = re.compile(r'![a-zA-Z0-9-]+![^\s,\[\]{}]*')
+    TAG_SECONDARY = re.compile(r'!![^\s,\[\]{}]+')
+    TAG_PRIMARY = re.compile(r'![^\s,\[\]{}!]*')
+    
+    # Null values
+    NULL = re.compile(r'\b(?:null|Null|NULL|~)\b')
+    
+    # Boolean values (YAML 1.1 and 1.2 compatible)
+    BOOLEAN = re.compile(
+        r'\b(?:true|True|TRUE|false|False|FALSE|'
+        r'yes|Yes|YES|no|No|NO|y|Y|n|N|'
+        r'on|On|ON|off|Off|OFF)\b'
+    )
+    
+    # Numbers - integers (decimal, hex, octal, binary)
+    INT_DECIMAL = re.compile(r'[+-]?(?:0|[1-9][0-9_]*)\b')
+    INT_HEX = re.compile(r'0x[0-9a-fA-F_]+\b')
+    INT_OCTAL = re.compile(r'0o[0-7_]+\b')
+    INT_BINARY = re.compile(r'0b[01_]+\b')
+    
+    # Numbers - floats (including special values)
+    FLOAT = re.compile(r'[+-]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?)\b')
+    FLOAT_INF = re.compile(r'[+-]?\.(?:inf|Inf|INF)\b')
+    FLOAT_NAN = re.compile(r'\.(?:nan|NaN|NAN)\b')
+    
+    # Sexagesimal (base 60) numbers - YAML 1.1
+    SEXAGESIMAL_INT = re.compile(r'[+-]?[1-9][0-9_]*(?::[0-5]?[0-9])+\b')
+    SEXAGESIMAL_FLOAT = re.compile(r'[+-]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*\b')
+    
+    # Timestamp (ISO 8601 style)
+    TIMESTAMP = re.compile(
+        r'\d{4}-\d{2}-\d{2}(?:[\sT]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}(?::\d{2})?)?)?'
+    )
+    
+    # Merge key
+    MERGE_KEY = re.compile(r'<<(?=\s|$)')
+    
+    # Double-quoted strings  
+    DOUBLE_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
+    DOUBLE_QUOTED_START = re.compile(r'"(?:[^"\\]|\\.)*$')  # Unterminated
+    
+    # Single-quoted strings
+    SINGLE_QUOTED = re.compile(r"'(?:[^']|'')*'")
+    SINGLE_QUOTED_START = re.compile(r"'(?:[^']|'')*$")  # Unterminated
+    
+    # Map key - matches key: pattern (key can be plain, quoted, etc.)
+    # Plain key (unquoted) followed by colon
+    MAP_KEY = re.compile(r'^(\s*)([^\s#:,\[\]{}!&*|>\'"%-][^:#]*?)?(\s*):(?:\s|$)')
+    FLOW_MAP_KEY = re.compile(r'([^\s#:,\[\]{}!&*|>\'"%-][^:#,\[\]{}]*?)\s*:(?=\s|,|\]|\}|$)')
+    
+    # Sequence item indicator
+    SEQUENCE_ITEM = re.compile(r'^(\s*)-(?:\s|$)')
+    
+    # Explicit key indicator
+    EXPLICIT_KEY = re.compile(r'^\s*\?(?:\s|$)')
+    
+    # Flow collection brackets
+    FLOW_MAP_START = re.compile(r'\{')
+    FLOW_MAP_END = re.compile(r'\}')
+    FLOW_SEQ_START = re.compile(r'\[')
+    FLOW_SEQ_END = re.compile(r'\]')
+    FLOW_SEPARATOR = re.compile(r',')
+    
+    # Escape sequences in double-quoted strings
+    ESCAPE = re.compile(r'\\(?:[0abtnvfre "\\N_LP/]|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8})')
+    
+    # Plain (unquoted) value - everything after special tokens until end of line or comment
+    # This captures values like: localhost, postgres, dev_db, etc.
+    PLAIN_VALUE = re.compile(r'[^\s#][^#]*')
+    
+    # Block scalar content line - indented text (used for | and > block content)
+    BLOCK_CONTENT = re.compile(r'^(\s+)(.+)$')
+
+
 # =============================================================================
 # STATE-AWARE SYNTAX ENGINE
 # =============================================================================
@@ -310,6 +415,8 @@ class StateAwareSyntaxEngine:
         
         if self.language == 'python':
             self._patterns = PythonPatterns
+        elif self.language == 'yaml':
+            self._patterns = YamlPatterns
         else:
             self._patterns = None
 
@@ -402,11 +509,16 @@ class StateAwareSyntaxEngine:
         """
         Internal tokenization with state tracking.
         """
-        if not self._patterns or self.language != 'python':
+        if not self._patterns:
             # Fallback for unsupported languages
             return self._tokenize_simple(text)
         
-        return self._tokenize_python(line_num, text)
+        if self.language == 'python':
+            return self._tokenize_python(line_num, text)
+        elif self.language == 'yaml':
+            return self._tokenize_yaml(line_num, text)
+        else:
+            return self._tokenize_simple(text)
     
     def _tokenize_python(self, line_num: int, text: str) -> List[Tuple[int, int, str]]:
         """
@@ -735,6 +847,308 @@ class StateAwareSyntaxEngine:
             tokens.append((content_start, pos, token_type))
         
         return tokens, pos, state
+    
+    def _tokenize_yaml(self, line_num: int, text: str) -> List[Tuple[int, int, str]]:
+        """
+        Tokenize YAML content.
+        
+        Supports multi-line block scalars (| and >) and plain value highlighting.
+        """
+        P = self._patterns
+        tokens = []
+        pos = 0
+        length = len(text)
+        
+        # Check if we're continuing a block scalar from previous line
+        start_state = self.state_chain.get_start_state(line_num)
+        if start_state in (TokenState.IN_YAML_BLOCK_LITERAL, TokenState.IN_YAML_BLOCK_FOLDED):
+            # Check if this line is indented (block scalar content)
+            # Block scalar content ends when we hit a line with less/no indentation
+            stripped = text.lstrip()
+            indent = len(text) - len(stripped)
+            
+            if indent > 0 and stripped and not stripped.startswith('#'):
+                # This is block scalar content - highlight entire line as value
+                content_end = len(text.rstrip())
+                if content_end > 0:
+                    tokens.append((0, content_end, 'yaml_value'))
+                # Stay in block scalar state
+                self.state_chain.set_end_state(line_num, start_state)
+                return tokens
+            # Otherwise, we're out of the block scalar - fall through to normal parsing
+        
+        # Check for full-line patterns first
+        
+        # Document markers (--- and ...)
+        m = P.DOC_START.match(text)
+        if m:
+            tokens.append((0, 3, 'yaml_doc_marker'))
+            pos = 3
+        
+        m = P.DOC_END.match(text)
+        if m:
+            tokens.append((0, 3, 'yaml_doc_marker'))
+            pos = 3
+        
+        # Directive (%YAML, %TAG)
+        m = P.DIRECTIVE.match(text)
+        if m:
+            tokens.append((0, m.end(), 'yaml_directive'))
+            # Store end state as ROOT (no multi-line for directives)
+            self.state_chain.set_end_state(line_num, TokenState.ROOT)
+            return tokens
+        
+        # Check for sequence item at start of line
+        m = P.SEQUENCE_ITEM.match(text)
+        if m:
+            dash_pos = m.group(1)  # Indentation
+            indent_len = len(dash_pos) if dash_pos else 0
+            tokens.append((indent_len, indent_len + 1, 'yaml_sequence_indicator'))
+            pos = max(pos, indent_len + 1)
+        
+        # Check for explicit key marker (?)
+        m = P.EXPLICIT_KEY.match(text)
+        if m:
+            tokens.append((0, 1, 'yaml_explicit_key'))
+            pos = max(pos, 1)
+        
+        # Check for map key at start of line
+        m = P.MAP_KEY.match(text)
+        if m:
+            indent = m.group(1) or ''
+            key = m.group(2) or ''
+            space_before_colon = m.group(3) or ''
+            key_start = len(indent)
+            key_end = key_start + len(key)
+            colon_pos = key_end + len(space_before_colon)
+            
+            if key:
+                tokens.append((key_start, key_end, 'yaml_key'))
+            tokens.append((colon_pos, colon_pos + 1, 'yaml_colon'))
+            pos = max(pos, colon_pos + 1)
+        
+        while pos < length:
+            ch = text[pos]
+            
+            # Skip whitespace
+            if ch in ' \t':
+                pos += 1
+                continue
+            
+            # 1. Comments (highest priority after we're past structural elements)
+            if ch == '#':
+                # Make sure it's preceded by whitespace or at start
+                if pos == 0 or text[pos-1] in ' \t':
+                    tokens.append((pos, length, 'comment'))
+                    break
+            
+            # 2. Anchors (&name)
+            m = P.ANCHOR.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'yaml_anchor'))
+                pos = m.end()
+                continue
+            
+            # 3. Aliases (*name)
+            m = P.ALIAS.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'yaml_alias'))
+                pos = m.end()
+                continue
+            
+            # 4. Tags (order matters - longest patterns first)
+            m = P.TAG_VERBATIM.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'yaml_tag'))
+                pos = m.end()
+                continue
+            
+            m = P.TAG_NAMED.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'yaml_tag'))
+                pos = m.end()
+                continue
+            
+            m = P.TAG_SECONDARY.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'yaml_tag'))
+                pos = m.end()
+                continue
+            
+            m = P.TAG_PRIMARY.match(text, pos)
+            if m and m.end() > pos:  # Must match at least one char
+                tokens.append((pos, m.end(), 'yaml_tag'))
+                pos = m.end()
+                continue
+            
+            # 5. Double-quoted strings
+            m = P.DOUBLE_QUOTED.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'string'))
+                pos = m.end()
+                continue
+            
+            # 6. Single-quoted strings
+            m = P.SINGLE_QUOTED.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'string'))
+                pos = m.end()
+                continue
+            
+            # 7. Block scalar indicators (| or >)
+            m = P.BLOCK_SCALAR.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'yaml_block_indicator'))
+                pos = m.end()
+                continue
+            
+            # 8. Flow collection brackets
+            m = P.FLOW_MAP_START.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'yaml_flow_indicator'))
+                pos = m.end()
+                continue
+            
+            m = P.FLOW_MAP_END.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'yaml_flow_indicator'))
+                pos = m.end()
+                continue
+            
+            m = P.FLOW_SEQ_START.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'yaml_flow_indicator'))
+                pos = m.end()
+                continue
+            
+            m = P.FLOW_SEQ_END.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'yaml_flow_indicator'))
+                pos = m.end()
+                continue
+            
+            # 9. Merge key (<<)
+            m = P.MERGE_KEY.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'yaml_merge'))
+                pos = m.end()
+                continue
+            
+            # 10. Null values
+            m = P.NULL.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'yaml_null'))
+                pos = m.end()
+                continue
+            
+            # 11. Boolean values
+            m = P.BOOLEAN.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'bool_ops'))
+                pos = m.end()
+                continue
+            
+            # 12. Timestamps (before general numbers)
+            m = P.TIMESTAMP.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'yaml_timestamp'))
+                pos = m.end()
+                continue
+            
+            # 13. Special float values (before general floats)
+            m = P.FLOAT_INF.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'number'))
+                pos = m.end()
+                continue
+            
+            m = P.FLOAT_NAN.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'number'))
+                pos = m.end()
+                continue
+            
+            # 14. Hex/Octal/Binary integers (before decimal)
+            m = P.INT_HEX.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'number'))
+                pos = m.end()
+                continue
+            
+            m = P.INT_OCTAL.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'number'))
+                pos = m.end()
+                continue
+            
+            m = P.INT_BINARY.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'number'))
+                pos = m.end()
+                continue
+            
+            # 15. Sexagesimal numbers (YAML 1.1)
+            m = P.SEXAGESIMAL_FLOAT.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'number'))
+                pos = m.end()
+                continue
+            
+            m = P.SEXAGESIMAL_INT.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'number'))
+                pos = m.end()
+                continue
+            
+            # 16. Regular floats
+            m = P.FLOAT.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(), 'number'))
+                pos = m.end()
+                continue
+            
+            # 17. Flow map keys (inside { })
+            m = P.FLOW_MAP_KEY.match(text, pos)
+            if m:
+                tokens.append((pos, m.end(1), 'yaml_key'))
+                pos = m.end(1)
+                continue
+            
+            # 18. Plain (unquoted) value - capture remaining text as value
+            # This captures: localhost, postgres, Syntax Test, etc.
+            m = P.PLAIN_VALUE.match(text, pos)
+            if m:
+                # Check if there's a comment in the value and trim
+                value_text = m.group(0)
+                comment_pos = value_text.find(' #')
+                if comment_pos > 0:
+                    # Has inline comment, split
+                    actual_value = value_text[:comment_pos].rstrip()
+                    if actual_value:
+                        tokens.append((pos, pos + len(actual_value), 'yaml_value'))
+                    pos += comment_pos
+                else:
+                    # No inline comment, use full value (trimmed)
+                    actual_value = value_text.rstrip()
+                    if actual_value:
+                        tokens.append((pos, pos + len(actual_value), 'yaml_value'))
+                    pos = m.end()
+                continue
+            
+            # No match - skip character
+            pos += 1
+        
+        # Check if we detected a block scalar indicator (| or >)
+        # Set state for next lines to be highlighted as values
+        block_state = TokenState.ROOT
+        for start, end, ttype in tokens:
+            if ttype == 'yaml_block_indicator':
+                block_state = TokenState.IN_YAML_BLOCK_LITERAL
+                break
+        
+        self.state_chain.set_end_state(line_num, block_state)
+        
+        return tokens
     
     def _tokenize_simple(self, text: str) -> List[Tuple[int, int, str]]:
         """
