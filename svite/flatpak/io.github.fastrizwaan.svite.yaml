@@ -1,0 +1,26 @@
+app-id: io.github.fastrizwaan.svite
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+command: svite
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --filesystem=host
+  - --share=network
+modules:
+  - name: svite
+    buildsystem: simple
+    build-commands:
+      - install -D svite.py /app/bin/svite
+      - install -D virtual_buffer.py /app/bin/virtual_buffer.py
+      - install -D word_wrap.py /app/bin/word_wrap.py
+      - install -D syntax_v2.py /app/bin/syntax_v2.py
+      - install -D undo_redo.py /app/bin/undo_redo.py
+      - install -D vitetab.py /app/bin/vitetab.py
+      - install -D io.github.fastrizwaan.svite.desktop /app/share/applications/io.github.fastrizwaan.svite.desktop
+    sources:
+      - type: dir
+        path: ..
