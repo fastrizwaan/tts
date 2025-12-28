@@ -8823,9 +8823,10 @@ class EditorWindow(Adw.ApplicationWindow):
         # Tools
         self.add_simple_action("preferences", self.on_preferences)
         self.add_simple_action("fullscreen", self.on_fullscreen)
-        self.add_simple_action("print", self.on_print_dummy)
-        self.add_simple_action("discard_changes", self.on_discard_dummy)
+        self.add_simple_action("print", self.on_print)
+        self.add_simple_action("discard_changes", self.on_discard_changes)
         self.add_simple_action("goto_line", self.on_goto_line)
+        self.add_simple_action("find", self.on_search_toggle)
 
         # --------------------------------------------------------
         # Actions with Parameters (moved from perform_goto_line)
@@ -8877,13 +8878,193 @@ class EditorWindow(Adw.ApplicationWindow):
         else:
             self.fullscreen()
             
-    def on_print_dummy(self, action, param):
-        # Placeholder for print
-        print("Print not implemented yet")
+    def show_error_dialog(self, message):
+        """Show an error dialog."""
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading="Error",
+            body=message
+        )
+        dialog.add_response("ok", "OK")
+        dialog.set_default_response("ok")
+        dialog.set_close_response("ok")
+        dialog.connect("response", lambda d, r: d.close())
+        dialog.present()
+            
+    def on_discard_changes(self, action, param):
+        """Discard changes by reloading file from disk with confirmation."""
+        editor = self.get_current_page()
+        if not editor or not editor.current_file_path:
+            return
+
+        # Create Confirmation Dialog
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading=f"Discard Changes to \"{os.path.basename(editor.current_file_path)}\"?",
+            body="Unsaved changes will be permanently lost."
+        )
         
-    def on_discard_dummy(self, action, param):
-        # Placeholder for discard changes
-        print("Discard changes not implemented yet")
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("discard", "Discard")
+        
+        dialog.set_response_appearance("discard", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        
+        def on_response(dialog, response):
+            if response == "discard":
+                try:
+                    # Undo actions until file is clean/unmodified
+                    max_undos = 10000 
+                    count = 0
+                    
+                    # Use EditorPage's view's undo_manager
+                    # Access manager directly
+                    if not hasattr(editor, 'view') or not hasattr(editor.view, 'undo_manager'):
+                        raise AttributeError("Cannot access undo manager")
+                        
+                    manager = editor.view.undo_manager
+                    
+                    if hasattr(editor.buf, 'batch_notifications'):
+                        with editor.buf.batch_notifications():
+                             while editor.check_modification_state() and manager.can_undo and count < max_undos:
+                                 manager.undo(editor.buf)
+                                 count += 1
+                    else:
+                         while editor.check_modification_state() and manager.can_undo and count < max_undos:
+                             manager.undo(editor.buf)
+                             count += 1
+                    
+                    # Force update of status bar / UI
+                    # self.update_status_bar() # Removed per user request / attribute error
+                    self.update_tab_title(self.tab_view.get_selected_page())
+                    self.queue_draw()
+                       
+                except Exception as e:
+                    print(f"Error discarding changes: {e}")
+                    self.show_error_dialog(f"Failed to revert changes: {e}")
+                    
+        dialog.connect("response", on_response)
+        dialog.present()
+
+    def on_print(self, action, param):
+        """Handle print action."""
+        print_op = Gtk.PrintOperation()
+        print_op.set_job_name(f"Print Document")
+        
+        print_op.connect("begin-print", self._on_begin_print)
+        print_op.connect("draw-page", self._on_draw_page)
+        
+        res = print_op.run(Gtk.PrintOperationAction.PRINT_DIALOG, self)
+    
+    def _on_begin_print(self, operation, context):
+        """Calculate pagination."""
+        operation.set_n_pages(1)
+        
+    def _on_draw_page(self, operation, context, page_nr):
+        """Draw print page."""
+        cr = context.get_cairo_context()
+        layout = PangoCairo.create_layout(cr)
+        desc = Pango.FontDescription("Monospace 10")
+        layout.set_font_description(desc)
+        
+        editor = self.get_current_page()
+        if not editor: return
+
+        # Fetch first chunk of text safely
+        lines = []
+        char_count = 0
+        limit = 5000
+        truncated = False
+        
+        # Check settings
+        show_line_numbers = getattr(editor.view, 'show_line_numbers', True)
+        wrap_enabled = getattr(editor.view.mapper, 'enabled', True)
+        
+        # Enable word wrapping if configured in editor
+        gutter_width = 0
+        
+        if show_line_numbers:
+             # Calculate gutter width (approx 5 chars "0000 ")
+             # Use the layout to measure
+             layout.set_text("00000", -1)
+             ink, logical = layout.get_pixel_extents()
+             gutter_width = logical.width 
+             
+             # Negative indent makes the first line stick out to the left
+             # We want the paragraph body to be indented by gutter_width
+             # So we set negative indent equal to gutter width.
+             # Wait, negative indent means first line is indented to the left relative to rest.
+             # So we draw the whole layout at x=gutter_width.
+             # First line starts at x=0 (relative to paper), rest start at x=gutter_width.
+             layout.set_indent(int(-gutter_width * Pango.SCALE))
+        
+        if wrap_enabled:
+             width = context.get_width()
+             # Reduce width by gutter size if line numbers are shown
+             # (Effective width for wrapped lines)
+             content_width = width
+             if show_line_numbers:
+                 content_width -= gutter_width
+                 
+             layout.set_width(int(content_width * Pango.SCALE))
+             layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+        
+        # Safe iteration using total_lines property
+        count = min(editor.buf.total_lines, 200) # Cap at 200 lines to be safe
+        for i in range(count):
+             line = editor.buf.get_line(i)
+             if line is not None:
+                 # Add line numbers if enabled
+                 if show_line_numbers:
+                     prefix = f"{i+1:>4} "
+                     lines.append(prefix + line)
+                     char_count += len(prefix) + len(line) + 1
+                 else:
+                     lines.append(line)
+                     char_count += len(line) + 1
+                     
+             if char_count > limit:
+                 truncated = True
+                 break
+        
+        text = "\n".join(lines)
+        if truncated or editor.buf.total_lines > count:
+            text += "\n... (Printing truncated) ..."
+            
+        layout.set_text(text, -1)
+        
+        if show_line_numbers:
+             # Move to gutter position, so first line starts at 0 (gutter-gutter)
+             # and wrapped lines start at gutter
+             cr.move_to(gutter_width, 0)
+             
+        PangoCairo.show_layout(cr, layout)
+
+    def on_search_toggle(self, action, param):
+        """Toggle search bar visibility."""
+        editor = self.get_current_page()
+        if not editor: return
+        
+        # Access per-tab find bar
+        find_bar = getattr(editor, 'find_bar', None)
+        if not find_bar: return
+            
+        was_visible = find_bar.get_visible()
+        find_bar.set_visible(not was_visible)
+        
+        if not was_visible:
+            find_bar.find_entry.grab_focus()
+            
+            # Pre-fill
+            if editor.buf.has_selection():
+                s, e = editor.buf.get_selection_bounds()
+                if e - s < 100:
+                    text = editor.buf.get_text(s, e)
+                    find_bar.find_entry.set_text(text)
+        else:
+            if hasattr(editor, 'view'):
+                editor.view.grab_focus()
         
     
     def on_goto_line(self, action, param):
