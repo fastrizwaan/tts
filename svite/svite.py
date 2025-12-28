@@ -4192,7 +4192,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 'yaml_null': hex_to_pango("#d19a66"),        # Orange (constant)
                 'yaml_timestamp': hex_to_pango("#d19a66"),   # Orange (constant)
                 'yaml_merge': hex_to_pango("#c678dd"),       # Purple (keyword)
-                'yaml_sequence_indicator': hex_to_pango("#c678dd"),  # Purple
+                'yaml_sequence_indicator': hex_to_pango("#abb2bf"),  # Default text
                 'yaml_flow_indicator': hex_to_pango("#abb2bf"),      # Default text
                 'yaml_block_indicator': hex_to_pango("#98c379"),     # Green (same as string/value)
                 'yaml_explicit_key': hex_to_pango("#c678dd"),        # Purple
@@ -4270,7 +4270,7 @@ class VirtualTextView(Gtk.DrawingArea):
                 'yaml_null': hex_to_pango("#986801"),        # Orange (constant)
                 'yaml_timestamp': hex_to_pango("#986801"),   # Orange (constant)
                 'yaml_merge': hex_to_pango("#a626a4"),       # Purple (keyword)
-                'yaml_sequence_indicator': hex_to_pango("#a626a4"),  # Purple
+                'yaml_sequence_indicator': hex_to_pango("#383a42"),  # Default text
                 'yaml_flow_indicator': hex_to_pango("#383a42"),      # Default text
                 'yaml_block_indicator': hex_to_pango("#50a14f"),     # Green (same as string/value)
                 'yaml_explicit_key': hex_to_pango("#a626a4"),        # Purple

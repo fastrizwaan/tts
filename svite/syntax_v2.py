@@ -290,7 +290,8 @@ class YamlPatterns:
     DOC_END = re.compile(r'^\.\.\.(?:\s|$)')
     
     # Directives (e.g., %YAML 1.2, %TAG)
-    DIRECTIVE = re.compile(r'^%(?:YAML|TAG)\b.*$')
+    # Captures: group(1) = %YAML or %TAG, group(2) = rest (version/args)
+    DIRECTIVE = re.compile(r'^(%(?:YAML|TAG))\b(.*)$')
     
     # Block scalar indicators (| and >)
     BLOCK_SCALAR = re.compile(r'[|>][+-]?(?:\d)?(?:\s*$)')
@@ -893,7 +894,21 @@ class StateAwareSyntaxEngine:
         # Directive (%YAML, %TAG)
         m = P.DIRECTIVE.match(text)
         if m:
-            tokens.append((0, m.end(), 'yaml_directive'))
+            # Tokenize the directive keyword (%YAML or %TAG) as purple
+            keyword = m.group(1)
+            tokens.append((0, len(keyword), 'yaml_directive'))
+            
+            # Tokenize the rest (version number like 1.2) - find numbers in it
+            rest = m.group(2)
+            if rest:
+                rest_start = len(keyword)
+                # Find version numbers like 1.2 in the rest
+                import re as re_mod
+                for num_match in re_mod.finditer(r'[\d.]+', rest):
+                    num_start = rest_start + num_match.start()
+                    num_end = rest_start + num_match.end()
+                    tokens.append((num_start, num_end, 'number'))
+            
             # Store end state as ROOT (no multi-line for directives)
             self.state_chain.set_end_state(line_num, TokenState.ROOT)
             return tokens
