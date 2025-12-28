@@ -92,11 +92,33 @@ class VisualLineMapper:
     
     def set_font(self, font_desc: 'Pango.FontDescription') -> None:
         """Set font description for accurate text measurement."""
+        if self._font_desc == font_desc:
+            return
+            
+        if self._font_desc and font_desc and self._font_desc.equal(font_desc):
+            return
+
         self._font_desc = font_desc
         self.invalidate_all()
     
+    def _tab_arrays_equal(self, t1, t2) -> bool:
+        """Compare two Pango.TabArrays for equality."""
+        if t1 is t2: return True
+        if t1 is None or t2 is None: return False
+        if t1.get_size() != t2.get_size(): return False
+        if t1.get_positions_in_pixels() != t2.get_positions_in_pixels(): return False
+        
+        for i in range(t1.get_size()):
+             a1, l1 = t1.get_tab(i)
+             a2, l2 = t2.get_tab(i)
+             if a1 != a2 or l1 != l2: return False
+        return True
+
     def set_tab_array(self, tab_array: 'Pango.TabArray') -> None:
         """Set tab stops for layout."""
+        if self._tab_arrays_equal(self._tab_array, tab_array):
+            return
+            
         self._tab_array = tab_array
         self.invalidate_all()
     
