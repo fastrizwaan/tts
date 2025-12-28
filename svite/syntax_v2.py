@@ -57,10 +57,16 @@ class TokenState:
     IN_HTML_SCRIPT = 22         # Inside <script>...</script>
     IN_HTML_STYLE = 23          # Inside <style>...</style>
     
+    # F-String Expression States
+    IN_F_EXPR_SQ = 25           # Inside { ... } in f'...'
+    IN_F_EXPR_DQ = 26           # Inside { ... } in f"..."
+    IN_F_EXPR_TRIPLE_SQ = 27    # Inside { ... } in f'''...'''
+    IN_F_EXPR_TRIPLE_DQ = 28    # Inside { ... } in f"""..."""
+    
     @classmethod
     def is_string_state(cls, state: int) -> bool:
         """Check if state represents being inside a string."""
-        return state >= cls.IN_SQ_STRING and state <= cls.IN_R_TRIPLE_DQ
+        return (state >= cls.IN_SQ_STRING and state <= cls.IN_R_TRIPLE_DQ) or (state >= 50 and state <= 65)
     
     @classmethod
     def is_triple_string(cls, state: int) -> bool:
@@ -70,7 +76,24 @@ class TokenState:
             cls.IN_F_TRIPLE_SQ, cls.IN_F_TRIPLE_DQ,
             cls.IN_B_TRIPLE_SQ, cls.IN_B_TRIPLE_DQ,
             cls.IN_R_TRIPLE_SQ, cls.IN_R_TRIPLE_DQ
-        )
+        ) or (state >= 50 and state <= 65 and (state - 50) % 4 >= 2)
+    
+    @classmethod
+    def get_nested_state(cls, parent_state: int, string_type_idx: int) -> int:
+        """Get the nested string state for a given parent f-expr state."""
+        # Parent mapping: 25->0, 26->1, 27->2, 28->3
+        if 25 <= parent_state <= 28:
+            parent_idx = parent_state - 25
+            return 50 + (parent_idx * 4) + string_type_idx
+        return cls.ROOT # Should not happen
+
+    @classmethod
+    def get_nested_return_state(cls, state: int) -> int:
+        """Get the parent state to return to from a nested string state."""
+        if 50 <= state <= 65:
+            parent_idx = (state - 50) // 4
+            return 25 + parent_idx
+        return cls.ROOT
     
     @classmethod
     def get_delimiter(cls, state: int) -> str:
@@ -83,6 +106,15 @@ class TokenState:
             return "'"
         elif state in (cls.IN_DQ_STRING, cls.IN_F_DQ_STRING, cls.IN_B_DQ_STRING, cls.IN_R_DQ_STRING):
             return '"'
+        
+        # Nested states
+        if 50 <= state <= 65:
+            type_idx = (state - 50) % 4
+            if type_idx == 0: return "'"
+            if type_idx == 1: return '"'
+            if type_idx == 2: return "'''"
+            if type_idx == 3: return '"""'
+            
         return ""
     
     @classmethod
@@ -246,6 +278,12 @@ class PythonPatterns:
     END_TRIPLE_SQ = re.compile(r"'''")
     END_DQ = re.compile(r'(?<!\\)"')
     END_SQ = re.compile(r"(?<!\\)'")
+    
+    # Scanner patterns for optimized string parsing
+    SCAN_DQ = re.compile(r'[\\"]')
+    SCAN_SQ = re.compile(r"[\\']")
+    SCAN_F_DQ = re.compile(r'[\\"{}]')
+    SCAN_F_SQ = re.compile(r"[\\'{}]")
     
     # Escape sequences
     ESCAPE = re.compile(r'\\.')
@@ -720,7 +758,30 @@ class StateAwareSyntaxEngine:
         length = len(text)
         
         while pos < length:
-            if state == TokenState.ROOT:
+            is_f_expr = state in (
+                TokenState.IN_F_EXPR_SQ, TokenState.IN_F_EXPR_DQ,
+                TokenState.IN_F_EXPR_TRIPLE_SQ, TokenState.IN_F_EXPR_TRIPLE_DQ
+            )
+            
+            if is_f_expr:
+                 # Check for closing brace (end of expression)
+                if text.startswith('}', pos):
+                    tokens.append((pos, pos + 1, 'f_expression_end'))
+                    
+                    # Return to appropriate string state
+                    if state == TokenState.IN_F_EXPR_SQ:
+                        state = TokenState.IN_F_SQ_STRING
+                    elif state == TokenState.IN_F_EXPR_DQ:
+                        state = TokenState.IN_F_DQ_STRING
+                    elif state == TokenState.IN_F_EXPR_TRIPLE_SQ:
+                        state = TokenState.IN_F_TRIPLE_SQ
+                    elif state == TokenState.IN_F_EXPR_TRIPLE_DQ:
+                        state = TokenState.IN_F_TRIPLE_DQ
+                    
+                    pos += 1
+                    continue
+
+            if state == TokenState.ROOT or is_f_expr:
                 # Try to match patterns in priority order
                 
                 # 1. Comments (highest priority - consumes rest of line)
@@ -780,14 +841,22 @@ class StateAwareSyntaxEngine:
                 m = P.U_TRIPLE_DQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'triple_start'))
-                    state = TokenState.IN_TRIPLE_DQ
+                    new_state = TokenState.IN_TRIPLE_DQ
+                    if is_f_expr:
+                         state = TokenState.get_nested_state(state, 3) # 3 = TRIPLE_DQ
+                    else:
+                         state = new_state
                     pos = m.end()
                     continue
                 
                 m = P.U_TRIPLE_SQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'triple_start'))
-                    state = TokenState.IN_TRIPLE_SQ
+                    new_state = TokenState.IN_TRIPLE_SQ
+                    if is_f_expr:
+                         state = TokenState.get_nested_state(state, 2) # 2 = TRIPLE_SQ
+                    else:
+                         state = new_state
                     pos = m.end()
                     continue
                 
@@ -795,14 +864,54 @@ class StateAwareSyntaxEngine:
                 m = P.TRIPLE_DQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'triple_start'))
-                    state = TokenState.IN_TRIPLE_DQ
+                    new_state = TokenState.IN_TRIPLE_DQ
+                    if is_f_expr:
+                         state = TokenState.get_nested_state(state, 3)
+                    else:
+                         state = new_state
                     pos = m.end()
                     continue
                 
                 m = P.TRIPLE_SQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'triple_start'))
-                    state = TokenState.IN_TRIPLE_SQ
+                    new_state = TokenState.IN_TRIPLE_SQ
+                    if is_f_expr:
+                         state = TokenState.get_nested_state(state, 2)
+                    else:
+                         state = new_state
+                    pos = m.end()
+                    continue
+                
+                # 3. Single-quoted strings
+                # f-strings (nested f inside f? Allowed but complex. Let's start with basic nesting support)
+                # Actually python allows f"{f'nested'}" 
+                # For now let's treat prefixed strings in nested expr as standard structure if possible
+                # But our current logic for F/B/R doesn't support nested variants yet (requires more states: 16 * 4 prefixes?)
+                # Simplification: Treat prefixed strings inside F-Expr as standard strings (losing prefix features) 
+                # OR just support plain strings for now which covers 90% of cases like dict keys.
+                # Let's support standard strings correctly first.
+                
+                # Plain strings
+                m = P.DQ.match(text, pos)
+                if m:
+                    tokens.append((pos, m.end(), 'string_start'))
+                    new_state = TokenState.IN_DQ_STRING
+                    if is_f_expr:
+                         state = TokenState.get_nested_state(state, 1) # 1 = DQ
+                    else:
+                         state = new_state
+                    pos = m.end()
+                    continue
+                
+                m = P.SQ.match(text, pos)
+                if m:
+                    tokens.append((pos, m.end(), 'string_start'))
+                    new_state = TokenState.IN_SQ_STRING
+                    if is_f_expr:
+                         state = TokenState.get_nested_state(state, 0) # 0 = SQ
+                    else:
+                         state = new_state
                     pos = m.end()
                     continue
                 
@@ -958,6 +1067,63 @@ class StateAwareSyntaxEngine:
                 tokens, pos, state = self._tokenize_string_content(
                     text, pos, state, tokens
                 )
+            
+            elif state in (TokenState.IN_F_EXPR_SQ, TokenState.IN_F_EXPR_DQ, 
+                           TokenState.IN_F_EXPR_TRIPLE_SQ, TokenState.IN_F_EXPR_TRIPLE_DQ):
+                # Inside F-String Expression - parse as normal python unless } found
+                
+                # Check for closing brace (end of expression)
+                if text.startswith('}', pos):
+                    tokens.append((pos, pos + 1, 'f_expression_end'))
+                    
+                    # Return to appropriate string state
+                    if state == TokenState.IN_F_EXPR_SQ:
+                        state = TokenState.IN_F_SQ_STRING
+                    elif state == TokenState.IN_F_EXPR_DQ:
+                        state = TokenState.IN_F_DQ_STRING
+                    elif state == TokenState.IN_F_EXPR_TRIPLE_SQ:
+                        state = TokenState.IN_F_TRIPLE_SQ
+                    elif state == TokenState.IN_F_EXPR_TRIPLE_DQ:
+                        state = TokenState.IN_F_TRIPLE_DQ
+                    
+                    pos += 1
+                    continue
+                
+                # Temporarily switch state to ROOT to reuse logic
+                # But we must be careful not to allow comments or triple strings that might consume too much?
+                # Actually, expressions can contain strings.
+                # We reuse the logic by running one iteration of ROOT logic manually-ish
+                # Or just let it flow since 'state' variable is local to loop?
+                # But loop checks `if state == TokenState.ROOT`.
+                # We make `state` ROOT for the check, but we need to know we are in EXPR for the `}` check.
+                # Easier: Copy-paste/Abstract the ROOT logic or make ROOT a set of states.
+                
+                # Refactored: Treat EXPR states as ROOT-like but with extra `}` check
+                
+                # 1. Check for `}` (Already done above)
+                
+                # 2. Run standard ROOT matchers
+                # We set a flag to break loop if match found, to avoid duplication code
+                
+                # ... OR we just copy the ROOT block logic since it's cleaner than refactoring whole method now.
+                # Actually, there's a lot of logic.
+                
+                # Let's change the top condition:
+                # if state == TokenState.ROOT or state in (IN_F_EXPR...):
+                
+                # But we need to handle `}` priority correctly.
+                # `}` is not matched by ROOT patterns except as error or unexpected?
+                # Actually, `}` is NOT a python operator in the regex list?
+                # OPERATORS regex? Not in PythonPatterns list.
+                # So `}` would usually be skipped by ROOT looper as unknown char.
+                
+                # So, modify top 'if' to include EXPR states.
+                # BUT we need to check `}` first.
+                
+                # Hack: Just change valid states for the main block
+                # And inside the block, handle `}` for EXPR states.
+                pass # Logic handled by modifying the loop structure below
+
         
         # Store end state
         self.state_chain.set_end_state(line_num, state)
@@ -988,8 +1154,65 @@ class StateAwareSyntaxEngine:
             TokenState.IN_R_SQ_STRING, TokenState.IN_R_DQ_STRING,
             TokenState.IN_R_TRIPLE_SQ, TokenState.IN_R_TRIPLE_DQ
         )
+        is_f_string = state in (
+            TokenState.IN_F_SQ_STRING, TokenState.IN_F_DQ_STRING,
+            TokenState.IN_F_TRIPLE_SQ, TokenState.IN_F_TRIPLE_DQ
+        )
         
+        # Select scanner pattern for fast jumping
+        scan_pat = None
+        if is_f_string:
+            if '"""' in delimiter or '"' in delimiter:
+                scan_pat = P.SCAN_F_DQ
+            else:
+                scan_pat = P.SCAN_F_SQ
+        else:
+            if '"""' in delimiter or '"' in delimiter:
+                scan_pat = P.SCAN_DQ
+            else:
+                scan_pat = P.SCAN_SQ
+
         while pos < length:
+            # Fast scan to next interesting character
+            m_scan = scan_pat.search(text, pos)
+            if m_scan:
+                # Jump to the interesting character
+                pos = m_scan.start()
+            else:
+                # No more interesting characters, assume rest is content
+                pos = length
+                break
+
+            # Check for F-String expressions
+            if is_f_string:
+                # Check for double braces (escape)
+                if text.startswith('{{', pos):
+                    pos += 2
+                    continue
+                if text.startswith('}}', pos):
+                    pos += 2
+                    continue
+                
+                # Check for start of expression
+                if text.startswith('{', pos):
+                    # End current string token
+                    if pos > content_start:
+                        tokens.append((content_start, pos, token_type))
+                    
+                    # Emit punctuation for brace
+                    tokens.append((pos, pos + 1, 'f_expression_start'))
+                    
+                    # Determine new expression state based on current string type
+                    new_state = TokenState.IN_F_EXPR_SQ
+                    if state == TokenState.IN_F_DQ_STRING:
+                        new_state = TokenState.IN_F_EXPR_DQ
+                    elif state == TokenState.IN_F_TRIPLE_SQ:
+                        new_state = TokenState.IN_F_EXPR_TRIPLE_SQ
+                    elif state == TokenState.IN_F_TRIPLE_DQ:
+                        new_state = TokenState.IN_F_EXPR_TRIPLE_DQ
+                        
+                    return tokens, pos + 1, new_state
+
             # Look for end delimiter
             if is_triple:
                 if delimiter == '"""':
@@ -1025,8 +1248,18 @@ class StateAwareSyntaxEngine:
                 elif 'r_' in token_type or 'raw' in token_type:
                     end_token = 'raw_string'
                 
+                if 'f_' in token_type:
+                    end_token = 'f_string'
+                elif 'b_' in token_type or 'byte' in token_type:
+                    end_token = 'byte_string'
+                elif 'r_' in token_type or 'raw' in token_type:
+                    end_token = 'raw_string'
+                
                 tokens.append((pos, m.end(), end_token))
-                return tokens, m.end(), TokenState.ROOT
+                
+                # Check for return to nested state
+                return_state = TokenState.get_nested_return_state(state)
+                return tokens, m.end(), return_state
             
             # Check for escape sequence (except in raw strings)
             if not is_raw:
@@ -1035,7 +1268,8 @@ class StateAwareSyntaxEngine:
                     pos = m.end()
                     continue
             
-            # No special match, advance one character
+            # No special match matched (e.g. single quote inside double string, or single brace not starting expr)
+            # Advance one character to bypass the scanner hit
             pos += 1
         
         # End of line - still in string
