@@ -1084,26 +1084,18 @@ class ChromeTabBar(Adw.WrapBox):
         self.connect('notify::width', self._on_width_changed)
         
     def _on_width_changed(self, widget, param):
-        """Handle width changes with debouncing for smooth resize"""
+        """Handle width changes instantly for smooth resize"""
         current_width = self.get_width()
         
         if current_width <= 0:
             return
             
         # Only update if width actually changed significantly (avoid subpixel noise)
-        if abs(current_width - self._last_allocated_width) < 2:
+        if hasattr(self, '_last_allocated_width') and abs(current_width - self._last_allocated_width) < 2:
             return
         
-        # Store pending width
-        self._pending_width = current_width
-        
-        # Debounce: Cancel existing timer and schedule new update
-        # This batches rapid resize events into a single update
-        if self._resize_timeout_id:
-            GLib.source_remove(self._resize_timeout_id)
-        
-        # Schedule update after 16ms (~60fps) of no resize events
-        self._resize_timeout_id = GLib.timeout_add(16, self._do_resize_update)
+        self._last_allocated_width = current_width
+        self.update_tab_sizes(allocated_width=current_width)
     
     def _do_resize_update(self):
         """Execute the debounced resize update"""
