@@ -764,7 +764,7 @@ class Selection:
     
     def set_wrap_enabled(self, enabled):
         """Enable or disable word wrap."""
-        if self.wrap_enabled == enabled:
+        if getattr(self, 'wrap_enabled', None) == enabled:
             return
         
         self.wrap_enabled = enabled
@@ -785,7 +785,7 @@ class Selection:
         """Set selection end point"""
         self.end_line = line
         self.end_col = col
-        self.active = (self.start_line != self.end_line or self.start_col != self.end_col)
+        self.active = True
     
     def has_selection(self):
         """Check if there's an active selection"""
@@ -796,8 +796,8 @@ class Selection:
     
     def get_bounds(self):
         """Get normalized selection bounds (start always before end)"""
-        if not self.has_selection():
-            return None, None, None, None
+        if not self.active:
+            return -1, -1, -1, -1
             
         # Normalize so start is always before end
         if self.start_line < self.end_line:
@@ -822,11 +822,11 @@ class Selection:
             return False
         
         if line == start_line and line == end_line:
-            return start_col <= col <= end_col
+            return start_col <= col < end_col # Strict less than for end_col
         elif line == start_line:
             return col >= start_col
         elif line == end_line:
-            return col <= end_col
+            return col < end_col
         else:
             return True
 # LEGACY Undo/Redo and VirtualBuffer REMOVED - Imported from undo_redo.py and virtual_buffer.py
@@ -1106,97 +1106,49 @@ class InputController:
         def is_word_char(ch):
             if ch == '_':
                 return True
-            cat = unicodedata.category(ch)
-            return cat[0] in ('L', 'N', 'M')
+            try:
+                cat = unicodedata.category(ch)
+                return cat[0] in ('L', 'N', 'M')
+            except:
+                return False
         
         # If at end of line, go to start of next line
         if col >= len(line):
             if ln + 1 < b.total():
                 b.set_cursor(ln + 1, 0, extend_selection)
             return
+            
+        # Standard movement logic:
+        # 1. Skip current word or non-word block
+        is_start_space = line[col].isspace()
+        if not is_start_space:
+             if is_word_char(line[col]):
+                 while col < len(line) and is_word_char(line[col]):
+                     col += 1
+             else:
+                 # Symbols
+                 while col < len(line) and not line[col].isspace() and not is_word_char(line[col]):
+                     col += 1
         
-        # Special handling when cursor is on space with no selection
-        if line[col].isspace() and not b.selection.has_selection():
-            # Select space(s) + next word
-            start_col = col
+        # 2. Skip whitespace to start of next word
+        while col < len(line) and line[col].isspace():
+            col += 1
             
-            # Skip whitespace on current line
-            while col < len(line) and line[col].isspace():
-                col += 1
-            
-            # If we reached end of line
-            if col >= len(line):
-                # Check if there's a next line
-                if ln + 1 < b.total():
-                    # Select space(s) + newline + next word from next line
-                    next_line = b.get_line(ln + 1)
-                    next_col = 0
-                    
-                    # Skip leading whitespace on next line
-                    while next_col < len(next_line) and next_line[next_col].isspace():
-                        next_col += 1
-                    
-                    # Select the next word on next line
-                    if next_col < len(next_line):
-                        if is_word_char(next_line[next_col]):
-                            while next_col < len(next_line) and is_word_char(next_line[next_col]):
-                                next_col += 1
-                        elif not next_line[next_col].isspace():
-                            while next_col < len(next_line) and not next_line[next_col].isspace() and not is_word_char(next_line[next_col]):
-                                next_col += 1
-                    
-                    # Set selection from start_col on current line to next_col on next line
-                    b.selection.set_start(ln, start_col)
-                    b.selection.set_end(ln + 1, next_col)
-                    b.cursor_line = ln + 1
-                    b.cursor_col = next_col
-                    return
-                else:
-                    # No next line - select spaces to end of line
-                    b.selection.set_start(ln, start_col)
-                    b.selection.set_end(ln, col)
-                    b.cursor_col = col
-                    return
-            
-            # We found a non-space character - select the word
-            if is_word_char(line[col]):
-                while col < len(line) and is_word_char(line[col]):
-                    col += 1
-            elif not line[col].isspace():
-                while col < len(line) and not line[col].isspace() and not is_word_char(line[col]):
-                    col += 1
-            
-            # Set selection from start_col to col
-            b.selection.set_start(ln, start_col)
-            b.selection.set_end(ln, col)
-            b.cursor_col = col
-            return
+        # If reached EOL, wrap to next line start?
+        # Editors usually stop at EOL or wrap to start of next word.
+        # User requested standard behavior. Let's wrap to next line if EOL
+        if col >= len(line):
+             if ln + 1 < b.total():
+                 ln += 1
+                 col = 0
+                 # Skip leading whitespace on next line
+                 line = b.get_line(ln)
+                 while col < len(line) and line[col].isspace():
+                     col += 1
         
-        # Check what type of character we're on and skip that type
-        if is_word_char(line[col]):
-            # Skip word characters to the right
-            while col < len(line) and is_word_char(line[col]):
-                col += 1
-        elif not line[col].isspace():
-            # Skip symbols/punctuation to the right (treat as a "word")
-            while col < len(line) and not line[col].isspace() and not is_word_char(line[col]):
-                col += 1
-        
-        # If extending an existing selection, skip whitespace AND select next word
-        # This makes second Ctrl+Shift+Right select space + next word
-        if extend_selection and b.selection.has_selection():
-            # Skip whitespace
-            while col < len(line) and line[col].isspace():
-                col += 1
+        b.set_cursor(ln, col, extend_selection)
             
-            # Now select the next word
-            if col < len(line):
-                if is_word_char(line[col]):
-                    while col < len(line) and is_word_char(line[col]):
-                        col += 1
-                elif not line[col].isspace():
-                    while col < len(line) and not line[col].isspace() and not is_word_char(line[col]):
-                        col += 1
+
         
         b.set_cursor(ln, col, extend_selection)
     def move_home(self, extend_selection=False):
@@ -2505,6 +2457,8 @@ class VirtualTextView(Gtk.DrawingArea):
                  found_col = self.byte_index_to_char_index(text, idx)
                  if trailing > 0:
                      found_col += trailing
+                 
+                 found_col = min(found_col, len(text))
                      
                  break
              
@@ -3151,34 +3105,60 @@ class VirtualTextView(Gtk.DrawingArea):
         """Find word boundaries at the given position. Words include alphanumeric and underscore."""
         import unicodedata
         
-        if not line:
+        if line is None:
             return 0, 0
         
-        # Check if character is a word character (letter, number, underscore, or combining mark)
+        line_len = len(line)
+
+        # Helper for word characters
         def is_word_char(ch):
-            if ch == '_':
-                return True
+            if ch == '_': return True
             cat = unicodedata.category(ch)
-            # Letter categories: Lu, Ll, Lt, Lm, Lo
-            # Number categories: Nd, Nl, No
-            # Mark categories: Mn, Mc, Me (for combining characters like Devanagari vowel signs)
             return cat[0] in ('L', 'N', 'M')
+            
+        def is_whitespace(ch):
+            return ch in (' ', '\t')
         
-        # If clicking beyond line or on whitespace/punctuation, select just that position
-        if col >= len(line) or not is_word_char(line[col]):
-            return col, min(col + 1, len(line))
+        # Scenario 1: Click on Newline (col >= len)
+        if col >= line_len:
+            # If line has trailing whitespace, select it AND the newline
+            if line_len > 0 and is_whitespace(line[line_len - 1]):
+                start = line_len - 1
+                while start > 0 and is_whitespace(line[start - 1]):
+                    start -= 1
+                # Return end = len + 1 to signal newline inclusion
+                return start, line_len + 1
+            else:
+                # Just the newline
+                return line_len, line_len + 1
+
+        # Scenario 2: Click on character
+        ch = line[col]
         
-        # Find start of word
-        start = col
-        while start > 0 and is_word_char(line[start - 1]):
-            start -= 1
-        
-        # Find end of word
-        end = col
-        while end < len(line) and is_word_char(line[end]):
-            end += 1
-        
-        return start, end
+        if is_whitespace(ch):
+            # Select contiguous whitespace
+            start = col
+            while start > 0 and is_whitespace(line[start - 1]):
+                start -= 1
+            end = col
+            while end < line_len and is_whitespace(line[end]):
+                end += 1
+            return start, end
+            
+        if is_word_char(ch):
+            # Find start of word
+            start = col
+            while start > 0 and is_word_char(line[start - 1]):
+                start -= 1
+            
+            # Find end of word
+            end = col
+            while end < line_len and is_word_char(line[end]):
+                end += 1
+            return start, end
+            
+        # Punctuation/Other: Select just that char
+        return col, min(col + 1, line_len)
 
     def on_click_pressed(self, g, n_press, x, y):
         """Handle mouse click."""
@@ -3291,65 +3271,99 @@ class VirtualTextView(Gtk.DrawingArea):
                 return
 
             # Case 2: double-click at or beyond end of text (context-aware like empty lines)
+            # Case 2: double-click at or beyond end of text
             if col >= line_len:
-                # Check if this line has a newline (not the last line)
-                has_newline = ln < self.buf.total() - 1
+                # Use shared logic: find_word_boundaries now handles whitespace+newline grouping
+                start_col, end_col = self.find_word_boundaries(line_text, col)
                 
-                if has_newline:
-                    # Check what comes next (similar to empty line logic)
-                    next_line_text = self.buf.get_line(ln + 1)
-                    
-                    if len(next_line_text) == 0:
-                        # Next line is empty: select just the newline area (EOL to viewport)
-                        self.buf.selection.set_start(ln, line_len)
-                        self.buf.selection.set_end(ln, line_len + 1)
-                        self.buf.cursor_line = ln
-                        self.buf.cursor_col = line_len
-                        # Set anchor points for drag extension
-                        self.anchor_word_start_line = ln
-                        self.anchor_word_start_col = line_len
-                        self.anchor_word_end_line = ln
-                        self.anchor_word_end_col = line_len + 1
+                # If end_col indicates newline (len + 1), select up to start of next line
+                if end_col > line_len:
+                    # Check if this is the LAST line
+                    total_lines = self.buf.total()
+                    if ln == total_lines - 1:
+                        # Last line logic (No newline exists effectively)
+                        if line_len == 0:
+                            # Empty last line: cursor only
+                            self.buf.selection.clear()
+                            self.buf.cursor_line = ln
+                            self.buf.cursor_col = 0
+                            self.anchor_word_start_line = ln
+                            self.anchor_word_start_col = 0
+                            self.anchor_word_end_line = ln
+                            self.anchor_word_end_col = 0
+                        elif start_col < line_len:
+                            # Has trailing whitespace: select it only (no newline)
+                            self.buf.selection.set_start(ln, start_col)
+                            self.buf.selection.set_end(ln, line_len)
+                            self.buf.cursor_line = ln
+                            self.buf.cursor_col = line_len
+                            
+                            self.anchor_word_start_line = ln
+                            self.anchor_word_start_col = start_col
+                            self.anchor_word_end_line = ln
+                            self.anchor_word_end_col = line_len
+                        else:
+                            # No trailing whitespace: select the last word
+                            # Re-calculate boundaries for the last character
+                            sc, ec = self.find_word_boundaries(line_text, line_len - 1)
+                            self.buf.selection.set_start(ln, sc)
+                            self.buf.selection.set_end(ln, ec)
+                            self.buf.cursor_line = ln
+                            self.buf.cursor_col = ec
+                            
+                            self.anchor_word_start_line = ln
+                            self.anchor_word_start_col = sc
+                            self.anchor_word_end_line = ln
+                            self.anchor_word_end_col = ec
                     else:
-                        # Next line has text: select newline + next line's text
-                        self.buf.selection.set_start(ln, line_len)
-                        self.buf.selection.set_end(ln + 1, len(next_line_text))
-                        self.buf.cursor_line = ln + 1
-                        self.buf.cursor_col = len(next_line_text)
-                        # Set anchor points for drag extension
-                        self.anchor_word_start_line = ln
-                        self.anchor_word_start_col = line_len
-                        self.anchor_word_end_line = ln + 1
-                        self.anchor_word_end_col = len(next_line_text)
+                        # Normal line (followed by another line)
+                        # Helper for next line selection
+                        next_line_idx = ln + 1
+                        
+                        if next_line_idx < total_lines:
+                             # Extend to end of NEXT line
+                             next_line_text = self.buf.get_line(next_line_idx)
+                             if len(next_line_text) == 0:
+                                  # Next line is empty: do NOT select it.
+                                  # Just select the newline of the CURRENT line.
+                                  sel_end_line = next_line_idx 
+                                  sel_end_col = 0
+                             else:
+                                  sel_end_line = next_line_idx 
+                                  sel_end_col = len(next_line_text)
+                                  
+                             self.buf.selection.set_start(ln, start_col)
+                             self.buf.selection.set_end(sel_end_line, sel_end_col)
+                             self.buf.cursor_line = sel_end_line
+                             self.buf.cursor_col = sel_end_col
+                             
+                             self.anchor_word_start_line = ln
+                             self.anchor_word_start_col = start_col
+                             self.anchor_word_end_line = sel_end_line
+                             self.anchor_word_end_col = sel_end_col
+                        else:
+                             # Should be covered by 'if ln == total - 1' block above, 
+                             # but safely fallback to standard newline selection
+                             self.buf.selection.set_start(ln, start_col)
+                             self.buf.selection.set_end(ln + 1, 0)
+                             self.buf.cursor_line = ln + 1
+                             self.buf.cursor_col = 0
+                             
+                             self.anchor_word_start_line = ln
+                             self.anchor_word_start_col = start_col
+                             self.anchor_word_end_line = ln + 1
+                             self.anchor_word_end_col = 0
                 else:
-                    # Last line (no newline): select trailing content
-                    # Find what's at the end: word or spaces
-                    if line_text and line_text[-1] == ' ':
-                        # Find start of trailing spaces
-                        start = line_len - 1
-                        while start > 0 and line_text[start - 1] == ' ':
-                            start -= 1
-                        self.buf.selection.set_start(ln, start)
-                        self.buf.selection.set_end(ln, line_len)
-                        self.buf.cursor_line = ln
-                        self.buf.cursor_col = line_len
-                        # Set anchor points for drag extension
-                        self.anchor_word_start_line = ln
-                        self.anchor_word_start_col = start
-                        self.anchor_word_end_line = ln
-                        self.anchor_word_end_col = line_len
-                    else:
-                        # Select the last word
-                        start_col, end_col = self.find_word_boundaries(line_text, line_len - 1)
-                        self.buf.selection.set_start(ln, start_col)
-                        self.buf.selection.set_end(ln, end_col)
-                        self.buf.cursor_line = ln
-                        self.buf.cursor_col = end_col
-                        # Set anchor points for drag extension
-                        self.anchor_word_start_line = ln
-                        self.anchor_word_start_col = start_col
-                        self.anchor_word_end_line = ln
-                        self.anchor_word_end_col = end_col
+                    # Should unlikely happen if col >= len and we have new logic, but fallback:
+                    self.buf.selection.set_start(ln, start_col)
+                    self.buf.selection.set_end(ln, end_col)
+                    self.buf.cursor_line = ln
+                    self.buf.cursor_col = end_col
+                    
+                    self.anchor_word_start_line = ln
+                    self.anchor_word_start_col = start_col
+                    self.anchor_word_end_line = ln
+                    self.anchor_word_end_col = end_col
                 
                 # Enable word selection mode for drag
                 self.word_selection_mode = True
@@ -3803,9 +3817,10 @@ class VirtualTextView(Gtk.DrawingArea):
                         # Dragging Backward: anchor at end, extend to empty line start
                         self.buf.selection.set_start(anchor_end_line, anchor_end_col)
                         self.ctrl.update_drag(ln, 0)  # Select from start of empty line
-            elif line_text and 0 <= col <= len(line_text):
+            elif line_text and 0 <= col <= len(line_text) + 1:
                 # Line with text: snap to word boundaries
-                start_col, end_col = self.find_word_boundaries(line_text, min(col, len(line_text) - 1))
+                # svite_fix: Use raw col to detecting end-of-line clicks
+                start_col, end_col = self.find_word_boundaries(line_text, col)
                 
                 # Use the ANCHOR word (originally double-clicked word) for direction detection
                 # This prevents flickering by keeping the reference point stable
@@ -3828,11 +3843,17 @@ class VirtualTextView(Gtk.DrawingArea):
                     # Anchor point should be the START of the original word
                     self.buf.selection.set_start(anchor_start_line, anchor_start_col)
                     # Cursor (end point) should be the END of the current word
-                    self.ctrl.update_drag(ln, end_col)
+                    if end_col > len(line_text):
+                        self.ctrl.update_drag(ln + 1, 0)
+                    else:
+                        self.ctrl.update_drag(ln, end_col)
                 else:
                     # Dragging Backward (RTL):
                     # Anchor point should be the END of the original word
-                    self.buf.selection.set_start(anchor_end_line, anchor_end_col)
+                    base_end_line = anchor_end_line
+                    base_end_col = anchor_end_col
+                    
+                    self.buf.selection.set_start(base_end_line, base_end_col)
                     # Cursor (end point) should be the START of the current word
                     self.ctrl.update_drag(ln, start_col)
             else:
@@ -4743,6 +4764,127 @@ class VirtualTextView(Gtk.DrawingArea):
             
         return True
 
+    def _draw_selection_on_line(self, cr, line, line_text, current_log_line, sel_start_ln, sel_start_col, sel_end_ln, sel_end_col, base_x, final_x_offset, current_y, is_last_visual_line=True):
+        """Helper to draw selection on a specific line"""
+        # Determine intersection of selection with this logical line
+        intersect = False
+        
+        # Check basic line intersection
+        if sel_start_ln < current_log_line < sel_end_ln:
+            intersect = True
+        elif current_log_line == sel_start_ln or current_log_line == sel_end_ln:
+            intersect = True
+            
+        if not intersect:
+            return
+
+        # Use a list of tuples for final rendering
+        final_ranges = []
+
+        # Case 1: Fully selected line (middle of selection)
+        if sel_start_ln < current_log_line < sel_end_ln:
+            # Select entire line text
+            # Use a very large number for width to cover viewport
+            final_ranges.append((0, 200000 * Pango.SCALE)) 
+        
+        # Case 2: Start Line
+        # Case 2: Start Line
+        elif current_log_line == sel_start_ln:
+            s_char = sel_start_col
+            e_char = len(line_text)
+            
+            # If single-line selection
+            if sel_start_ln == sel_end_ln:
+                e_char = sel_end_col
+            
+            # Convert to bytes
+            s_byte = self.visual_byte_index(line_text, s_char)
+            e_byte = self.visual_byte_index(line_text, e_char)
+            
+            # Clamp to visual line bounds for Pango
+            # For wrapped lines, we must only query index_to_x for indices within this visual line
+            vis_start = line.start_index
+            vis_end = vis_start + line.length
+            
+            # Intersect [s_byte, e_byte] with [vis_start, vis_end]
+            c_start = max(s_byte, vis_start)
+            c_end = min(e_byte, vis_end)
+            
+            if c_start < c_end:
+                 try:
+                     x1 = line.index_to_x(c_start, False)
+                     x2 = line.index_to_x(c_end, False)
+                     final_ranges.append((min(x1, x2), max(x1, x2)))
+                 except:
+                     pass
+                     
+            # Handle empty line selection specifically
+            # Only do this if we are on the first visual line of the empty line (which is the only line)
+            if len(line_text) == 0 and s_char == 0 and line.start_index == 0:
+                 if sel_start_ln < sel_end_ln:
+                      # Multi-line start on empty line -> Full width (match Case 1)
+                      final_ranges.append((0, 200000 * Pango.SCALE))
+                 elif e_char > 0:
+                      # Single-line selection on empty line -> Char width
+                      final_ranges.append((0, int(self.char_width * Pango.SCALE)))
+        
+        # Case 3: End Line
+        elif current_log_line == sel_end_ln:
+            if sel_end_col > 0:
+                e_byte = self.visual_byte_index(line_text, sel_end_col)
+                # Clamp to visual line bounds
+                vis_start = line.start_index
+                vis_end = vis_start + line.length
+                
+                # Selection range on this line is [0, e_byte] (since it started before)
+                c_start = max(0, vis_start)
+                c_end = min(e_byte, vis_end)
+                
+                if c_start < c_end:
+                    try:
+                        x1 = line.index_to_x(c_start, False)
+                        x2 = line.index_to_x(c_end, False)
+                        final_ranges.append((min(x1, x2), max(x1, x2)))
+                    except:
+                        pass
+
+        cr.set_source_rgba(0.2, 0.4, 0.6, 0.4)
+        
+        for r_start, r_end in final_ranges:
+            rx = base_x + (r_start / Pango.SCALE) + final_x_offset
+            rw = (r_end - r_start) / Pango.SCALE
+            if rw > 0.1:
+                cr.rectangle(rx, current_y, rw, self.line_h)
+                cr.fill()
+        
+        # ---- NEWLINE VISUALIZATION ----
+        should_draw_newline = False
+        if sel_start_ln < current_log_line < sel_end_ln:
+            should_draw_newline = True
+        elif current_log_line == sel_start_ln and sel_start_ln < sel_end_ln:
+            should_draw_newline = True
+        elif current_log_line == sel_end_ln:
+            if sel_end_col > len(line_text):
+                should_draw_newline = True
+        
+        if should_draw_newline and is_last_visual_line:
+             # Get extents of the visual line directly
+             # rect.x and rect.width are in Pango units
+             rect = line.get_extents()[1]
+             
+             nx = base_x + ((rect.x + rect.width) / Pango.SCALE) + final_x_offset
+             
+             # Current Y is already correct for this visual line
+             
+             # Use a robust width that covers the viewport but isn't excessive
+             # 'base_x' is roughly gutter width. 'w' is total widget width.
+             # We want to fill to the right edge.
+             nw = max(50, (3000 * Pango.SCALE)) # Safe large width
+             
+             cr.set_source_rgba(0.2, 0.4, 0.6, 0.3)
+             cr.rectangle(nx, current_y, nw, self.line_h)
+             cr.fill()
+
     def draw_view(self, area, cr, w, h):
         import time
         draw_start = time.time()
@@ -5001,49 +5143,16 @@ class VirtualTextView(Gtk.DrawingArea):
 
                      # ---- selection background ----
                      if sel_start_ln != -1:
-                         # Determine intersection of selection with this logical line
-                         s_byte = 0
-                         e_byte = len(line_text.encode('utf-8')) # Approximate max
+                        # Find total visual lines to identify the last one
+                         total_visual_lines = layout.get_line_count()
+                         is_last = (line_idx == total_visual_lines - 1)
                          
-                         intersect = False
-                         if sel_start_ln < current_log_line < sel_end_ln:
-                             intersect = True
-                         elif current_log_line == sel_start_ln:
-                             s_char = sel_start_col
-                             e_char = len(line_text)
-                             if sel_start_ln == sel_end_ln:
-                                 e_char = sel_end_col
-                             if s_char < e_char:
-                                 s_byte = self.visual_byte_index(line_text, s_char)
-                                 e_byte = self.visual_byte_index(line_text, e_char)
-                                 intersect = True
-                         elif current_log_line == sel_end_ln:
-                             if sel_end_col > 0:
-                                 s_byte = 0
-                                 e_byte = self.visual_byte_index(line_text, sel_end_col)
-                                 intersect = True
-                         
-                         if intersect and s_byte < e_byte:
-                             ranges = line.get_x_ranges(s_byte, e_byte)
-                             cr.set_source_rgba(0.2, 0.4, 0.6, 0.4)
-                             
-                             # Handle flat list [x1, x2, x3, x4] or tuple list [(x1, x2), ...]
-                             flat_ranges = []
-                             if ranges:
-                                 if isinstance(ranges[0], int):
-                                     for i in range(0, len(ranges), 2):
-                                         if i + 1 < len(ranges):
-                                             flat_ranges.append((ranges[i], ranges[i+1]))
-                                 else:
-                                     flat_ranges = ranges
-                             
-                             for r_start, r_end in flat_ranges:
-                                 # r is (start_x, end_x) in Pango units
-                                 # Apply final_x_offset for alignment
-                                 rx = base_x + (r_start / Pango.SCALE) + final_x_offset
-                                 rw = (r_end - r_start) / Pango.SCALE
-                                 cr.rectangle(rx, current_y, rw, self.line_h)
-                                 cr.fill()
+                         self._draw_selection_on_line(
+                             cr, line, line_text, current_log_line, 
+                             sel_start_ln, sel_start_col, sel_end_ln, sel_end_col, 
+                             base_x, final_x_offset, current_y,
+                             is_last_visual_line=is_last
+                         )
 
                      # ---- search highlights ----
                      if self.search_matches and self.max_match_length > 0:

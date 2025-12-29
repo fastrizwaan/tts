@@ -386,6 +386,7 @@ class Selection:
     end_line: int = -1
     end_col: int = -1
     active: bool = False
+    selecting_with_keyboard: bool = False
 
     def clear(self):
         self.start_line = -1
@@ -393,10 +394,13 @@ class Selection:
         self.end_line = -1
         self.end_col = -1
         self.active = False
+        self.selecting_with_keyboard = False
         
     def set_start(self, line: int, col: int):
         self.start_line = line
         self.start_col = col
+        self.end_line = line
+        self.end_col = col
         self.active = True
         
     def set_end(self, line: int, col: int):
@@ -425,6 +429,25 @@ class Selection:
                 self.start_line, min(self.start_col, self.end_col),
                 self.end_line, max(self.start_col, self.end_col)
             )
+
+    def contains_position(self, line: int, col: int) -> bool:
+        """Check if a position is within the selection"""
+        if not self.has_selection():
+            return False
+            
+        s_ln, s_col, e_ln, e_col = self.get_bounds()
+        
+        if s_ln < line < e_ln:
+            return True
+        elif line == s_ln:
+            if s_ln == e_ln:
+                return s_col <= col < e_col
+            else:
+                return col >= s_col
+        elif line == e_ln:
+            return col < e_col
+            
+        return False
 
 
 def detect_encoding(path):

@@ -300,7 +300,7 @@ class ChromeTab(Gtk.Box):
         # Close button - overlay child
         if closeable:
             self.close_button = Gtk.Button()
-            self.close_button.set_icon_name("cross-small-symbolic")
+            self.close_button.set_icon_name("window-close-symbolic")
             self.close_button.add_css_class("flat")
             self.close_button.add_css_class("chrome-tab-close-button")
             self.close_button.set_halign(Gtk.Align.END)
@@ -398,7 +398,7 @@ class ChromeTab(Gtk.Box):
             self.spinner.stop()
             self.spinner.set_visible(False)
             self.progress_bar.set_visible(False)
-            self.close_button.set_icon_name("cross-small-symbolic") # Revert to Close icon
+            self.close_button.set_icon_name("window-close-symbolic") # Revert to Close icon
             self.close_button.set_sensitive(True) # Ensure clickable
             self._update_close_button_state()
 
@@ -431,14 +431,14 @@ class ChromeTab(Gtk.Box):
 
         # Always show close button on active tab
         if self._is_active:
-            self.close_button.set_icon_name("cross-small-symbolic")
+            self.close_button.set_icon_name("window-close-symbolic")
             self.close_button.set_opacity(1.0)
             self.close_button.set_sensitive(True)
             return
 
         if self._is_hovered:
             # Hovered: Show Close Icon
-            self.close_button.set_icon_name("cross-small-symbolic")
+            self.close_button.set_icon_name("window-close-symbolic")
             # Keep slightly different opacity for modified/unmodified if desired, 
             # or just use standard. Let's keep it visible.
             self.close_button.set_opacity(1.0 if self._is_modified else 0.9)
