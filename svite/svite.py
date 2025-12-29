@@ -7098,6 +7098,12 @@ class RecentFilesManager:
         # Save to disk
         self.save()
     
+    def remove(self, file_path):
+        """Remove a file from recent files list"""
+        if file_path in self.recent_files:
+            self.recent_files.remove(file_path)
+            self.save()
+
     def get_recent_files(self):
         """Get list of recent files"""
         return self.recent_files.copy()
@@ -7551,6 +7557,7 @@ class EditorWindow(Adw.ApplicationWindow):
         open_box.add_css_class("linked")            # <- This merges the buttons visually
         open_box.set_margin_start(2)
         open_box.set_margin_top(2) 
+        
         # Left "Open" button
         self.open_button = Gtk.Button(label="Open")
         self.open_button.connect("clicked", self.open_file)
@@ -7564,7 +7571,7 @@ class EditorWindow(Adw.ApplicationWindow):
         self.open_menu_button.set_icon_name("pan-down-symbolic")
         self.open_menu_button.set_margin_start(0)
         self.open_menu_button.set_margin_end(0)
-        self.update_recent_files_menu()                # <- Correct
+        self.setup_recent_files_popover()                # <- Popover setup
         self.open_menu_button.add_css_class("flat")
         open_box.append(self.open_menu_button)
 
@@ -7931,32 +7938,206 @@ class EditorWindow(Adw.ApplicationWindow):
         
         return True  # Continue periodic checks
     
-    def update_recent_files_menu(self):
-        """Update the recent files dropdown menu"""
-        menu = Gio.Menu()
+    def setup_recent_files_popover(self):
+        """Setup the recent files popover"""
+        popover = Gtk.Popover()
+        popover.set_autohide(True)
+        popover.set_position(Gtk.PositionType.BOTTOM)
+        
+        # Main container
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_size_request(300, -1)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
+        box.set_margin_start(6)
+        box.set_margin_end(6)
+        
+        # Search Entry
+        search_entry = Gtk.SearchEntry()
+        search_entry.set_placeholder_text("Search documents")
+        box.append(search_entry)
+        
+        # Scrolled Window for List
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_max_content_height(400)
+        scrolled.set_min_content_height(100)
+        scrolled.set_propagate_natural_height(True)
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        
+        list_box = Gtk.ListBox()
+        list_box.add_css_class("rich-list")
+        list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        scrolled.set_child(list_box)
+        box.append(scrolled)
+        
+        popover.set_child(box)
+        self.open_menu_button.set_popover(popover)
+        
+        # Store references to update list later
+        self._recent_list_box = list_box
+        self._recent_search_entry = search_entry
+        
+        # Filtering logic
+        def filter_func(row):
+            query = search_entry.get_text().lower()
+            if not query:
+                return True
+            file_path = row._file_path.lower()
+            filename = os.path.basename(file_path)
+            return query in filename or query in file_path
+            
+        list_box.set_filter_func(filter_func)
+        search_entry.connect("search-changed", lambda e: list_box.invalidate_filter())
+        
+        # Populate list
+        self.refresh_recent_files_list()
+        
+        # Connect popover open to refresh (in case files changed elsewhere)
+        # Gtk.Popover doesn't have "opened" signal exactly like MenuButton usage?
+        # Typically we just refresh when we modify the list.
+        # But if another window updates recent files, we might want to refresh on show.
+        # Using map signal on popover
+        popover.connect("map", lambda *_: self.refresh_recent_files_list())
+
+    def refresh_recent_files_list(self):
+        """Re-populate the recent files list box"""
+        if not hasattr(self, '_recent_list_box'):
+            return
+            
+        list_box = self._recent_list_box
+        # Clear existing items
+        while True:
+            child = list_box.get_first_child()
+            if not child:
+                break
+            list_box.remove(child)
+            
         recent_files = self.recent_files_manager.get_recent_files()
         
-        if recent_files:
-            for file_path in recent_files:
-                # Create menu item with filename
-                filename = os.path.basename(file_path)
-                # Escape underscores to prevent them from being treated as mnemonics
-                display_name = filename.replace("_", "__")
-                menu_item = Gio.MenuItem.new(display_name, None)
-                # Store the full path as action target
-                menu_item.set_action_and_target_value(
-                    "win.open_recent",
-                    GLib.Variant.new_string(file_path)
-                )
-                menu.append_item(menu_item)
+        if not recent_files:
+            # Show placeholder?
+            row = Gtk.ListBoxRow()
+            lbl = Gtk.Label(label="No recent files")
+            lbl.add_css_class("dim-label")
+            lbl.set_margin_top(10)
+            lbl.set_margin_bottom(10)
+            row.set_child(lbl)
+            row.set_activatable(False)
+            list_box.append(row)
+            return
+
+        for file_path in recent_files:
+            row = Gtk.ListBoxRow()
+            row._file_path = file_path
             
-            # Add separator and clear option
-            menu.append_section(None, Gio.Menu())
-            menu.append("Clear Recent Files", "win.clear_recent")
-        else:
-            menu.append("No recent files", None)
-        
-        self.open_menu_button.set_menu_model(menu)
+            # Row Layout
+            # Row Layout
+            row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            row_box.set_margin_top(2)
+            row_box.set_margin_bottom(2)
+            row_box.set_margin_start(4)
+            row_box.set_margin_end(4)
+            
+            # Text container
+            text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            
+            filename = os.path.basename(file_path)
+            lbl_title = Gtk.Label(label=filename)
+            lbl_title.set_halign(Gtk.Align.START)
+            lbl_title.add_css_class("heading")
+            lbl_title.set_ellipsize(Pango.EllipsizeMode.END)
+            
+            # Tilde path for subtitle
+            home = os.path.expanduser("~")
+            if file_path.startswith(home):
+                display_path = "~" + file_path[len(home):]
+            else:
+                display_path = file_path
+            # Directory only?
+            display_dir = os.path.dirname(display_path)
+            if not display_dir: display_dir = "/"
+                
+            lbl_subtitle = Gtk.Label(label=display_dir)
+            lbl_subtitle.set_halign(Gtk.Align.START)
+            lbl_subtitle.add_css_class("caption")
+            lbl_subtitle.add_css_class("dim-label")
+            lbl_subtitle.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            
+            text_box.append(lbl_title)
+            text_box.append(lbl_subtitle)
+            
+            row_box.append(text_box)
+            text_box.set_hexpand(True)
+            
+            # Remove Button
+            btn_remove = Gtk.Button(icon_name="window-close-symbolic")
+            btn_remove.add_css_class("flat")
+            # Remove circular to make it blend better
+            btn_remove.set_valign(Gtk.Align.CENTER)
+            btn_remove.set_tooltip_text("Remove from recent files")
+            
+            # IMPORTANT: prevent row activation when clicking remove button
+            # We use a controller or just standard button behavior (which eats the event usually)
+            
+            def on_remove_clicked(btn, path=file_path):
+                self.recent_files_manager.remove(path)
+                self.refresh_recent_files_list()
+                return True
+                
+            btn_remove.connect("clicked", on_remove_clicked)
+            row_box.append(btn_remove)
+            
+            row.set_child(row_box)
+            
+            # Activate opens result
+            def on_row_activated(lbox, row_item):
+                 if hasattr(row_item, '_file_path'):
+                     self.open_menu_button.get_popover().popdown()
+                     self.load_file_into_editor(self.get_current_editor(), row_item._file_path)
+
+            # We connect this signal on the listbox mainly, but we can do it here if needed per row?
+            # Better to connect on ListBox once.
+            
+            list_box.append(row)
+            
+        # Connect activation for the list
+        # Remove old connections if any? list_box is new every setup, but we only setup once.
+        # But refresh removes children.
+        # Connections on list_box persist.
+        # Connect activation for the list
+        # We check a python attribute instead of GObject data
+        if not getattr(list_box, "_signals_connected", False):
+             list_box.connect("row-activated", lambda lb, row: 
+                 self.on_recent_row_activated(row))
+             list_box._signals_connected = True
+
+    def on_recent_row_activated(self, row):
+        if hasattr(row, '_file_path'):
+            self.open_menu_button.get_popover().popdown()
+            # If current file is empty untitled, reuse it?
+            # The standard logic in add_tab (via load_file_into_editor call or similar) handles new tab
+            # We want open_file logic: reuse if empty, else new tab.
+            # We can use self.add_tab which handles "new tab" logic.
+            # But if we want strictly "open in current if empty", we replicate open_file logic.
+            
+            path = row._file_path
+            # Check if already open
+            if self.activate_tab_with_file(path):
+                return
+            
+            # Check if current is empty untitled
+            current_page = self.tab_view.get_selected_page()
+            if current_page:
+                editor = current_page.get_child()._editor
+                if (not editor.current_file_path and 
+                    editor.buf.total() == 1 and 
+                    len(editor.buf.get_line(0)) == 0 and
+                    not editor.check_modification_state()):
+                     self.load_file_into_editor(editor, path)
+                     self.update_header_title()
+                     return
+            
+            self.add_tab(path)
     
     def find_tab_with_file(self, file_path):
         """Find and return the page that has the given file open, or None"""
