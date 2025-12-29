@@ -1,8 +1,8 @@
 [Desktop Entry]
-Name=Virtual Text Editor
+Name=Svite
 GenericName=Text Editor
 Type=Application
-Comment=A text editor with syntax highlighting
+Comment=A rich text editor with syntax highlighting
 Exec=svite %F
 MimeType=text/plain;text/x-python;text/x-csrc;text/x-chdr;text/javascript;text/css;text/html;application/json;application/xml;text/markdown;text/x-yaml;text/x-sh;
 Icon=io.github.fastrizwaan.svite
