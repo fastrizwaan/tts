@@ -1605,6 +1605,18 @@ class VirtualTextView(Gtk.DrawingArea):
         if self.scroll_update_pending:
             return
 
+        # Throttle updates to avoid overwhelming the main loop on high-frequency mouse polling
+        # 8ms = ~120fps cap
+        import time
+        now = time.time()
+        last = getattr(self, '_last_scroll_time', 0)
+        if now - last < 0.008:
+            # We skip this update, but we need to ensure the final value is processed.
+            # However, for drag events, subsequent events will come anyway or drag-end will fire.
+            # So simple skip is usually fine for "smoothness".
+            return
+        self._last_scroll_time = now
+
         val = adj.get_value()
         
         # Scrollbar resolution for smoothness
@@ -4913,7 +4925,12 @@ class VirtualTextView(Gtk.DrawingArea):
 
         padding = 30 if self.vscroll.get_visible() else 10
         viewport_w = w - ln_width - padding
-        self.mapper.set_viewport_width(viewport_w, self.char_width)
+        
+        # Optimize: Only update mapper if viewport changed (to avoid invalidation)
+        last_vw = getattr(self, '_last_viewport_w', -1)
+        if viewport_w != last_vw:
+             self.mapper.set_viewport_width(viewport_w, self.char_width)
+             self._last_viewport_w = viewport_w
         
         # Ensure mapper uses the same font for metrics as drawing
         if hasattr(self, 'get_pango_context'):

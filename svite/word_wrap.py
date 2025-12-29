@@ -123,8 +123,15 @@ class VisualLineMapper:
         self.invalidate_all()
     
     def set_viewport_width(self, width_pixels: float, char_width: float = 10.0) -> None:
-        """Update viewport width in pixels."""
-        if width_pixels != self._viewport_width_px or char_width != self._char_width:
+        """
+        Update viewport width in pixels.
+        
+        Optimized: Avoids invalidation if change is negligible (< 1px and same char width).
+        """
+        # Epsilon check to prevent thrashing on sub-pixel layout changes
+        if (abs(width_pixels - self._viewport_width_px) > 1.0 or 
+            abs(char_width - self._char_width) > 0.001):
+            
             self._viewport_width_px = max(100, width_pixels)
             self._char_width = char_width
             self._viewport_width_chars = max(20, int(width_pixels / char_width))
