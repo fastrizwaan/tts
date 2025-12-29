@@ -6908,7 +6908,17 @@ class EditorPage:
         
         # Helper to check modification state based on undo history
         # (Moved to method below)
-        pass
+
+    def show_external_modification_warning(self):
+        """Show the external modification warning info bar"""
+        if hasattr(self, 'modification_info_bar'):
+             self.modification_info_bar.set_revealed(True)
+             
+    def hide_external_modification_warning(self):
+        """Hide the external modification warning info bar"""
+        if hasattr(self, 'modification_info_bar'):
+             self.modification_info_bar.set_revealed(False)
+
 
     @property
     def line_feed(self):
@@ -7930,7 +7940,9 @@ class EditorWindow(Adw.ApplicationWindow):
             for file_path in recent_files:
                 # Create menu item with filename
                 filename = os.path.basename(file_path)
-                menu_item = Gio.MenuItem.new(filename, None)
+                # Escape underscores to prevent them from being treated as mnemonics
+                display_name = filename.replace("_", "__")
+                menu_item = Gio.MenuItem.new(display_name, None)
                 # Store the full path as action target
                 menu_item.set_action_and_target_value(
                     "win.open_recent",
@@ -8109,6 +8121,28 @@ class EditorWindow(Adw.ApplicationWindow):
         # Create container for FindBar + Editor View
         # We want the FindBar to be BELOW the editor view
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        
+        # --- InfoBar for External Modification ---
+        info_bar = Gtk.InfoBar()
+        info_bar.add_css_class("warning") # Use CSS class instead of set_message_type
+        # set_show_close_button is deprecated/removed in Gtk4 -> handled by adding a button manually or responding to signals
+        
+        # Content
+        # Just the title as requested
+        title_label = Gtk.Label(label="File has changed on disk")
+        title_label.set_markup("<b>File has changed on disk</b>")
+        title_label.set_halign(Gtk.Align.START)
+        
+        info_bar.add_child(title_label) 
+        
+        info_bar.add_button("Reload", Gtk.ResponseType.ACCEPT)
+        info_bar.add_button("Ignore", Gtk.ResponseType.REJECT)
+        
+        info_bar.connect("response", lambda w, r: self.on_info_bar_response(w, r, editor))
+        info_bar.set_revealed(False)
+        
+        editor.modification_info_bar = info_bar
+        main_box.append(info_bar)
         
         overlay = Gtk.Overlay()
         
@@ -8891,6 +8925,11 @@ class EditorWindow(Adw.ApplicationWindow):
         # CRITICAL: If loading, cancel it explicitly to prevent stuck threads/callbacks
         if getattr(editor, 'loading', False):
             editor.cancel_loading()
+        
+        # Cancel file monitor
+        if hasattr(editor, 'file_monitor') and editor.file_monitor:
+            editor.file_monitor.cancel()
+            editor.file_monitor = None
         
         # Check if untitled numbers were transferred (e.g., moved to another window)
         numbers_transferred = getattr(page, '_untitled_numbers_transferred', False)
@@ -9935,7 +9974,16 @@ class EditorWindow(Adw.ApplicationWindow):
                     print(f"Warning: Could not restore file permissions: {e}")
 
             # 2. Atomic replacement
-            os.replace(temp_path, path)
+            editor.is_saving = True # Flag to ignore monitor events
+            try:
+                os.replace(temp_path, path)
+            finally:
+                # Small delay to ensure monitor events are processed/ignored
+                def clear_saving_flag():
+                    editor.is_saving = False
+                    return False
+                GLib.timeout_add(100, clear_saving_flag)
+
             print(f"File saved atomically to {path} with encoding {editor.current_encoding}")
 
             # 3. Reload buffer to prevent mmap Bus Error
@@ -10106,6 +10154,9 @@ class EditorWindow(Adw.ApplicationWindow):
                 for tab in self.tab_bar.tabs:
                     if hasattr(tab, '_page') and tab._page == current_page:
                         is_modified = tab.has_css_class("modified")
+                        # Also check editor internal modification state just in case
+                        if not is_modified and editor.check_modification_state():
+                             is_modified = True
                         break
                 
                 # Check if it's an empty untitled file that's unmodified
@@ -10243,6 +10294,9 @@ class EditorWindow(Adw.ApplicationWindow):
             # Focus
             editor.view.grab_focus()
 
+            # Start monitoring
+            self.monitor_file(editor, path)
+
         def on_load_error(e):
             editor.set_loading(False)
             
@@ -10277,6 +10331,70 @@ class EditorWindow(Adw.ApplicationWindow):
         if tab:
             tab.cancelled = True
 
+
+
+    def monitor_file(self, editor, path):
+        """Start monitoring a file for external changes"""
+        if not path:
+            return
+
+        # Cancel existing monitor if any
+        if hasattr(editor, 'file_monitor') and editor.file_monitor:
+            editor.file_monitor.cancel()
+            editor.file_monitor = None
+        
+        try:
+            gfile = Gio.File.new_for_path(path)
+            # Create monitor
+            monitor = gfile.monitor_file(Gio.FileMonitorFlags.NONE, None)
+            monitor.connect("changed", self._on_file_changed, editor)
+            editor.file_monitor = monitor
+            editor.file_modified_externally = False
+            # print(f"Started monitoring {path}")
+        except Exception as e:
+            print(f"Failed to monitor file {path}: {e}")
+
+    def _on_file_changed(self, monitor, file, other_file, event_type, editor):
+        """Handle file monitor events"""
+        if event_type == Gio.FileMonitorEvent.CHANGED or event_type == Gio.FileMonitorEvent.CHANGES_DONE_HINT:
+            # Check if we are currently saving this file (ignore self-changes)
+            if getattr(editor, 'is_saving', False):
+                return
+            
+            # Use a debounce or check modification time to be sure?
+            # Gio usually sends multiple events.
+            # We set a flag and update UI.
+            
+            # Ensure this runs on main thread
+            GLib.idle_add(self._handle_external_modification, editor)
+
+    def _handle_external_modification(self, editor):
+        if getattr(editor, 'file_modified_externally', False):
+            return
+            
+        print(f"File modified externally: {editor.current_file_path}")
+        editor.file_modified_externally = True
+        
+        # Show notification in the editor
+        if hasattr(editor, 'show_external_modification_warning'):
+            editor.show_external_modification_warning()
+            
+    def on_info_bar_response(self, info_bar, response_id, editor):
+        """Handle InfoBar response"""
+        info_bar.set_revealed(False)
+        
+        if response_id == Gtk.ResponseType.ACCEPT: # Reload
+            print("Reloading file...")
+            if editor.current_file_path:
+                self.load_file_into_editor(editor, editor.current_file_path)
+            editor.file_modified_externally = False
+            
+        elif response_id == Gtk.ResponseType.REJECT: # Ignore
+            print("Ignoring external modification")
+            # We don't do anything, just keep current content.
+            # Maybe we should update the "base" to avoid repeated warnings?
+            # Or just let it warn again if it changes again.
+            pass
 
 # ============================================================
 #   APP
