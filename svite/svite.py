@@ -1971,6 +1971,17 @@ class VirtualTextView(Gtk.DrawingArea):
             line_h = self.line_h
             visible_rows = max(1, height // line_h)
             total_lines = self.buf.total()
+
+            # Ensure scroll_line is within valid bounds immediately
+            # This fixes "blank screen" if content shrinks drastically (Replace All)
+            limit_line, limit_offset = self._get_bottom_scroll_limit()
+            if self.scroll_line > limit_line:
+                self.scroll_line = limit_line
+                self.scroll_visual_offset = limit_offset
+                self.scroll_line_frac = 0.0
+            elif self.scroll_line == limit_line and self.scroll_visual_offset > limit_offset:
+                self.scroll_visual_offset = limit_offset
+                self.scroll_line_frac = 0.0
             
             if self.mapper.enabled:
                 total_vis = self.mapper.get_total_visual_lines()
@@ -5045,45 +5056,68 @@ class VirtualTextView(Gtk.DrawingArea):
                          # We'll just search matches in this line range
                          try:
                              start_idx = bisect.bisect_left(self.search_matches, (current_log_line, 0, 0, 0))
+                             
+                             # Identify all matches that overlap this line
+                             indices_to_draw = []
+                             
+                             # 1. Forward: Matches starting ON current line
                              for mi in range(start_idx, len(self.search_matches)):
                                  m = self.search_matches[mi]
-                                 s_ln, s_col, e_ln, e_col = m[:4]
+                                 s_ln = m[0]
                                  if s_ln > current_log_line: break
-                                 if s_ln == current_log_line:
-                                     # Match on this line
-                                     ms_byte = self.visual_byte_index(line_text, s_col)
-                                     me_byte = self.visual_byte_index(line_text, e_col) if e_ln == current_log_line else 1000000
-                                     
-                                     # svite_fix: get_x_ranges is returning broken data (len 1 list)
-                                     # We manually calculate range using index_to_x
-                                     ranges = []
-                                     try:
-                                         x1 = line.index_to_x(ms_byte, False)
-                                         x2 = line.index_to_x(me_byte, False)
-                                         ranges = [x1, x2]
-                                     except:
-                                          pass
-                                     
-                                     # DEBUG SEARCH (Removed)
-                                      
-                                     # Handle flat list [x1, x2, x3, x4] or tuple list [(x1, x2), ...]
-                                     flat_ranges = []
-                                     if ranges:
-                                         if isinstance(ranges[0], int):
-                                             for i in range(0, len(ranges), 2):
-                                                 if i + 1 < len(ranges):
-                                                     flat_ranges.append((ranges[i], ranges[i+1]))
-                                         else:
-                                             flat_ranges = ranges
+                                 indices_to_draw.append(mi)
+                                 
+                             # 2. Backward: Matches starting BEFORE current line
+                             for mi in range(start_idx - 1, -1, -1):
+                                 m = self.search_matches[mi]
+                                 s_ln, s_col, e_ln, e_col = m[:4]
+                                 if e_ln < current_log_line:
+                                     break # Sorted by start, and usually non-overlapping means end is also earlier
+                                 if e_ln >= current_log_line:
+                                     indices_to_draw.append(mi)
 
-                                     color = (1.0, 0.5, 0.0, 0.6) if self.current_match_idx == mi else (1.0, 1.0, 0.0, 0.4)
-                                     cr.set_source_rgba(*color)
-                                     for r_start, r_end in flat_ranges:
-                                         # Apply final_x_offset for alignment
-                                         rx = base_x + (r_start / Pango.SCALE) + final_x_offset
-                                         rw = (r_end - r_start) / Pango.SCALE
-                                         cr.rectangle(rx, current_y, rw, self.line_h)
-                                         cr.fill()
+                             for mi in indices_to_draw:
+                                 m = self.search_matches[mi]
+                                 s_ln, s_col, e_ln, e_col = m[:4]
+                                 
+                                 if s_ln <= current_log_line <= e_ln:
+                                     # Calculate intersection with current line
+                                     ms_byte = 0
+                                     me_byte = 1000000 
+                                     
+                                     if s_ln == current_log_line:
+                                         ms_byte = self.visual_byte_index(line_text, s_col)
+                                     
+                                     if e_ln == current_log_line:
+                                         me_byte = self.visual_byte_index(line_text, e_col)
+                                     
+                                     if ms_byte < me_byte:
+                                         # svite_fix: get_x_ranges is returning broken data
+                                         ranges = []
+                                         try:
+                                             x1 = line.index_to_x(ms_byte, False)
+                                             x2 = line.index_to_x(me_byte, False)
+                                             ranges = [x1, x2]
+                                         except:
+                                              pass
+                                         
+                                         flat_ranges = []
+                                         if ranges:
+                                             if isinstance(ranges[0], int):
+                                                 for i in range(0, len(ranges), 2):
+                                                     if i + 1 < len(ranges):
+                                                         flat_ranges.append((ranges[i], ranges[i+1]))
+                                             else:
+                                                 flat_ranges = ranges
+
+                                         color = (1.0, 0.5, 0.0, 0.6) if self.current_match_idx == mi else (1.0, 1.0, 0.0, 0.4)
+                                         cr.set_source_rgba(*color)
+                                         for r_start, r_end in flat_ranges:
+                                             # Apply final_x_offset for alignment
+                                             rx = base_x + (r_start / Pango.SCALE) + final_x_offset
+                                             rw = (r_end - r_start) / Pango.SCALE
+                                             cr.rectangle(rx, current_y, rw, self.line_h)
+                                             cr.fill()
                          except: pass
 
 

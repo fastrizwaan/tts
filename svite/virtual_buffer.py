@@ -1709,6 +1709,11 @@ class VirtualBuffer:
         else:
             if not case_sensitive:
                 query = query.lower()
+                
+            # Check for multi-line query
+            if '\n' in query:
+                return self._search_multiline_literal(query, case_sensitive, max_matches)
+
         
         matches = []
         max_len = 0
@@ -1740,6 +1745,84 @@ class VirtualBuffer:
                         return matches, max_len
                     start = idx + 1
                     
+        return matches, max_len
+
+    def _search_multiline_literal(self, query: str, case_sensitive: bool, max_matches: int) -> Tuple[List, int]:
+        """Search for a multi-line literal string."""
+        matches = []
+        max_len = len(query)
+        q_lines = query.split('\n')
+        line_count = len(q_lines)
+        
+        # Pre-process query lines for case sensitivity
+        if not case_sensitive:
+            q_lines = [l.lower() for l in q_lines]
+            
+        first_q_line = q_lines[0]
+        last_q_line = q_lines[-1]
+        
+        # Iterate efficiently through lines
+        # We need to find potential starts on line i
+        
+        i = 0
+        total_buf_lines = self.total_lines
+        
+        while i <= total_buf_lines - line_count:
+            # 1. Match first line suffix
+            line_text_raw = self.get_line(i)
+            line_text = line_text_raw if case_sensitive else line_text_raw.lower()
+            
+            start_search = 0
+            while True:
+                # Find start of query in this line
+                col = line_text.find(first_q_line, start_search)
+                if col == -1:
+                    break
+                    
+                # Check if this occurrence is a suffix (required for multi-line join)
+                # The query "A\nB" means line i ends with "A" and line i+1 starts with "B" (roughly)
+                # Actually, standard text editor "A\nB" means A is at end of line?
+                # If I type "foo\nbar", it matches "foo" at end of line and "bar" at start of next.
+                # But wait, if text is "foo extra\nbar", "foo\nbar" strictly shouldn't match?
+                # In most editors (VSCode, Notepad++):
+                # Search "a\nb" matches "a" followed immediately by newline, then "b".
+                # So "a" MUST be the suffix of the line, and "b" MUST be the prefix of the next line.
+                
+                # Check suffix condition for first line
+                # But wait, query could be "text\nmore".
+                # If file has "some text\nmore here", it matches.
+                # So "text" must be at the very end of line i.
+                remaining_len = len(line_text) - (col + len(first_q_line))
+                if remaining_len == 0:
+                    # Candidate start found! Now verify subsequent lines.
+                    match_failed = False
+                    
+                    # Verify middle lines (must be exact match)
+                    for limit_offset in range(1, line_count - 1):
+                        mid_line_raw = self.get_line(i + limit_offset)
+                        mid_line = mid_line_raw if case_sensitive else mid_line_raw.lower()
+                        if mid_line != q_lines[limit_offset]:
+                            match_failed = True
+                            break
+                    
+                    if not match_failed:
+                        # Verify last line (must be prefix match)
+                        last_buf_line_raw = self.get_line(i + line_count - 1)
+                        last_buf_line = last_buf_line_raw if case_sensitive else last_buf_line_raw.lower()
+                        
+                        if last_buf_line.startswith(last_q_line):
+                            # Full match confirmed!
+                            matches.append((
+                                i, col,                             # Start
+                                i + line_count - 1, len(last_q_line) # End
+                            ))
+                            if max_matches > 0 and len(matches) >= max_matches:
+                                return matches, max_len
+                                
+                start_search = col + 1
+            
+            i += 1
+            
         return matches, max_len
 
     def begin_action(self):

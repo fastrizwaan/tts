@@ -41,6 +41,12 @@ class FindReplaceBar(Gtk.Box):
         self.find_entry.connect("activate", self.on_find_next)
         
         self.find_overlay.set_child(self.find_entry)
+
+        # Paste Controller for Find Entry
+        paste_ctrl = Gtk.EventControllerKey()
+        paste_ctrl.connect("key-pressed", self.on_find_key_pressed)
+        self.find_entry.add_controller(paste_ctrl)
+
         
         # Matches Label (x of y)
         self.matches_label = Gtk.Label(label="")
@@ -205,6 +211,41 @@ class FindReplaceBar(Gtk.Box):
                 return True
         return False
 
+    def on_find_key_pressed(self, controller, keyval, keycode, state):
+        # Handle Paste (Ctrl+V)
+        if state & Gdk.ModifierType.CONTROL_MASK and (keyval == Gdk.KEY_v or keyval == Gdk.KEY_V):
+            clipboard = self.get_clipboard()
+            clipboard.read_text_async(None, self._on_paste_received)
+            return True
+        return False
+
+    def _on_paste_received(self, clipboard, result):
+        try:
+            text = clipboard.read_text_finish(result)
+            if text:
+                # Escape newlines for display in single-line entry
+                escaped_text = text.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t")
+                
+                # Insert at cursor or replace selection
+                # GtkSearchEntry doesn't expose easy insert API in GTK4 Python sometimes?
+                # It wraps an Editable.
+                # Let's try appending or setting text for simplicity if API is limited,
+                # or use entry.get_delegate() if available.
+                # Simplest: Just set text if empty, or append?
+                # Ideally we want standard paste behavior but modified.
+                
+                # Retrieve current text
+                current = self.find_entry.get_text()
+                # For now, let's just append or set. 
+                # Improving: Just set text if user is pasting into find bar usually means they want to find THAT.
+                self.find_entry.set_text(escaped_text)
+                
+                # Trigger search
+                self.on_search_changed()
+        except Exception as e:
+            print(f"Paste error: {e}")
+
+
     def on_search_changed(self, *args):
         if self._search_timeout_id:
             GLib.source_remove(self._search_timeout_id)
@@ -225,11 +266,25 @@ class FindReplaceBar(Gtk.Box):
 
         if whole_word:
             if not is_regex:
+                # Unescape \n, \t, etc for the literal search IF user typed them
+                # But wait, we want to SUPPORT \n literals if user typed them.
+                # If is_regex is False, we treat query as literal.
+                # But we want to allow user to type \n to mean newline.
+                try:
+                    # Expand common escapes
+                    query = query.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r").replace("\\\\", "\\")
+                except: pass
+
                 escaped_query = re.escape(query)
                 query = f"\\b{escaped_query}\\b"
                 is_regex = True
             else:
                 query = f"\\b{query}\\b"
+        else:
+            if not is_regex:
+                 # Normal mode: Unescape \n to support multi-line matching
+                 query = query.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r").replace("\\\\", "\\")
+
         
         total_lines = self.editor_view.buffer.total_lines
         
@@ -295,6 +350,11 @@ class FindReplaceBar(Gtk.Box):
                 print(f"Regex replacement error: {e}")
                 # Fallback to literal replacement logic if regex fails
 
+        else:
+             # Normal Mode Replacement: Unescape \n
+             replacement = replacement.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r").replace("\\\\", "\\")
+
+
 
         # Calculate where replacement will end
         replacement_lines = replacement.split('\n')
@@ -319,6 +379,8 @@ class FindReplaceBar(Gtk.Box):
         self._perform_search()
         self._update_label_idx()
         self.editor_view.queue_draw()
+        self.editor_view.keep_cursor_visible()
+
 
 
             
@@ -331,12 +393,24 @@ class FindReplaceBar(Gtk.Box):
         
         if whole_word:
             if not is_regex:
+                try:
+                    query = query.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r").replace("\\\\", "\\")
+                except: pass
                 escaped_query = re.escape(query)
                 query = f"\\b{escaped_query}\\b"
                 is_regex = True
             else:
                 query = f"\\b{query}\\b"
+        else:
+            if not is_regex:
+                query = query.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r").replace("\\\\", "\\")
+                replacement = replacement.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r").replace("\\\\", "\\")
 
         count = self.editor_view.buffer.replace_all(query, replacement, case_sensitive, is_regex)
+        
+        # Ensure changes are visible
+        self.editor_view.queue_draw()
+        self.editor_view.keep_cursor_visible()
+        
         self.on_search_changed()
 
