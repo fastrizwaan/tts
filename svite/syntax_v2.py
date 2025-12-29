@@ -865,14 +865,20 @@ class StateAwareSyntaxEngine:
                 m = P.F_TRIPLE_DQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'f_triple_start'))
-                    state = TokenState.IN_F_TRIPLE_DQ
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 3) # 3 = TRIPLE_DQ
+                    else:
+                        state = TokenState.IN_F_TRIPLE_DQ
                     pos = m.end()
                     continue
                 
                 m = P.F_TRIPLE_SQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'f_triple_start'))
-                    state = TokenState.IN_F_TRIPLE_SQ
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 2) # 2 = TRIPLE_SQ
+                    else:
+                        state = TokenState.IN_F_TRIPLE_SQ
                     pos = m.end()
                     continue
                 
@@ -880,14 +886,20 @@ class StateAwareSyntaxEngine:
                 m = P.B_TRIPLE_DQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'b_triple_start'))
-                    state = TokenState.IN_B_TRIPLE_DQ
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 3) # 3 = TRIPLE_DQ
+                    else:
+                        state = TokenState.IN_B_TRIPLE_DQ
                     pos = m.end()
                     continue
                 
                 m = P.B_TRIPLE_SQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'b_triple_start'))
-                    state = TokenState.IN_B_TRIPLE_SQ
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 2) # 2 = TRIPLE_SQ
+                    else:
+                        state = TokenState.IN_B_TRIPLE_SQ
                     pos = m.end()
                     continue
                 
@@ -895,14 +907,20 @@ class StateAwareSyntaxEngine:
                 m = P.R_TRIPLE_DQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'r_triple_start'))
-                    state = TokenState.IN_R_TRIPLE_DQ
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 3) # 3 = TRIPLE_DQ
+                    else:
+                        state = TokenState.IN_R_TRIPLE_DQ
                     pos = m.end()
                     continue
                 
                 m = P.R_TRIPLE_SQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'r_triple_start'))
-                    state = TokenState.IN_R_TRIPLE_SQ
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 2) # 2 = TRIPLE_SQ
+                    else:
+                        state = TokenState.IN_R_TRIPLE_SQ
                     pos = m.end()
                     continue
                 
@@ -989,14 +1007,20 @@ class StateAwareSyntaxEngine:
                 m = P.F_DQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'f_string_start'))
-                    state = TokenState.IN_F_DQ_STRING
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 1) # 1 = DQ
+                    else:
+                        state = TokenState.IN_F_DQ_STRING
                     pos = m.end()
                     continue
                 
                 m = P.F_SQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'f_string_start'))
-                    state = TokenState.IN_F_SQ_STRING
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 0) # 0 = SQ
+                    else:
+                        state = TokenState.IN_F_SQ_STRING
                     pos = m.end()
                     continue
                 
@@ -1004,14 +1028,20 @@ class StateAwareSyntaxEngine:
                 m = P.B_DQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'b_string_start'))
-                    state = TokenState.IN_B_DQ_STRING
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 1) # 1 = DQ
+                    else:
+                        state = TokenState.IN_B_DQ_STRING
                     pos = m.end()
                     continue
                 
                 m = P.B_SQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'b_string_start'))
-                    state = TokenState.IN_B_SQ_STRING
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 0) # 0 = SQ
+                    else:
+                        state = TokenState.IN_B_SQ_STRING
                     pos = m.end()
                     continue
                 
@@ -1019,14 +1049,20 @@ class StateAwareSyntaxEngine:
                 m = P.R_DQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'r_string_start'))
-                    state = TokenState.IN_R_DQ_STRING
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 1) # 1 = DQ
+                    else:
+                        state = TokenState.IN_R_DQ_STRING
                     pos = m.end()
                     continue
                 
                 m = P.R_SQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'r_string_start'))
-                    state = TokenState.IN_R_SQ_STRING
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 0) # 0 = SQ
+                    else:
+                        state = TokenState.IN_R_SQ_STRING
                     pos = m.end()
                     continue
                 
@@ -1034,14 +1070,20 @@ class StateAwareSyntaxEngine:
                 m = P.U_DQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'string_start'))
-                    state = TokenState.IN_DQ_STRING
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 1) # 1 = DQ
+                    else:
+                        state = TokenState.IN_DQ_STRING
                     pos = m.end()
                     continue
                 
                 m = P.U_SQ.match(text, pos)
                 if m:
                     tokens.append((pos, m.end(), 'string_start'))
-                    state = TokenState.IN_SQ_STRING
+                    if is_f_expr:
+                        state = TokenState.get_nested_state(state, 0) # 0 = SQ
+                    else:
+                        state = TokenState.IN_SQ_STRING
                     pos = m.end()
                     continue
                 
