@@ -2716,7 +2716,10 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def copy_to_clipboard(self):
         """Copy selected text to clipboard with progress indicator"""
-        self.show_busy("Copying...")
+        if hasattr(self, '_editor'):
+            self._editor.set_loading(True)
+        else:
+            self.show_busy("Copying...")
         
         # Defer execution to allow UI to render the busy overlay
         def _do_copy():
@@ -2726,14 +2729,20 @@ class VirtualTextView(Gtk.DrawingArea):
                     clipboard = self.get_clipboard()
                     clipboard.set_content(Gdk.ContentProvider.new_for_value(text))
             finally:
-                self.hide_busy()
+                if hasattr(self, '_editor'):
+                    self._editor.set_loading(False)
+                else:
+                    self.hide_busy()
             return False
             
         GLib.timeout_add(20, _do_copy)
 
     def cut_to_clipboard(self):
         """Cut selected text to clipboard with progress indicator"""
-        self.show_busy("Cutting...")
+        if hasattr(self, '_editor'):
+            self._editor.set_loading(True)
+        else:
+            self.show_busy("Cutting...")
         
         # Defer execution
         def _do_cut():
@@ -2746,7 +2755,10 @@ class VirtualTextView(Gtk.DrawingArea):
                     self.buf.delete_selection(provided_text=text)
                     self.queue_draw()
             finally:
-                self.hide_busy()
+                if hasattr(self, '_editor'):
+                    self._editor.set_loading(False)
+                else:
+                    self.hide_busy()
             return False
             
         GLib.timeout_add(20, _do_cut)
@@ -2762,7 +2774,10 @@ class VirtualTextView(Gtk.DrawingArea):
                     # Normalize line endings: remove \r to handle Windows/Mac line endings
                     text = text.replace('\r\n', '\n').replace('\r', '\n')
                     
-                    self.show_busy("Pasting...")
+                    if hasattr(self, '_editor'):
+                        self._editor.set_loading(True)
+                    else:
+                        self.show_busy("Pasting...")
                     
                     # Defer insert to allow UI update
                     def _do_paste():
@@ -2783,7 +2798,10 @@ class VirtualTextView(Gtk.DrawingArea):
                             self.update_im_cursor_location() # Also update IM cursor
                             self.update_scrollbar()
                         finally:
-                            self.hide_busy()
+                            if hasattr(self, '_editor'):
+                                self._editor.set_loading(False)
+                            else:
+                                self.hide_busy()
                             self.queue_draw()
                         return False
                     
