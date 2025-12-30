@@ -2905,6 +2905,7 @@ class VirtualTextView(Gtk.DrawingArea):
         
         # Track word selection mode for drag-to-select-words
         self.word_selection_mode = False
+        self.line_selection_mode = False
         
         # Track the original anchor word boundaries (for stable bi-directional drag)
         self.anchor_word_start_line = -1
@@ -3235,8 +3236,16 @@ class VirtualTextView(Gtk.DrawingArea):
 
         if time_diff > 0.5 or ln != self.last_click_line or abs(col - self.last_click_col) > 3:
             self.click_count = 0
+            self.word_selection_mode = False  # Reset word selection mode on new click sequence
+            self.line_selection_mode = False
 
         self.click_count += 1
+        
+        # Cycle selection modes for rapid clicks > 3
+        # 4 -> 2 (Word), 5 -> 3 (Line), 6 -> 2 (Word), etc.
+        if self.click_count > 3:
+            self.click_count = 2 + (self.click_count - 2) % 2
+
         self.last_click_time = current_time
         self.last_click_line = ln
         self.last_click_col = col
@@ -3275,16 +3284,32 @@ class VirtualTextView(Gtk.DrawingArea):
                     self._triple_click_line_len = line_len
                     return # DEFER
             
+            # Determine end position (start of next line to include newline)
+            end_ln = ln + 1
+            end_col = 0
+            if end_ln >= self.buf.total():
+                 end_ln = ln
+                 end_col = line_len
+
             self.buf.selection.set_start(ln, 0)
-            self.buf.selection.set_end(ln, line_len)
-            self.buf.cursor_line = ln
-            self.buf.cursor_col = line_len
+            self.buf.selection.set_end(end_ln, end_col)
+            self.buf.cursor_line = end_ln
+            self.buf.cursor_col = end_col
+            
+            # Enable line selection mode for drag
+            self.line_selection_mode = True
+            self.word_selection_mode = False # Ensure word mode is cleared
+            self.anchor_word_start_line = ln
+            self.anchor_word_start_col = 0
+            self.anchor_word_end_line = end_ln
+            self.anchor_word_end_col = end_col
             self.update_matching_brackets()
             self.queue_draw()
             return
 
         # DOUBLE CLICK - Context-aware selection (handles empty lines and end-of-line)
         if self.click_count == 2:
+            self.line_selection_mode = False # Ensure line mode is cleared if we cycled back
 
             # Case 1: empty line → context-aware selection
             if line_len == 0:
@@ -3601,7 +3626,7 @@ class VirtualTextView(Gtk.DrawingArea):
             if click_in_selection:
                 # Fix: If we are in word selection mode (double-click drag),
                 # we want to extend selection, not move text.
-                if self.word_selection_mode:
+                if self.word_selection_mode or self.line_selection_mode:
                     click_in_selection = False
 
             if click_in_selection:
@@ -3789,15 +3814,21 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # Check if we have a pending drag that needs to be activated
         if self._drag_pending:
-            # We moved! Activate drag-and-drop mode
-            self.drag_and_drop_mode = True
-            self._drag_pending = False
-            # Now we know it's a drag, so it's NOT a click-to-clear
-            print("DEBUG: Drag Update. Mode Active. Clearing Pending Click.")
-            self._clicked_in_selection = False
-            self._pending_click = False # Cancel pending click
-            self._pending_triple_click = False # failsafe
-            self.queue_draw()
+            # Safety check: Abort DnD if we're in a selection extension mode
+            # (Race condition: on_click_pressed may have set mode AFTER on_drag_begin ran)
+            if self.word_selection_mode or self.line_selection_mode:
+                self._drag_pending = False
+                # Fall through to regular selection drag
+            else:
+                # We moved! Activate drag-and-drop mode
+                self.drag_and_drop_mode = True
+                self._drag_pending = False
+                # Now we know it's a drag, so it's NOT a click-to-clear
+                print("DEBUG: Drag Update. Mode Active. Clearing Pending Click.")
+                self._clicked_in_selection = False
+                self._pending_click = False # Cancel pending click
+                self._pending_triple_click = False # failsafe
+                self.queue_draw()
 
         # Store current drag position for auto-scroll
         self.last_drag_x = sx + dx
@@ -3840,6 +3871,49 @@ class VirtualTextView(Gtk.DrawingArea):
             self.queue_draw()
             return
         
+        if self.line_selection_mode:
+            # Line-by-line selection mode
+            
+            # Determine direction relative to anchor
+            is_forward = False
+            anchor_start = self.anchor_word_start_line
+            
+            if ln > anchor_start:
+                is_forward = True
+            elif ln == anchor_start:
+                 # If on same line, depends on if we moved past start?
+                 # Actually for line selection, simply defaulting to forward if ln >= anchor is fine.
+                 is_forward = True
+            
+            if ln < anchor_start:
+                is_forward = False
+
+            if is_forward:
+                 # Current line is AT or AFTER anchor start.
+                 # Select from Anchor Start to End of Current Line (ln + 1)
+                 start_ln = self.anchor_word_start_line
+                 # End at start of NEXT line
+                 end_ln = ln + 1
+                 if end_ln > self.buf.total(): end_ln = self.buf.total()
+                 
+                 self.buf.selection.set_start(start_ln, 0)
+                 self.buf.selection.set_end(end_ln, 0)
+                 self.buf.cursor_line = end_ln
+                 self.buf.cursor_col = 0
+            else:
+                 # Current line is BEFORE anchor start.
+                 # Select from Current Line Start to Anchor End
+                 start_ln = ln
+                 end_ln = self.anchor_word_end_line # Original end (e.g. anchor+1)
+                 
+                 self.buf.selection.set_start(start_ln, 0)
+                 self.buf.selection.set_end(end_ln, 0)
+                 self.buf.cursor_line = start_ln
+                 self.buf.cursor_col = 0
+            
+            self.queue_draw()
+            return
+
         if self.word_selection_mode:
             # Word-by-word selection mode
             line_text = self.buf.get_line(ln)
@@ -3958,10 +4032,27 @@ class VirtualTextView(Gtk.DrawingArea):
             # Execute deferred triple click
             ln = self._triple_click_ln
             line_len = self._triple_click_line_len
+            
+            # Use same logic as direct triple click (Full line selection)
+            end_ln = ln + 1
+            end_col = 0
+            if end_ln >= self.buf.total():
+                 end_ln = ln
+                 end_col = line_len
+
             self.buf.selection.set_start(ln, 0)
-            self.buf.selection.set_end(ln, line_len)
-            self.buf.cursor_line = ln
-            self.buf.cursor_col = line_len
+            self.buf.selection.set_end(end_ln, end_col)
+            self.buf.cursor_line = end_ln
+            self.buf.cursor_col = end_col
+            
+            # Enable line selection mode for subsequent drag
+            self.line_selection_mode = True
+            self.word_selection_mode = False  # Ensure word mode is cleared
+            self.anchor_word_start_line = ln
+            self.anchor_word_start_col = 0
+            self.anchor_word_end_line = end_ln
+            self.anchor_word_end_col = end_col
+            
             self._pending_triple_click = False
             self.queue_draw()
             
