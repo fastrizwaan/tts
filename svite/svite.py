@@ -10729,6 +10729,9 @@ class VirtualTextEditor(Adw.Application):
         if not win:
             win = EditorWindow(self)
         
+        # Present immediately to ensure focus/attention
+        win.present()
+        
         # Open files from command line if any (works for both new and existing windows)
         if self.files_to_open:
             # If this is a new window with only the initial empty tab, close it first
@@ -10759,6 +10762,10 @@ class VirtualTextEditor(Adw.Application):
     
     def do_open(self, files, n_files, hint):
         """Handle files passed via command line"""
+        # Explicitly present the window if it exists, to bypass focus stealing prevention
+        if self.props.active_window:
+            self.props.active_window.present()
+            
         self.files_to_open = [f.get_path() for f in files]
         self.activate()
 
