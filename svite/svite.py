@@ -491,6 +491,15 @@ def detect_language(path, first_line=None):
             # We don't have perl highlighter yet, fallback?
             pass
             
+    
+    # 3. Headers / Content Checks
+    if first_line:
+        first_line_stripped = first_line.strip()
+        if first_line_stripped.startswith('<?xml'):
+            return 'xml'
+        if '<!DOCTYPE html>' in first_line or '<html' in first_line.lower():
+            return 'html'
+            
     return None
 
 # ============================================================
@@ -6029,34 +6038,45 @@ class StatusBar(Gtk.Box):
             self.encoding_label.set_markup(f"<span font_weight='normal'>{encoding_display}</span>")
         
         # Update file type based on file extension with bold if changed
-        if editor.current_file_path:
-            ext = os.path.splitext(editor.current_file_path)[1].lower()
-            type_map = {
-                '.py': 'Python',
-                '.js': 'JavaScript',
-                '.sh': 'Shell',
-                '.c': 'C',
-                '.cpp': 'C++',
-                '.rs': 'Rust',
-                '.html': 'HTML',
-                '.css': 'CSS',
-                '.json': 'JSON',
-                '.xml': 'XML',
-                '.xsl': 'XSLT',
-                '.xslt': 'XSLT',
-                '.md': 'Markdown',
-                '.yaml': 'YAML',
-                '.yml': 'YAML',
-                '.toml': 'TOML'
+        if True: # Indent block
+            # Update file type based on actual buffer language
+            current_lang_id = getattr(editor.view.buf, 'language', None)
+            
+            # Map ID back to display name
+            id_to_name = {
+                'python': 'Python',
+                'javascript': 'JavaScript', 
+                'sh': 'Shell',
+                'bash': 'Shell',
+                'c': 'C',
+                'cpp': 'C++',
+                'rust': 'Rust',
+                'html': 'HTML',
+                'css': 'CSS',
+                'json': 'JSON',
+                'xml': 'XML',
+                'xslt': 'XSLT',
+                'xsl': 'XSLT',
+                'markdown': 'Markdown',
+                'yaml': 'YAML',
+                'toml': 'TOML',
+                'java': 'Java',
+                'go': 'Go',
+                'ruby': 'Ruby', 
+                'php': 'PHP',
+                'typescript': 'TypeScript',
+                'sql': 'SQL',
+                'perl': 'Perl'
             }
-            file_type = type_map.get(ext, 'Plain Text')
-            is_file_type_changed = file_type != editor.default_file_type
-            if is_file_type_changed:
-                self.file_type_label.set_markup(f"<b>{file_type}</b>")
+            
+            display_name = id_to_name.get(current_lang_id, "Plain Text")
+            
+            # Update label
+            is_type_changed = display_name != editor.default_file_type
+            if is_type_changed:
+                self.file_type_label.set_markup(f"<b>{display_name}</b>")
             else:
-                self.file_type_label.set_markup(f"<span font_weight='normal'>{file_type}</span>")
-        else:
-            self.file_type_label.set_markup("<span font_weight='normal'>Plain Text</span>")
+                self.file_type_label.set_markup(f"<span font_weight='normal'>{display_name}</span>")
         
         # Update tab width with bold if changed
         tab_width = getattr(editor, 'tab_width', 4)
