@@ -3878,6 +3878,10 @@ class VirtualTextView(Gtk.DrawingArea):
                 # Hide drop indicator when inside selection
                 self.drop_position_line = -1
                 self.drop_position_col = -1
+            elif ln >= self.buf.total():
+                # Hide drop indicator when beyond last line
+                self.drop_position_line = -1
+                self.drop_position_col = -1
             else:
                 self.drop_position_line = ln
                 self.drop_position_col = col
