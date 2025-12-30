@@ -2659,7 +2659,7 @@ class VirtualTextView(Gtk.DrawingArea):
             self.queue_draw()
             return True
 
-        if name == "Return":
+        if name in ("Return", "KP_Enter", "ISO_Enter"):
              self.buf.insert_newline()
              if getattr(self, "auto_indent", True):
                  ln = self.buf.cursor_line - 1
