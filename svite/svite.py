@@ -2759,6 +2759,9 @@ class VirtualTextView(Gtk.DrawingArea):
             try:
                 text = clipboard.read_text_finish(result)
                 if text:
+                    # Normalize line endings: remove \r to handle Windows/Mac line endings
+                    text = text.replace('\r\n', '\n').replace('\r', '\n')
+                    
                     self.show_busy("Pasting...")
                     
                     # Defer insert to allow UI update
@@ -2767,9 +2770,17 @@ class VirtualTextView(Gtk.DrawingArea):
                             self.buf.insert_text(text)
                             
                             
-                            # After paste, invalidate layout
-                            if self.mapper.enabled:
-                                self.mapper.invalidate_all()
+                            # After paste, invalidate layout completely
+                            # We must clear the wrap cache and reset renderer state
+                            if self.renderer.wrap_enabled:
+                                self.renderer.wrap_cache.clear()
+                                self.renderer.total_visual_lines_cache = None
+                                self.renderer.estimated_total_cache = None
+                                self.renderer.visual_line_map = []
+                                self.renderer.edits_since_cache_invalidation = 0
+                            
+                            self.keep_cursor_visible()
+                            self.update_im_cursor_location() # Also update IM cursor
                             self.update_scrollbar()
                         finally:
                             self.hide_busy()
@@ -4028,7 +4039,7 @@ class VirtualTextView(Gtk.DrawingArea):
                     self.buf.cursor_line = select_end_ln
                     self.buf.cursor_col = select_end_col
                     print(f"DEBUG: Drag End. Selected text: {select_start_ln},{select_start_col} - {select_end_ln},{select_end_col}")
-                
+
                 self.keep_cursor_visible()
             
             # Exit drag-and-drop mode
@@ -4037,6 +4048,8 @@ class VirtualTextView(Gtk.DrawingArea):
         else:
             # Normal drag end
             self.ctrl.end_drag()
+            
+            # Copy selection to PRIMARY clipboard for middle-click paste
             
             # Copy selection to PRIMARY clipboard for middle-click paste
             if self.buf.selection.has_selection():
@@ -4059,12 +4072,37 @@ class VirtualTextView(Gtk.DrawingArea):
                         else:
                             lines.append(line)
                     selected_text = '\n'.join(lines)
-                
-                # Copy to PRIMARY clipboard
-                if selected_text:
-                    display = self.get_display()
-                    clipboard = display.get_primary_clipboard()
-                    clipboard.set(selected_text)
+        # Normal drag end (or after drag-and-drop)
+        # Copy selection to PRIMARY clipboard for middle-click paste
+        if self.buf.selection.has_selection():
+            start_ln, start_col, end_ln, end_col = self.buf.selection.get_bounds()
+            
+            # Extract selected text
+            if start_ln == end_ln:
+                # Single line selection
+                line = self.buf.get_line(start_ln)
+                selected_text = line[start_col:end_col]
+            else:
+                # Multi-line selection
+                lines = []
+                for ln in range(start_ln, end_ln + 1):
+                    line = self.buf.get_line(ln)
+                    if ln == start_ln:
+                        lines.append(line[start_col:])
+                    elif ln == end_ln:
+                        lines.append(line[:end_col])
+                    else:
+                        lines.append(line)
+                selected_text = '\n'.join(lines)
+            
+            # Copy to PRIMARY clipboard
+            if selected_text:
+                display = self.get_display()
+                clipboard = display.get_primary_clipboard()
+                clipboard.set_content(Gdk.ContentProvider.new_for_value(selected_text))
+        
+        # Ensure we reset the dragging state in the controller unconditionally
+        self.ctrl.end_drag()
         
         # Clear word selection mode
         self.word_selection_mode = False
