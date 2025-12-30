@@ -7007,12 +7007,12 @@ class EditorPage:
     def show_external_modification_warning(self):
         """Show the external modification warning info bar"""
         if hasattr(self, 'modification_info_bar'):
-             self.modification_info_bar.set_revealed(True)
+             self.modification_info_bar.set_reveal_child(True)
              
     def hide_external_modification_warning(self):
         """Hide the external modification warning info bar"""
         if hasattr(self, 'modification_info_bar'):
-             self.modification_info_bar.set_revealed(False)
+             self.modification_info_bar.set_reveal_child(False)
 
 
     @property
@@ -8398,27 +8398,38 @@ class EditorWindow(Adw.ApplicationWindow):
         # We want the FindBar to be BELOW the editor view
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         
-        # --- InfoBar for External Modification ---
-        info_bar = Gtk.InfoBar()
-        info_bar.add_css_class("warning") # Use CSS class instead of set_message_type
-        # set_show_close_button is deprecated/removed in Gtk4 -> handled by adding a button manually or responding to signals
+        # --- InfoBar replacement using Revealer + Box (InfoBar deprecated in GTK 4.10) ---
+        info_revealer = Gtk.Revealer()
+        info_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        info_revealer.set_reveal_child(False)
         
-        # Content
-        # Just the title as requested
+        info_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        info_box.add_css_class("warning")
+        info_box.set_margin_start(12)
+        info_box.set_margin_end(12)
+        info_box.set_margin_top(6)
+        info_box.set_margin_bottom(6)
+        
+        # Content label
         title_label = Gtk.Label(label="File has changed on disk")
         title_label.set_markup("<b>File has changed on disk</b>")
         title_label.set_halign(Gtk.Align.START)
+        title_label.set_hexpand(True)
+        info_box.append(title_label)
         
-        info_bar.add_child(title_label) 
+        # Buttons
+        reload_btn = Gtk.Button(label="Reload")
+        reload_btn.connect("clicked", lambda b: self.on_info_bar_response(info_revealer, Gtk.ResponseType.ACCEPT, editor))
+        info_box.append(reload_btn)
         
-        info_bar.add_button("Reload", Gtk.ResponseType.ACCEPT)
-        info_bar.add_button("Ignore", Gtk.ResponseType.REJECT)
+        ignore_btn = Gtk.Button(label="Ignore")
+        ignore_btn.connect("clicked", lambda b: self.on_info_bar_response(info_revealer, Gtk.ResponseType.REJECT, editor))
+        info_box.append(ignore_btn)
         
-        info_bar.connect("response", lambda w, r: self.on_info_bar_response(w, r, editor))
-        info_bar.set_revealed(False)
+        info_revealer.set_child(info_box)
         
-        editor.modification_info_bar = info_bar
-        main_box.append(info_bar)
+        editor.modification_info_bar = info_revealer
+        main_box.append(info_revealer)
         
         overlay = Gtk.Overlay()
         
@@ -10657,7 +10668,7 @@ class EditorWindow(Adw.ApplicationWindow):
             
     def on_info_bar_response(self, info_bar, response_id, editor):
         """Handle InfoBar response"""
-        info_bar.set_revealed(False)
+        info_bar.set_reveal_child(False)  # Use Revealer's method
         
         if response_id == Gtk.ResponseType.ACCEPT: # Reload
             print("Reloading file...")
