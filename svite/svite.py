@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 import sys, os, mmap, gi, cairo, time, unicodedata, signal
 from threading import Thread
 from array import array
@@ -8404,11 +8404,55 @@ class EditorWindow(Adw.ApplicationWindow):
         info_revealer.set_reveal_child(False)
         
         info_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        info_box.add_css_class("warning")
-        info_box.set_margin_start(12)
-        info_box.set_margin_end(12)
-        info_box.set_margin_top(6)
-        info_box.set_margin_bottom(6)
+        # Use custom CSS class for styling (don't use infobar/warning - they override our colors)
+        info_box.add_css_class("file-changed-bar")
+        info_box.set_margin_start(0)
+        info_box.set_margin_end(0)
+        info_box.set_margin_top(0)
+        info_box.set_margin_bottom(0)
+        
+        # Add styling with different colors for light/dark mode
+        css_provider = Gtk.CssProvider()
+        css_provider.load_from_data(b"""
+            .file-changed-bar {
+                padding: 8px 12px;
+            }
+            
+            /* Light mode - amber/yellow warning */
+            .file-changed-bar-light {
+                background-color: rgba(255, 193, 7, 0.3);
+                color: #5d4600;
+            }
+            
+            /* Dark mode - dark maroon/red */
+            .file-changed-bar-dark {
+                background-color: rgba(255, 0, 0, 0.3);
+                color: #e8e8e8;
+            }
+        """)
+        # Use modern GTK4 approach - add to display
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            css_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+        
+        # Apply correct color class based on current theme
+        def update_info_bar_colors():
+            style_manager = Adw.StyleManager.get_default()
+            is_dark = style_manager.get_dark()
+            if is_dark:
+                info_box.remove_css_class("file-changed-bar-light")
+                info_box.add_css_class("file-changed-bar-dark")
+            else:
+                info_box.remove_css_class("file-changed-bar-dark")
+                info_box.add_css_class("file-changed-bar-light")
+        
+        # Apply initial colors
+        update_info_bar_colors()
+        
+        # Update when theme changes
+        Adw.StyleManager.get_default().connect("notify::dark", lambda *_: update_info_bar_colors())
         
         # Content label
         title_label = Gtk.Label(label="File has changed on disk")

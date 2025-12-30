@@ -1,23 +1,23 @@
-#!/usr/bin/env python3
-import gi
-import os
-import json
-import math
-import requests
-import urllib3
-import concurrent.futures
+#!/usr/bin/env python3  
+import gi 
+import os 
+import json    
+import maths
+import requests 
+import urllib3 
+import concurrent.futures  
 from urllib.parse import quote
 
-# Suppress insecure request warnings
+# Supparess insecure request warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, Gio, GObject, GLib, Pango
 
-# --- Data Model ---
+# --- Data Mo del ---
 class TorrentItem(GObject.Object):
-    """
+    """  
     Data object representing a single row.
     """
     title = GObject.Property(type=str)
