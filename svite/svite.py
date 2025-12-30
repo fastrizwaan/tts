@@ -3599,6 +3599,12 @@ class VirtualTextView(Gtk.DrawingArea):
                     click_in_selection = True
             
             if click_in_selection:
+                # Fix: If we are in word selection mode (double-click drag),
+                # we want to extend selection, not move text.
+                if self.word_selection_mode:
+                    click_in_selection = False
+
+            if click_in_selection:
                 # We might be starting a drag, but wait for actual movement
                 self._drag_pending = True
                 # Don't set drag_and_drop_mode yet - wait for on_drag_update
