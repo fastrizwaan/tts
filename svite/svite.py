@@ -7990,16 +7990,16 @@ class EditorWindow(Adw.ApplicationWindow):
         search_entry.connect("search-changed", lambda e: list_box.invalidate_filter())
         
         # Populate list
-        self.refresh_recent_files_list()
+        self.update_recent_files_menu()
         
         # Connect popover open to refresh (in case files changed elsewhere)
         # Gtk.Popover doesn't have "opened" signal exactly like MenuButton usage?
         # Typically we just refresh when we modify the list.
         # But if another window updates recent files, we might want to refresh on show.
         # Using map signal on popover
-        popover.connect("map", lambda *_: self.refresh_recent_files_list())
+        popover.connect("map", lambda *_: self.update_recent_files_menu())
 
-    def refresh_recent_files_list(self):
+    def update_recent_files_menu(self):
         """Re-populate the recent files list box"""
         if not hasattr(self, '_recent_list_box'):
             return
@@ -8081,7 +8081,7 @@ class EditorWindow(Adw.ApplicationWindow):
             
             def on_remove_clicked(btn, path=file_path):
                 self.recent_files_manager.remove(path)
-                self.refresh_recent_files_list()
+                self.update_recent_files_menu()
                 return True
                 
             btn_remove.connect("clicked", on_remove_clicked)
