@@ -3859,8 +3859,28 @@ class VirtualTextView(Gtk.DrawingArea):
         # In drag-and-drop mode, track drop position for visual feedback
         # Do NOT extend selection in drag-and-drop mode
         if self.drag_and_drop_mode:
-            self.drop_position_line = ln
-            self.drop_position_col = col
+            # Check if drop position is inside the selection (invalid drop target)
+            drop_in_selection = False
+            if self.buf.selection.has_selection():
+                start_line, start_col, end_line, end_col = self.buf.selection.get_bounds()
+                if start_line == end_line:
+                    if ln == start_line and start_col <= col < end_col:
+                        drop_in_selection = True
+                else:
+                    if ln == start_line and col >= start_col:
+                        drop_in_selection = True
+                    elif ln == end_line and col < end_col:
+                        drop_in_selection = True
+                    elif start_line < ln < end_line:
+                        drop_in_selection = True
+            
+            if drop_in_selection:
+                # Hide drop indicator when inside selection
+                self.drop_position_line = -1
+                self.drop_position_col = -1
+            else:
+                self.drop_position_line = ln
+                self.drop_position_col = col
             
             # Check if Ctrl is pressed for copy vs move visual feedback
             event = g.get_current_event()
@@ -4131,6 +4151,12 @@ class VirtualTextView(Gtk.DrawingArea):
                                 lines_deleted = end_line - start_line
                                 if drop_ln > end_line:
                                     drop_ln -= lines_deleted
+                                elif drop_ln == end_line:
+                                    # Dropping on the end_line after deletion
+                                    # The end_line content merges with start_line
+                                    drop_ln = start_line
+                                    # Adjust column: start_col + (drop_col - end_col)
+                                    drop_col = start_col + (drop_col - end_col)
                         
                         # Insert at adjusted position
                         self.buf.set_cursor(drop_ln, drop_col)
@@ -5082,6 +5108,7 @@ class VirtualTextView(Gtk.DrawingArea):
             self.cursor_visible
             and not self.buf.selection.has_selection()
             and self.has_focus()
+            and not self.drag_and_drop_mode  # Hide cursor during drag-and-drop
         )
 
         cr.select_font_face("Monospace", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
@@ -5494,43 +5521,23 @@ class VirtualTextView(Gtk.DrawingArea):
             cr.rectangle(1, 1, w-2, h-2)
             cr.stroke()
 
-            # 2. Draw Drop Cursor
+            # 2. Draw Drop Cursor at mouse position
             drop_ln = self.drop_position_line
             drop_col = self.drop_position_col
             
-            # Check if drop position is valid and visible
-            # We need to map drop_ln/col to screen coordinates
+            # Use actual mouse X position for the indicator (more accurate than column conversion)
+            drop_x = getattr(self, 'last_drag_x', 0)
             
-            # Find the visual line for this drop position
-            # This logic mimics what we do for IM cursor or regular cursor
-            if drop_ln >= self.scroll_line:
-                # Calculate Y
-                # This is an approximation if we don't scan all lines, 
-                # but let's try to be accurate for visible area
-                
-                # We need to find the visual offset of drop_ln relative to screen top
-                # Since we already iterated through lines in the main loop, we could have captured it.
-                # But to avoid complex state tracking in the main loop, we'll just re-calculate
-                # for the specific drop line if it's in view.
-                
+            # Only draw if valid drop position
+            if drop_ln >= 0 and drop_col >= 0 and drop_ln >= self.scroll_line:
                 # Check if drop_ln is likely in view
                 if drop_ln <= self.scroll_line + visible_lines + 5:
-                    
-                    # Calculate Y relative to scroll_line
-                    # For wrapped lines, this is complex without full iteration.
-                    # BUT, we can use the main loop's current_y if we were injecting there.
-                    # Since we are AFTER the loop, we have to re-simulate or use a helper.
-                    
-                    # Let's use a simplified approach since we know the line is visible:
-                    # Iterate from scroll_line to drop_ln to sum heights
-                    
+                    # Calculate Y position
                     curr_y_off = -int(getattr(self, "scroll_line_frac", 0) * self.line_h)
                     found_drop_pos = False
-                    drop_x = 0
                     drop_y = 0
                     
                     sim_ln = self.scroll_line
-                    sim_vis_off = self.scroll_visual_offset
                     
                     while sim_ln <= drop_ln:
                         # Get height of this line
@@ -5540,114 +5547,25 @@ class VirtualTextView(Gtk.DrawingArea):
                             count = 1
                             
                         if sim_ln == drop_ln:
-                            # We found the line!
-                            # Now find visual offset and X
-                            
+                            # Found the line - calculate Y
                             if self.mapper.enabled:
                                 vis_off_in_line, _ = self.mapper.column_to_visual_offset(drop_ln, drop_col)
                             else:
                                 vis_off_in_line = 0
                                 
-                            # If we are starting partly into the first line (scroll_visual_offset)
                             effective_start = 0
                             if sim_ln == self.scroll_line:
                                 effective_start = self.scroll_visual_offset
                                 
-                            # Relative visual line index from top of viewport
-                            # Note: vis_off_in_line is 0-based index within the logical line
-                            
                             if vis_off_in_line >= effective_start:
                                 relative_vis_lines = vis_off_in_line - effective_start
-                                
                                 drop_y = curr_y_off + (relative_vis_lines * self.line_h)
                                 
-                                # Check if visible
                                 if drop_y < h:
-                                    # Calculate X
-                                    line_text = self.buf.get_line(drop_ln)
-                                    
-                                    # Use temp layout to measure X matches draw logic
-                                    # Reuse context from draw_view
-                                    layout.set_text(line_text, -1)
-                                    if self.mapper.enabled:
-                                        layout.set_width(int(viewport_w * Pango.SCALE))
-                                        layout.set_wrap(Pango.WrapMode.WORD_CHAR)
-                                    else:
-                                        layout.set_width(-1)
-                                    layout.set_alignment(Pango.Alignment.LEFT)
-                                    layout.set_auto_dir(True)
-                                    
-                                    # Calculate base_x matching draw_view
-                                    bx = ln_width + padding
-                                    # Handle horizontal scroll if no wrap
-                                    if not self.mapper.enabled:
-                                        bx -= self.scroll_x
-                                        
-                                    # Determine X in Pango
-                                    # Use index_to_line_x or similar
-                                    byte_idx = self.visual_byte_index(line_text, drop_col)
-                                    
-                                    # Handle RTL context
-                                    # We need to apply same manual offsets as draw_view... complex.
-                                    # Let's use the simpler index_to_pos if possible, but that gives rect.
-                                    
-                                    # Replicate draw_view RTL logic?
-                                    # Or trust Pango's get_cursor_pos?
-                                    
-                                    # Let's try get_cursor_pos first
-                                    try:
-                                        strong_pos, weak_pos = layout.get_cursor_pos(byte_idx)
-                                        # Use strong position
-                                        px = strong_pos.x / Pango.SCALE
-                                        py = strong_pos.y / Pango.SCALE # relative to layout top
-                                        
-                                        # Check if py matches our visual line
-                                        # vis_off_in_line tells us which visual line we are on
-                                        
-                                        # Visual line relative to start of logical line
-                                        target_vis_y = vis_off_in_line * self.line_h
-                                        
-                                        # If Pango wrapped differently? mapper should be in sync.
-                                        
-                                        # Adjust X for manual RTL alignment (from draw_view)
-                                        final_x_off = 0
-                                        
-                                        # RTL Offset Logic copy-paste from draw_view
-                                        base_dir = Pango.find_base_dir(line_text, -1)
-                                        pango_line = layout.get_line_readonly(vis_off_in_line)
-                                        if pango_line:
-                                            line_extents = pango_line.get_extents()
-                                            if base_dir == Pango.Direction.RTL:
-                                                 line_w = line_extents[1].width / Pango.SCALE
-                                                 if self.mapper.enabled:
-                                                     final_x_off = viewport_w - line_w # Push to right
-                                                 else:
-                                                     final_x_off = viewport_w - line_w # Same for RTL?
-                                                     # In draw_view for no-wrap: 'manual_x_offset = vp_w - line_w' (negative if line > vp)
-                                                     pass
-                                            if line_extents:
-                                                 final_x_off += line_extents[1].x / Pango.SCALE
-                                                 
-                                        drop_x = bx + px + final_x_offset # wait, define final_x_offset? 
-                                        # 'final_x_offset' above logic was simplified. 
-                                        # Let's just use px + bx and assume LTR for now to be safe, 
-                                        # or try to respect the detected offset.
-                                        
-                                        # Actually, let's just draw it where Pango says relative to our base X
-                                        # IF we add the alignment offset.
-                                        drop_x = bx + px + final_x_off
-                                         
-                                    except:
-                                        drop_x = bx # fallback
-                                    
                                     found_drop_pos = True
-                                    
                             break
                         
-                        # Advance Y
-                        # subtract what's already scrolled off for first line
-                         # ... actually loop logic is getting tricky.
-                        
+                        # Advance Y for lines before drop line
                         start_idx = 0
                         if sim_ln == self.scroll_line:
                             start_idx = self.scroll_visual_offset
