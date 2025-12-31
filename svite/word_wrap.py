@@ -69,7 +69,7 @@ class VisualLineMapper:
         # LRU cache for wrap info (limited size)
         self._cache: Dict[int, WrapInfo] = {}
         self._cache_order: List[int] = []  # For LRU eviction
-        self._max_cache_size: int = 500    # Cache ~500 lines
+        self._max_cache_size: int = 2000    # Cache ~2000 lines
         
         # Cached total visual lines
         self._cached_total: Optional[int] = None

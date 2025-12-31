@@ -1268,6 +1268,8 @@ class VirtualTextView(Gtk.DrawingArea):
         # Search highlights
         self.search_matches = []
         self.highlight_cache = {}
+        self.attr_list_cache = {} # LRU for Pango attributes
+        self.attr_list_cache_order = []
         self.current_match_idx = -1
         self.current_match = None
         self._skip_to_position = None  # (line, col) - skip matches before this after replace
@@ -1661,7 +1663,7 @@ class VirtualTextView(Gtk.DrawingArea):
             # --- Optimization for Large Files ---
             # Linear scanning of visual segments is O(N) and freezes for large files (e.g. 1M+ lines).
             # We use a threshold: for small files, be precise. For large files, approximate.
-            if total_lines > 1000:
+            if total_lines > 100:
                 # O(1) Approximation for Large Files
                 
                 # FIX: Check if we are truly at the max scroll position (within 1 unit).
@@ -5195,26 +5197,52 @@ class VirtualTextView(Gtk.DrawingArea):
                 self.scroll_visual_offset = start_vis_offset
 
             # ---- syntax ----
-            attr_list = Pango.AttrList()
-            for s, e, tag in tokens:
-                color = self.get_color_for_token(tag)
-                if color:
-                     bs = self.visual_byte_index(line_text, s)
-                     be = self.visual_byte_index(line_text, e)
-                     if bs < be:
-                         attr = Pango.attr_foreground_new(
-                             int(color[0] * 65535),
-                             int(color[1] * 65535),
-                             int(color[2] * 65535),
-                         )
-                         attr.start_index = bs
-                         attr.end_index = be
-                         attr_list.insert(attr)
-            layout.set_attributes(attr_list)
+            # Check cache for Pango attributes and base direction
+            attr_list = None
+            base_dir = Pango.Direction.LTR
             
-            # Iterate visual lines from Pango
-            iter = layout.get_iter()
-            line_idx = 0
+            # Use cached attributes if available (LRU)
+            if current_log_line in self.attr_list_cache:
+                stored_text, valid_attr_list, stored_dir = self.attr_list_cache[current_log_line]
+                if stored_text == line_text:
+                    attr_list = valid_attr_list
+                    base_dir = stored_dir
+                    # Update LRU
+                    if current_log_line in self.attr_list_cache_order:
+                        self.attr_list_cache_order.remove(current_log_line)
+                    self.attr_list_cache_order.append(current_log_line)
+            
+            if attr_list is None:
+                # Compute attributes
+                attr_list = Pango.AttrList()
+                for s, e, tag in tokens:
+                    color = self.get_color_for_token(tag)
+                    if color:
+                         bs = self.visual_byte_index(line_text, s)
+                         be = self.visual_byte_index(line_text, e)
+                         if bs < be:
+                             attr = Pango.attr_foreground_new(
+                                 int(color[0] * 65535),
+                                 int(color[1] * 65535),
+                                 int(color[2] * 65535),
+                             )
+                             attr.start_index = bs
+                             attr.end_index = be
+                             attr_list.insert(attr)
+                
+                # Compute and cache base direction
+                base_dir = Pango.find_base_dir(line_text, -1)
+
+                # Cache it
+                self.attr_list_cache[current_log_line] = (line_text, attr_list, base_dir)
+                self.attr_list_cache_order.append(current_log_line)
+                
+                # Evict old
+                if len(self.attr_list_cache) > 2000:
+                    old = self.attr_list_cache_order.pop(0)
+                    self.attr_list_cache.pop(old, None)
+
+            layout.set_attributes(attr_list)
             
             # Iterate visual lines from Pango
             iter = layout.get_iter()
@@ -5403,11 +5431,23 @@ class VirtualTextView(Gtk.DrawingArea):
 
                      # ---- CLIP TEXT REGION ----
                      # Prevent text from overwriting gutter or scrollbar area
-                     cr.save()
-                     # Extend clip slightly (+5) to ensure cursor at the right edge is visible
-                     cr.rectangle(ln_width, current_y, viewport_w + 5, self.line_h)
-                     cr.clip()
-
+                     # Optimization: Only clip if the line logic actually risks overlapping
+                     # Most lines are short. Clipping every line is expensive.
+                     width_check = 0
+                     needs_clip = False
+                     
+                     if line:
+                         width_check = line.get_extents()[1].width / Pango.SCALE
+                         # If text extends into scrollbar area (+margin) OR we have negative scroll_x
+                         if (base_x + width_check + final_x_offset > ln_width + viewport_w) or (self.scroll_x > 0):
+                             needs_clip = True
+                             
+                     if needs_clip:
+                         cr.save()
+                         # Extend clip slightly (+50) to ensure cursor at the right edge is visible/no artifacts
+                         cr.rectangle(ln_width, current_y, viewport_w + 50, self.line_h)
+                         cr.clip()
+ 
                      # ---- selection background ----
                      if sel_start_ln != -1:
                         # Find total visual lines to identify the last one
@@ -5517,32 +5557,37 @@ class VirtualTextView(Gtk.DrawingArea):
                          # This is important for RTL where "after last char" is visually on the LEFT
                          text_len_bytes = len(line_text.encode('utf-8'))
                          if cursor_byte >= text_len_bytes and text_len_bytes > 0:
-                             # Cursor at or past end of text - use trailing on last byte
+                         # Cursor at or past end of text - use trailing on last byte
                              c_line_idx, c_x = layout.index_to_line_x(text_len_bytes - 1, True)
                          else:
                              c_line_idx, c_x = layout.index_to_line_x(cursor_byte, False)
                          
+                         # Draw cursor (simplified)
+                         # We already calculated coordinates above, just draw
+                     
+                     # Restore clip if active
+                     if needs_clip:
+                         cr.restore()
 
-                         
+                     # Draw Cursor (after clip restore so it's visible)
+                     if show_cursor and current_log_line == self.buf.cursor_line:
+                         # We calculated c_line_idx/c_x above in the preparation block
                          if c_line_idx == line_idx:
-                             # Draw cursor
-                             # Add the same manual offset we added to the text
-                             cx = base_x + (c_x / Pango.SCALE) + final_x_offset
-                             
-                             if is_dark:
-                                 cursor_r, cursor_g, cursor_b = 1.0, 1.0, 1.0
-                             else:
-                                 cursor_r, cursor_g, cursor_b = 0.0, 0.0, 0.0
-                                 
-                             cr.set_source_rgba(
-                                 cursor_r, cursor_g, cursor_b,
-                                 self.cursor_phase if self.cursor_phase <= 1 else 2 - self.cursor_phase
-                             )
-                             cr.rectangle(cx, current_y, 1, self.line_h)
-                             cr.fill()
-                             
-                     # Restore clip (end of text drawing for this line)
-                     cr.restore()
+                              # Draw cursor
+                              # Add the same manual offset we added to the text
+                              cx = base_x + (c_x / Pango.SCALE) + final_x_offset
+                              
+                              if is_dark:
+                                  cursor_r, cursor_g, cursor_b = 1.0, 1.0, 1.0
+                              else:
+                                  cursor_r, cursor_g, cursor_b = 0.0, 0.0, 0.0
+                                  
+                              cr.set_source_rgba(
+                                  cursor_r, cursor_g, cursor_b,
+                                  self.cursor_phase if self.cursor_phase <= 1 else 2 - self.cursor_phase
+                              )
+                              cr.rectangle(cx, current_y, 1, self.line_h)
+                              cr.fill()
 
                      current_y += self.line_h
                      visual_lines_drawn += 1
