@@ -5005,8 +5005,9 @@ class VirtualTextView(Gtk.DrawingArea):
             s_char = sel_start_col
             e_char = len(line_text)
             
-            # If single-line selection
-            if sel_start_ln == sel_end_ln:
+            # If single-line selection, only select up to end col
+            is_multiline = sel_start_ln < sel_end_ln
+            if not is_multiline:
                 e_char = sel_end_col
             
             # Convert to bytes
@@ -5029,16 +5030,26 @@ class VirtualTextView(Gtk.DrawingArea):
                      final_ranges.append((min(x1, x2), max(x1, x2)))
                  except:
                      pass
-                     
-            # Handle empty line selection specifically
+            
+            # Handle empty line selection specifically FIRST
             # Only do this if we are on the first visual line of the empty line (which is the only line)
             if len(line_text) == 0 and s_char == 0 and line.start_index == 0:
-                 if sel_start_ln < sel_end_ln:
+                 if is_multiline:
                       # Multi-line start on empty line -> Full width (match Case 1)
+                      # No need for separate extension - full width covers everything
                       final_ranges.append((0, 200000 * Pango.SCALE))
                  elif e_char > 0:
                       # Single-line selection on empty line -> Char width
                       final_ranges.append((0, int(self.char_width * Pango.SCALE)))
+            # For non-empty lines in multi-line selection, extend selection to viewport edge
+            elif is_multiline and is_last_visual_line:
+                # Get the end of text position
+                try:
+                    text_end_x = line.index_to_x(vis_end, False)
+                except:
+                    text_end_x = 0
+                # Extend from end of text selection to far right
+                final_ranges.append((text_end_x, 200000 * Pango.SCALE))
         
         # Case 3: End Line
         elif current_log_line == sel_end_ln:
@@ -5068,34 +5079,7 @@ class VirtualTextView(Gtk.DrawingArea):
             if rw > 0.1:
                 cr.rectangle(rx, current_y, rw, self.line_h)
                 cr.fill()
-        
-        # ---- NEWLINE VISUALIZATION ----
-        should_draw_newline = False
-        if sel_start_ln < current_log_line < sel_end_ln:
-            should_draw_newline = True
-        elif current_log_line == sel_start_ln and sel_start_ln < sel_end_ln:
-            should_draw_newline = True
-        elif current_log_line == sel_end_ln:
-            if sel_end_col > len(line_text):
-                should_draw_newline = True
-        
-        if should_draw_newline and is_last_visual_line:
-             # Get extents of the visual line directly
-             # rect.x and rect.width are in Pango units
-             rect = line.get_extents()[1]
-             
-             nx = base_x + ((rect.x + rect.width) / Pango.SCALE) + final_x_offset
-             
-             # Current Y is already correct for this visual line
-             
-             # Use a robust width that covers the viewport but isn't excessive
-             # 'base_x' is roughly gutter width. 'w' is total widget width.
-             # We want to fill to the right edge.
-             nw = max(50, (3000 * Pango.SCALE)) # Safe large width
-             
-             cr.set_source_rgba(0.2, 0.4, 0.6, 0.3)
-             cr.rectangle(nx, current_y, nw, self.line_h)
-             cr.fill()
+
 
     def draw_view(self, area, cr, w, h):
         import time
@@ -5247,10 +5231,43 @@ class VirtualTextView(Gtk.DrawingArea):
                      base_x = ln_width + 2 - self.scroll_x
                      
                      # ---- current line highlight ----
+                     # Draw on non-selected portions only to avoid double-highlight
                      if self.highlight_current_line and current_log_line == self.buf.cursor_line:
                          cr.set_source_rgba(*self.current_line_background_color)
-                         cr.rectangle(0, current_y, w, self.line_h)
-                         cr.fill()
+                         # Check if this line has selection
+                         if sel_start_ln != -1 and sel_start_ln <= current_log_line <= sel_end_ln:
+                             # Line has selection - draw highlight only on non-selected parts
+                             # Calculate selection X boundaries on this line
+                             line_text = self.buf.get_line(current_log_line)
+                             
+                             # Determine selection start/end columns on this line
+                             sel_x_start = 0
+                             sel_x_end = w  # viewport width
+                             
+                             if current_log_line == sel_start_ln:
+                                 # Selection starts on this line
+                                 sel_x_start = sel_start_col * self.char_width + base_x
+                             
+                             if current_log_line == sel_end_ln:
+                                 # Selection ends on this line  
+                                 sel_x_end = sel_end_col * self.char_width + base_x
+                             elif current_log_line < sel_end_ln:
+                                 # Middle line - selection goes to end
+                                 sel_x_end = w
+                             
+                             # Draw highlight BEFORE selection (from 0 to sel_x_start)
+                             if sel_x_start > 0:
+                                 cr.rectangle(0, current_y, sel_x_start, self.line_h)
+                                 cr.fill()
+                             
+                             # Draw highlight AFTER selection (from sel_x_end to viewport end)
+                             if sel_x_end < w:
+                                 cr.rectangle(sel_x_end, current_y, w - sel_x_end, self.line_h)
+                                 cr.fill()
+                         else:
+                             # No selection on this line - draw full width highlight
+                             cr.rectangle(0, current_y, w, self.line_h)
+                             cr.fill()
 
                      # ---- selection background ----
                      # Empty line selection (newline char) logic matches 'else' block but simpler
@@ -5337,10 +5354,40 @@ class VirtualTextView(Gtk.DrawingArea):
                      # cr.stroke()
                      
                      # ---- current line highlight ----
+                     # Draw on non-selected portions only to avoid double-highlight
                      if self.highlight_current_line and current_log_line == self.buf.cursor_line:
                          cr.set_source_rgba(*self.current_line_background_color)
-                         cr.rectangle(0, current_y, w, self.line_h)
-                         cr.fill()
+                         # Check if this line has selection
+                         if sel_start_ln != -1 and sel_start_ln <= current_log_line <= sel_end_ln:
+                             # Line has selection - draw highlight only on non-selected parts
+                             # Determine selection start/end columns on this line
+                             sel_x_start = 0
+                             sel_x_end = w  # viewport width
+                             
+                             if current_log_line == sel_start_ln:
+                                 # Selection starts on this line
+                                 sel_x_start = sel_start_col * self.char_width + base_x
+                             
+                             if current_log_line == sel_end_ln:
+                                 # Selection ends on this line  
+                                 sel_x_end = sel_end_col * self.char_width + base_x
+                             elif current_log_line < sel_end_ln:
+                                 # Middle line - selection goes to end
+                                 sel_x_end = w
+                             
+                             # Draw highlight BEFORE selection (from 0 to sel_x_start)
+                             if sel_x_start > 0:
+                                 cr.rectangle(0, current_y, sel_x_start, self.line_h)
+                                 cr.fill()
+                             
+                             # Draw highlight AFTER selection (from sel_x_end to viewport end)
+                             if sel_x_end < w:
+                                 cr.rectangle(sel_x_end, current_y, w - sel_x_end, self.line_h)
+                                 cr.fill()
+                         else:
+                             # No selection on this line - draw full width highlight
+                             cr.rectangle(0, current_y, w, self.line_h)
+                             cr.fill()
 
                      # ---- line numbers (Moved to be unclipped) ----
                      if line_idx == 0 and self.show_line_numbers:
