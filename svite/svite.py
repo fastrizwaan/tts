@@ -474,6 +474,7 @@ def detect_language(path, first_line=None):
             '.sh': 'bash',
             '.bash': 'bash',
             '.zsh': 'bash',
+            '.desktop': 'desktop',
         }
         lang = mapping.get(ext, None)
         if lang:

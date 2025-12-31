@@ -659,6 +659,27 @@ class BashPatterns:
     GENERIC_WORD = re.compile(r'[a-zA-Z0-9_./:][a-zA-Z0-9_./:-]*')
 
 
+class DesktopPatterns:
+    """Pre-compiled regex patterns for .desktop syntax highlighting."""
+    
+    # Comments
+    COMMENT = re.compile(r'#.*$')
+    
+    # Section Headers [Desktop Entry] - User wants keyword color
+    SECTION = re.compile(r'^\[[^\]]+\]')
+    
+    # Keys (Key=Value)
+    KEY = re.compile(r'^([A-Za-z0-9-]+)\s*(=)')
+    
+    # Arguments (%f, %F, %u, %U, %d, %D, %n, %N, %i, %c, %k, %v, %m)
+    # User requested: %XX with % prefix should use command switch/argument color
+    ARG = re.compile(r'%[a-zA-Z]')
+    
+    # Strings
+    DOUBLE_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
+    SINGLE_QUOTED = re.compile(r"'(?:[^']|'')*'")
+
+
 class StateAwareSyntaxEngine:
     """
     High-performance syntax highlighting engine with proper multi-line support.
@@ -705,6 +726,8 @@ class StateAwareSyntaxEngine:
             self._patterns = JavaScriptPatterns
         elif self.language in ('bash', 'sh', 'shell', 'zsh'):
             self._patterns = BashPatterns
+        elif self.language == 'desktop':
+            self._patterns = DesktopPatterns
         else:
             self._patterns = None
 
@@ -813,6 +836,8 @@ class StateAwareSyntaxEngine:
             return self._tokenize_javascript(line_num, text)
         elif self.language in ('bash', 'sh', 'shell', 'zsh'):
             return self._tokenize_bash(line_num, text)
+        elif self.language == 'desktop':
+            return self._tokenize_desktop(line_num, text)
         else:
             return self._tokenize_simple(text)
     
@@ -2722,6 +2747,158 @@ class StateAwareSyntaxEngine:
         # Update state chain
         self.state_chain.set_end_state(line_num, state)
              
+        return tokens
+
+    def _tokenize_desktop(self, line_num: int, text: str) -> List[Tuple[int, int, str]]:
+        """
+        Tokenize .desktop files with specific user requirements.
+        - [Section]: Brackets plain/operator, content keyword.
+        - Key[Locale]=: Key is blue (function), Locale is keyword, = operator.
+        - Key=: Key is red (variable), = operator.
+        - Value:
+            - General: String color.
+            - Exec=...: First word (command) is blue (function), rest string.
+            - %XX: Number (argument/switch color).
+        """
+        P = self._patterns
+        tokens = []
+        pos = 0
+        length = len(text)
+        
+        # 1. Comment (start of line)
+        if pos == 0:
+            m = P.COMMENT.match(text)
+            if m:
+                tokens.append((0, length, 'comment'))
+                return tokens
+
+        # 2. Section [ ... ]
+        if pos == 0:
+            m = P.SECTION.match(text)
+            if m:
+                # Bracket [
+                tokens.append((m.start(), m.start() + 1, 'operator'))
+                
+                # Content
+                content_start = m.start() + 1
+                content_end = m.end() - 1
+                if content_end > content_start:
+                    tokens.append((content_start, content_end, 'variable'))
+                    
+                # Bracket ]
+                tokens.append((m.end() - 1, m.end(), 'operator'))
+                return tokens
+        
+        # 3. Keys
+        key_name = None
+        is_exec = False
+        
+        # Check for Localized Key: Key[Local]=
+        # We need a pattern for this or manual scan.
+        # Let's use a regex pattern defined locally or in patterns.
+        # Ideally patterns should be in P, but we can't change class definition easily without replace.
+        # For now, use local regex or manual check since we are executing python code.
+        import re
+        # Pattern: Name[...]=
+        m_loc = re.match(r'^([A-Za-z0-9-]+)(\[)([^\]]+)(\])\s*(=)', text)
+        m_plain = None
+        
+        if m_loc:
+            # Localized Key
+            # Group 1: Key Name -> Blue (Function)
+            tokens.append((m_loc.start(1), m_loc.end(1), 'function'))
+            
+            # Group 2: [ -> Operator
+            tokens.append((m_loc.start(2), m_loc.end(2), 'operator'))
+            
+            # Group 3: Locale -> Keyword
+            tokens.append((m_loc.start(3), m_loc.end(3), 'keywords'))
+            
+            # Group 4: ] -> Operator
+            tokens.append((m_loc.start(4), m_loc.end(4), 'operator'))
+            
+            # Group 5: = -> Operator
+            tokens.append((m_loc.start(5), m_loc.end(5), 'operator'))
+            
+            key_name = m_loc.group(1)
+            pos = m_loc.end(5)
+            
+        else:
+            # Check for Plain Key: Name=
+            # Use P.KEY if it matches "Name="
+            # P.KEY regex: r'^([A-Za-z0-9-]+)\s*(=)'
+            m_plain = P.KEY.match(text)
+            if m_plain:
+                # Plain Key
+                # Group 1: Key Name -> Red (Variable)
+                tokens.append((m_plain.start(1), m_plain.end(1), 'variable'))
+                
+                # Group 2: = -> Operator
+                tokens.append((m_plain.start(2), m_plain.end(2), 'operator'))
+                
+                key_name = m_plain.group(1)
+                pos = m_plain.end(2)
+        
+        if key_name:
+            # Value Parsing
+            
+            # Check if this is an Exec-like key
+            is_exec = key_name in ('Exec', 'TryExec')
+            cmd_done = not is_exec
+            
+            string_start = pos
+            
+            while pos < length:
+                ch = text[pos]
+                
+                # Check for %Arg
+                m_arg = P.ARG.match(text, pos)
+                if m_arg:
+                    # Flush pending string
+                    if pos > string_start:
+                        tokens.append((string_start, pos, 'string'))
+                    
+                    tokens.append((pos, m_arg.end(), 'number'))
+                    pos = m_arg.end()
+                    string_start = pos
+                    continue
+                
+                # Check for Command (in Exec line)
+                if is_exec and not cmd_done:
+                    if not ch.isspace():
+                        # Flush pending string (whitespace)
+                        if pos > string_start:
+                            tokens.append((string_start, pos, 'string'))
+                        
+                        # Identify command extent
+                        if ch == '"':
+                            m_idx = P.DOUBLE_QUOTED.match(text, pos)
+                            end = m_idx.end() if m_idx else length
+                        elif ch == "'":
+                            m_idx = P.SINGLE_QUOTED.match(text, pos)
+                            end = m_idx.end() if m_idx else length
+                        else:
+                            # Run until whitespace
+                            end = pos + 1
+                            while end < length and not text[end].isspace():
+                                end += 1
+                        
+                        tokens.append((pos, end, 'function'))
+                        pos = end
+                        string_start = pos
+                        cmd_done = True
+                        continue
+                
+                # Advance
+                pos += 1
+            
+            # Flush remaining string
+            if pos > string_start:
+                tokens.append((string_start, pos, 'string'))
+                
+            return tokens
+                
+        # 4. Fallback
         return tokens
 
     def _tokenize_simple(self, text: str) -> List[Tuple[int, int, str]]:
