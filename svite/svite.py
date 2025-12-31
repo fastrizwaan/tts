@@ -3284,25 +3284,20 @@ class VirtualTextView(Gtk.DrawingArea):
                     self._triple_click_line_len = line_len
                     return # DEFER
             
-            # Determine end position (start of next line to include newline)
-            end_ln = ln + 1
-            end_col = 0
-            if end_ln >= self.buf.total():
-                 end_ln = ln
-                 end_col = line_len
-
+            # Select entire line content (without newline)
+            # From start of line (col 0) to end of line text (line_len)
             self.buf.selection.set_start(ln, 0)
-            self.buf.selection.set_end(end_ln, end_col)
-            self.buf.cursor_line = end_ln
-            self.buf.cursor_col = end_col
+            self.buf.selection.set_end(ln, line_len)
+            self.buf.cursor_line = ln
+            self.buf.cursor_col = line_len
             
             # Enable line selection mode for drag
             self.line_selection_mode = True
             self.word_selection_mode = False # Ensure word mode is cleared
             self.anchor_word_start_line = ln
             self.anchor_word_start_col = 0
-            self.anchor_word_end_line = end_ln
-            self.anchor_word_end_col = end_col
+            self.anchor_word_end_line = ln
+            self.anchor_word_end_col = line_len
             self.update_matching_brackets()
             self.queue_draw()
             return
@@ -4060,25 +4055,20 @@ class VirtualTextView(Gtk.DrawingArea):
             ln = self._triple_click_ln
             line_len = self._triple_click_line_len
             
-            # Use same logic as direct triple click (Full line selection)
-            end_ln = ln + 1
-            end_col = 0
-            if end_ln >= self.buf.total():
-                 end_ln = ln
-                 end_col = line_len
-
+            # Select entire line content (without newline)
+            # From start of line (col 0) to end of line text (line_len)
             self.buf.selection.set_start(ln, 0)
-            self.buf.selection.set_end(end_ln, end_col)
-            self.buf.cursor_line = end_ln
-            self.buf.cursor_col = end_col
+            self.buf.selection.set_end(ln, line_len)
+            self.buf.cursor_line = ln
+            self.buf.cursor_col = line_len
             
             # Enable line selection mode for subsequent drag
             self.line_selection_mode = True
             self.word_selection_mode = False  # Ensure word mode is cleared
             self.anchor_word_start_line = ln
             self.anchor_word_start_col = 0
-            self.anchor_word_end_line = end_ln
-            self.anchor_word_end_col = end_col
+            self.anchor_word_end_line = ln
+            self.anchor_word_end_col = line_len
             
             self._pending_triple_click = False
             self.queue_draw()
