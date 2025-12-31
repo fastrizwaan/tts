@@ -2922,6 +2922,7 @@ class VirtualTextView(Gtk.DrawingArea):
         
         # Track if we clicked inside a selection (to handle click-to-clear vs drag)
         self._clicked_in_selection = False
+        self._deferred_selection_clear = False  # For deferring selection clear after click-in-selection
         
         # Track if a drag might start (deferred until movement)
         # Track if a drag might start (deferred until movement)
@@ -3221,8 +3222,12 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def on_click_pressed(self, g, n_press, x, y):
         """Handle mouse click."""
-        print(f"DEBUG: Click Pressed. Count={n_press}")
+
         self.grab_focus()
+        
+        # Reset clicked-in-selection flag at start - will be set to True
+        # ONLY if this is a single click inside an existing selection
+        self._clicked_in_selection = False
 
         # Always use accurate xy_to_line_col
         ln, col = self.xy_to_line_col(x, y)
@@ -3240,6 +3245,9 @@ class VirtualTextView(Gtk.DrawingArea):
             self.line_selection_mode = False
 
         self.click_count += 1
+        
+        # Cancel any pending deferred selection clear - a new click is starting
+        self._deferred_selection_clear = False
         
         # Cycle selection modes for rapid clicks > 3
         # 4 -> 2 (Word), 5 -> 3 (Line), 6 -> 2 (Word), etc.
@@ -3265,6 +3273,8 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # TRIPLE CLICK
         if self.click_count == 3:
+            # Reset clicked-in-selection flag - we're creating a new selection
+            self._clicked_in_selection = False
             # Check if we are clicking inside an established selection (from double-click)
             # If so, defer the triple click action until release, in case user drags instead.
             if self.buf.selection.has_selection():
@@ -3304,6 +3314,8 @@ class VirtualTextView(Gtk.DrawingArea):
 
         # DOUBLE CLICK - Context-aware selection (handles empty lines and end-of-line)
         if self.click_count == 2:
+            # Reset clicked-in-selection flag - we're creating a new selection
+            self._clicked_in_selection = False
             self.line_selection_mode = False # Ensure line mode is cleared if we cycled back
 
             # Case 1: empty line → context-aware selection
@@ -3414,6 +3426,7 @@ class VirtualTextView(Gtk.DrawingArea):
                              self.buf.selection.set_end(sel_end_line, sel_end_col)
                              self.buf.cursor_line = sel_end_line
                              self.buf.cursor_col = sel_end_col
+
                              
                              self.anchor_word_start_line = ln
                              self.anchor_word_start_col = start_col
@@ -3466,32 +3479,7 @@ class VirtualTextView(Gtk.DrawingArea):
             self.queue_draw()
             return
 
-        # SINGLE CLICK unchanged
-        if self.buf.selection.has_selection():
-            bounds = self.buf.selection.get_bounds()
-            if bounds and bounds[0] is not None:
-                start_line, start_col, end_line, end_col = bounds
-                click_in_selection = False
-
-                if start_line == end_line:
-                    if ln == start_line and start_col <= col < end_col:
-                        click_in_selection = True
-                else:
-                    if ln == start_line and col >= start_col:
-                        click_in_selection = True
-                    elif ln == end_line and col < end_col:
-                        click_in_selection = True
-                    elif start_line < ln < end_line:
-                        click_in_selection = True
-
-                if click_in_selection:
-                    self.buf.cursor_line = ln
-                    self.buf.cursor_col = col
-                    self._clicked_in_selection = True
-                    self.queue_draw()
-                    return
-
-        # Check if we are clicking inside an established selection
+        # SINGLE CLICK - Check if we are clicking inside an established selection
         # If so, do NOT clear selection yet (wait for drag or release)
         if self.buf.selection.has_selection():
             s_line, s_col, e_line, e_col = self.buf.selection.get_bounds()
@@ -3512,11 +3500,11 @@ class VirtualTextView(Gtk.DrawingArea):
                 self._click_ln = ln
                 self._click_col = col
                 self._pending_click = True
-                print("DEBUG: Clicked INSIDE selection. Pending Click Set. Returning.")
+
                 self.queue_draw()
                 return
 
-        print("DEBUG: Clicked OUTSIDE selection. Clearing selection.")
+
         self._clicked_in_selection = False
         self.buf.selection.clear()
         self.ctrl.start_drag(ln, col)
@@ -3595,7 +3583,7 @@ class VirtualTextView(Gtk.DrawingArea):
 
     def on_drag_begin(self, g, x, y):
         """Handle drag begin event."""
-        print(f"DEBUG: Drag Begin at {x},{y}")
+
         # Always use accurate xy_to_line_col
         ln, col = self.xy_to_line_col(x, y)
         
@@ -3813,6 +3801,12 @@ class VirtualTextView(Gtk.DrawingArea):
             # (Race condition: on_click_pressed may have set mode AFTER on_drag_begin ran)
             if self.word_selection_mode or self.line_selection_mode:
                 self._drag_pending = False
+                
+                # Check threshold to prevent jitter clearing special selections (like double-click EOL)
+                drag_distance = (dx * dx + dy * dy) ** 0.5
+                if drag_distance < 8:
+                    return
+                
                 # Fall through to regular selection drag
             else:
                 # Check if we've moved far enough to activate drag (threshold: 8 pixels)
@@ -3822,7 +3816,7 @@ class VirtualTextView(Gtk.DrawingArea):
                     self.drag_and_drop_mode = True
                     self._drag_pending = False
                     # Now we know it's a drag, so it's NOT a click-to-clear
-                    print("DEBUG: Drag Update. Mode Active. Clearing Pending Click.")
+
                     self._clicked_in_selection = False
                     self._pending_click = False # Cancel pending click
                     self._pending_triple_click = False # failsafe
@@ -4004,7 +3998,17 @@ class VirtualTextView(Gtk.DrawingArea):
                     self.buf.selection.set_start(anchor_start_line, anchor_start_col)
                     # Cursor (end point) should be the END of the current word
                     if end_col > len(line_text):
-                        self.ctrl.update_drag(ln + 1, 0)
+                        # We selected the newline.
+                        # CUSTOM LOGIC: Select the next line fully too!
+                        if ln < self.buf.total() - 1:
+                             next_line = self.buf.get_line(ln+1)
+                             if len(next_line) > 0:
+                                 self.ctrl.update_drag(ln + 1, len(next_line))
+                             else:
+                                 # Next line empty? Select it anyway (just the newline of it)
+                                 self.ctrl.update_drag(ln + 1, 0)
+                        else:
+                             self.ctrl.update_drag(ln + 1, 0)
                     else:
                         self.ctrl.update_drag(ln, end_col)
                 else:
@@ -4044,9 +4048,9 @@ class VirtualTextView(Gtk.DrawingArea):
             self._busy_overlay.set_visible(False)
 
     def on_click_released(self, g, n, x, y):
-        print(f"DEBUG: Released. PendingClick={self._pending_click}. PendingTriple={self._pending_triple_click}")
+
         if self._pending_click:
-            print("DEBUG: Executing Pending Click (Clear/Move)")
+
             self.ctrl.click(self._click_ln, self._click_col)
         self._pending_click = False
         
@@ -4079,9 +4083,14 @@ class VirtualTextView(Gtk.DrawingArea):
         # Stop auto-scrolling
         self.stop_autoscroll()
         
+
+        
         # If we clicked in selection but didn't actually drag (drag_and_drop_mode wasn't set),
-        # then we should clear the selection now
-        if self._clicked_in_selection and not self.drag_and_drop_mode:
+        # clear the selection. Only do this for true single clicks (click_count == 1).
+        # Double/triple clicks don't need this because they create their own selection.
+        if self._clicked_in_selection and not self.drag_and_drop_mode and self.click_count == 1:
+            # Clear selection for single click inside selection that didn't drag
+
             self.buf.selection.clear()
             self._clicked_in_selection = False
             self.queue_draw()
@@ -4176,7 +4185,7 @@ class VirtualTextView(Gtk.DrawingArea):
                     self.buf.selection.set_end(select_end_ln, select_end_col)
                     self.buf.cursor_line = select_end_ln
                     self.buf.cursor_col = select_end_col
-                    print(f"DEBUG: Drag End. Selected text: {select_start_ln},{select_start_col} - {select_end_ln},{select_end_col}")
+
 
                 self.keep_cursor_visible()
             
