@@ -3820,15 +3820,18 @@ class VirtualTextView(Gtk.DrawingArea):
                 self._drag_pending = False
                 # Fall through to regular selection drag
             else:
-                # We moved! Activate drag-and-drop mode
-                self.drag_and_drop_mode = True
-                self._drag_pending = False
-                # Now we know it's a drag, so it's NOT a click-to-clear
-                print("DEBUG: Drag Update. Mode Active. Clearing Pending Click.")
-                self._clicked_in_selection = False
-                self._pending_click = False # Cancel pending click
-                self._pending_triple_click = False # failsafe
-                self.queue_draw()
+                # Check if we've moved far enough to activate drag (threshold: 8 pixels)
+                drag_distance = (dx * dx + dy * dy) ** 0.5
+                if drag_distance >= 8:
+                    # We moved enough! Activate drag-and-drop mode
+                    self.drag_and_drop_mode = True
+                    self._drag_pending = False
+                    # Now we know it's a drag, so it's NOT a click-to-clear
+                    print("DEBUG: Drag Update. Mode Active. Clearing Pending Click.")
+                    self._clicked_in_selection = False
+                    self._pending_click = False # Cancel pending click
+                    self._pending_triple_click = False # failsafe
+                    self.queue_draw()
 
         # Store current drag position for auto-scroll
         self.last_drag_x = sx + dx
