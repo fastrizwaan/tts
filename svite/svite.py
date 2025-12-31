@@ -7798,6 +7798,7 @@ class EditorWindow(Adw.ApplicationWindow):
         # Global Progress Bar (for when no tab is visible/active)
         self.global_progress_bar = Gtk.ProgressBar()
         self.global_progress_bar.add_css_class("global-progress")
+        self.global_progress_bar.add_css_class("osd") # Add OSD class for better visibility over text
         self.global_progress_bar.set_visible(False)
         self.global_progress_bar.set_vexpand(False)
         self.global_progress_bar.set_valign(Gtk.Align.START)
@@ -7822,9 +7823,6 @@ class EditorWindow(Adw.ApplicationWindow):
              Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
         
-        # Add to top bar
-        toolbar_view.add_top_bar(self.global_progress_bar)
-        
         self._global_observer_editor = None
         self._global_observer_func = None
 
@@ -7838,7 +7836,15 @@ class EditorWindow(Adw.ApplicationWindow):
         self.tab_view.set_vexpand(True)
         self.tab_view.set_hexpand(True)
         self.tab_view.connect("notify::selected-page", self.on_page_selection_changed)
-        toolbar_view.set_content(self.tab_view)
+        self.tab_view.connect("close-page", self.on_close_page)
+        
+        # Wrap content in overlay to hold the progress bar
+        # This prevents the progress bar from shifting layout when shown
+        self.content_overlay = Gtk.Overlay()
+        self.content_overlay.set_child(self.tab_view)
+        self.content_overlay.add_overlay(self.global_progress_bar)
+        
+        toolbar_view.set_content(self.content_overlay)
         
         # Connect Adw.TabBar fallback if used
         if isinstance(self.tab_bar, Adw.TabBar):
@@ -8344,11 +8350,15 @@ class EditorWindow(Adw.ApplicationWindow):
         """Activate the tab that has the given file open. Returns True if found."""
         page = self.find_tab_with_file(file_path)
         if page:
-            self.tab_view.set_selected_page(page)
-            # Focus the editor
-            editor = page.get_child()._editor
-            editor.view.grab_focus()
-            return True
+            # CRITICAL SAFETY CHECK: Ensure the page belongs to THIS window's TabView
+            if self.tab_view.get_page_position(page) != -1:
+                self.tab_view.set_selected_page(page)
+                # Focus the editor
+                editor = page.get_child()._editor
+                editor.view.grab_focus()
+                return True
+            else:
+                print(f"WARNING: ignoring activate_tab_with_file for {file_path} - page not in this view")
         return False
 
     def get_current_page(self):
@@ -8688,8 +8698,8 @@ class EditorWindow(Adw.ApplicationWindow):
         # Connect signals
         tab.connect('activate-requested', self.on_tab_activated)
         tab.connect('close-requested', self.on_tab_close_requested)
-        # Handle cancellation request safely
-        tab.connect('cancel-requested', lambda t: editor.cancel_loading())
+        # Handle cancellation request safely - treat as close request
+        tab.connect('cancel-requested', self.on_tab_close_requested)
         
         # Connect to EditorPage loading state
         # Define a callback that updates the tab
@@ -9156,9 +9166,23 @@ class EditorWindow(Adw.ApplicationWindow):
             print(f"Error: Unexpected parent type: {type(parent_of_paned)}")
             return
         
-        # Now grab focus to the kept editor after reparenting is complete
         if editor_to_focus:
             editor_to_focus.view.grab_focus()
+
+    def on_close_page(self, view, page):
+        """Handle tab closing to cancel ongoing operations"""
+        try:
+            editor = page.get_child()._editor
+            if getattr(editor, 'loading', False):
+                print(f"Cancelling load for closing tab: {editor.current_file_path}")
+                editor.cancelled = True
+        except Exception as e:
+            print(f"Error in on_close_page: {e}")
+        
+        # Explicitly confirm close to ensure removal
+        # Return True (GDK_EVENT_STOP) to indicate we handled it
+        view.close_page_finish(page, True)
+        return True
 
 
     def on_tab_close_left(self, action, parameter):
@@ -10643,6 +10667,7 @@ class EditorWindow(Adw.ApplicationWindow):
             return editor.cancelled
 
         def progress_cb(frac):
+            if editor.cancelled: return
             GLib.idle_add(editor.set_progress, frac)
 
         def load_worker():
@@ -10655,6 +10680,16 @@ class EditorWindow(Adw.ApplicationWindow):
                 GLib.idle_add(on_load_error, e)
         
         def on_load_success():
+            if editor.cancelled:
+                return
+
+            # Safety check: Page might be closed / not in view anymore
+            try:
+                if self.tab_view.get_page_position(current_page) == -1:
+                    return
+            except:
+                return
+
             editor.set_loading(False)
             
             # Standard post-load setup
@@ -10723,29 +10758,32 @@ class EditorWindow(Adw.ApplicationWindow):
             self.monitor_file(editor, path)
 
         def on_load_error(e):
+            # Check cancellation FIRST
+            is_cancelled = "cancelled" in str(e).lower() or getattr(editor, 'cancelled', False)
+            if is_cancelled:
+                print(f"Load cancelled for {path} - Cleanup handled by close handler")
+                # Do NOT check get_page_position here as the page might already be closed/detached
+                # The close handler (on_close_page/perform_close_tab) handles the removal.
+                return
+
+            # Safety checks for non-cancelled errors
+            try:
+                if self.tab_view.get_page_position(current_page) == -1:
+                    return
+            except:
+                return
+
             editor.set_loading(False)
-            
-            # Reset title if failed (unless cancelled and we keep it?)
+
+
+            # Reset title if failed (only for genuine errors, not cancellation)
             # If we set current_file_path early, we must unset it on error
             if editor.current_file_path == path:
                 editor.current_file_path = None
                 if current_tab: current_tab.set_title("Untitled")
 
-            # If cancelled, maybe close the tab? User said "stop loading and close that tab"
-            if "cancelled" in str(e).lower() or editor.cancelled:
-                print(f"Load cancelled for {path}")
-                if current_page:
-                    # Safe check before closing
-                    for i in range(self.tab_view.get_n_pages()):
-                        if self.tab_view.get_nth_page(i) == current_page:
-                            self.tab_view.close_page(current_page)
-                            break
-                    # If we opened a new tab just for this file and it cancelled, close it?
-                    # The user might have manually closed it.
-                    pass
-            else:
-                print(f"Error loading file {path}: {e}")
-                # Maybe show error dialog?
+            print(f"Error loading file {path}: {e}")
+            # Maybe show error dialog?
         
         thread = Thread(target=load_worker)
         thread.daemon = True
