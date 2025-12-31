@@ -348,7 +348,7 @@ class VisualLineMapper:
             count = 0
             for i in range(total):
                 count += self.get_visual_line_count(i, cr)
-            result = int(count * 1.05)  # Small buffer
+            result = int(count)  # Exact count
         else:
             # Structural Sampling for large files
             samples = 100
@@ -364,9 +364,9 @@ class VisualLineMapper:
             
             if sampled_count > 0:
                 avg_vis_per_logical = sampled_vis_lines / sampled_count
-                result = int(total * avg_vis_per_logical * 1.05)
+                result = int(total * avg_vis_per_logical)
             else:
-                result = int(total * 1.05)
+                result = int(total)
                 
         self._cached_total = result
         return result

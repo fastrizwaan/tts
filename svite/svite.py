@@ -1664,7 +1664,7 @@ class VirtualTextView(Gtk.DrawingArea):
             # --- Optimization for Large Files ---
             # Linear scanning of visual segments is O(N) and freezes for large files (e.g. 1M+ lines).
             # We use a threshold: for small files, be precise. For large files, approximate.
-            if total_lines > 100:
+            if total_lines > 5000:
                 # O(1) Approximation for Large Files
                 
                 # FIX: Check if we are truly at the max scroll position (within 1 unit).
@@ -1711,8 +1711,11 @@ class VirtualTextView(Gtk.DrawingArea):
 
                 # Normal Scroll Position
                 # We map ratio directly to logical line index.
-                # This assumes uniform distribution of wrapping, which is standard for huge files.
-                self.scroll_line = int(ratio * (total_lines - 1))
+                # However, we must scale to (total_lines - viewport_lines) to avoid overshooting
+                visible_rows = max(1, self.get_height() // self.line_h)
+                safe_max = max(0, total_lines - 1 - visible_rows)
+                
+                self.scroll_line = int(ratio * safe_max)
                 self.scroll_line = max(0, min(self.scroll_line, total_lines - 1))
                 self.scroll_visual_offset = 0
                 self.scroll_line_frac = 0.0
@@ -7332,10 +7335,10 @@ class SaveChangesDialog(Adw.Window):
         
         # Header with title
         header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        header.set_margin_top(24)
+        header.set_margin_top(12)
         header.set_margin_bottom(12)
-        header.set_margin_start(24)
-        header.set_margin_end(24)
+        header.set_margin_start(12)
+        header.set_margin_end(12)
         
         # Title
         title_label = Gtk.Label(label="Save Changes?")
@@ -7721,8 +7724,9 @@ class EditorWindow(Adw.ApplicationWindow):
         self.connect('close-request', self.on_close_request)
 
         # Create ToolbarView
-        toolbar_view = Adw.ToolbarView()
+        toolbar_view = Adw.ToolbarView()  
         toolbar_view.add_css_class("toolbarview")
+        
         # Header Bar
         self.header = Adw.HeaderBar()
         self.header.set_margin_top(0)
