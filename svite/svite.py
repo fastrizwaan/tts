@@ -5956,6 +5956,11 @@ class StatusBar(Gtk.Box):
             lang = lang_map.get(file_type)
             editor.view.buf.set_language(lang)
             editor.view.syntax = editor.view.buf.syntax_engine
+            
+            # CLEAR CACHE to force re-render with new syntax
+            editor.view.attr_list_cache.clear() 
+            editor.view.attr_list_cache_order.clear()
+            
             editor.view.queue_draw()
     
     def _create_tab_width_menu(self):
@@ -10535,11 +10540,43 @@ class EditorWindow(Adw.ApplicationWindow):
 
         editor.view.queue_draw()
 
-        width = editor.view.get_width()
-        height = editor.view.get_height()
         if width <= 0 or height <= 0:
             GLib.idle_add(lambda: self.on_buffer_changed(editor))
             return
+        
+        # Header Detection Logic
+        if editor.buf.total() > 0:
+            first_line = editor.buf.get_line(0)
+            
+            # Detect language from header (only if first line changed or we haven't detected yet)
+            # We can just run detection cheap check
+            current_lang = getattr(editor.view.buf, 'language', None)
+            
+            # Passing path if available, or just header
+            new_lang = detect_language(editor.current_file_path, first_line)
+            
+            # Only update if changed AND if we are not manually overriding 
+            # (Assuming user override might be lost? For now, we prioritize header/ext)
+            # Actually, detect_language prefers extension if path exists.
+            # If path is None (Untitled), it uses header.
+            # So this logic is safe.
+            
+            if new_lang != current_lang:
+                 editor.view.buf.set_language(new_lang)
+                 editor.view.syntax = editor.view.buf.syntax_engine
+                 
+                 # Clear highlight cache
+                 editor.view.renderer.attr_list_cache = {}
+                 editor.view.renderer.attr_list_cache_order = []
+                 # Or if accessed via editor.view:
+                 if hasattr(editor.view, 'attr_list_cache'):
+                      editor.view.attr_list_cache.clear()
+                      editor.view.attr_list_cache_order.clear()
+                 
+                 # Update status bar
+                 self.status_bar.update_for_editor(editor)
+                 
+                 editor.view.queue_draw()
         
         # Live Search Update:
         # If the editor has an active Find Bar, trigger a re-search to update matches/count

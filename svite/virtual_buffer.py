@@ -792,8 +792,14 @@ class VirtualBuffer:
         self._suppress_notifications = 0
         self._size_delta: int = 0 # Track size changes relative to indexer
         self.line_feed = 'lf' # Default line feed preference
+        self._language = None # Track current language
+
+    @property
+    def language(self):
+        return self._language
 
     def set_language(self, lang):
+        self._language = lang
         current_engine = self.syntax_engine
         
         if not isinstance(current_engine, StateAwareSyntaxEngine):
