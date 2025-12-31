@@ -10541,6 +10541,8 @@ class EditorWindow(Adw.ApplicationWindow):
 
         editor.view.queue_draw()
 
+        width = editor.view.get_width()
+        height = editor.view.get_height()
         if width <= 0 or height <= 0:
             GLib.idle_add(lambda: self.on_buffer_changed(editor))
             return
