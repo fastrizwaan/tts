@@ -2805,8 +2805,7 @@ class StateAwareSyntaxEngine:
         
         if m_loc:
             # Localized Key
-            # Group 1: Key Name -> Blue (Function)
-            tokens.append((m_loc.start(1), m_loc.end(1), 'function'))
+            tokens.append((m_loc.start(1), m_loc.end(1), 'variable')) # Key name Red
             
             # Group 2: [ -> Operator
             tokens.append((m_loc.start(2), m_loc.end(2), 'operator'))
