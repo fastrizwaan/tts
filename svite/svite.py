@@ -8150,12 +8150,12 @@ class EditorWindow(Adw.ApplicationWindow):
         popover.set_position(Gtk.PositionType.BOTTOM)
         
         # Main container
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         box.set_size_request(300, -1)
-        box.set_margin_top(6)
-        box.set_margin_bottom(6)
-        box.set_margin_start(6)
-        box.set_margin_end(6)
+        box.set_margin_top(0)
+        box.set_margin_bottom(0)
+        box.set_margin_start(0)
+        box.set_margin_end(0)
         
         # Search Entry
         search_entry = Gtk.SearchEntry()
@@ -8164,13 +8164,13 @@ class EditorWindow(Adw.ApplicationWindow):
         
         # Scrolled Window for List
         scrolled = Gtk.ScrolledWindow()
-        scrolled.set_max_content_height(400)
-        scrolled.set_min_content_height(100)
+        scrolled.set_max_content_height(500)
+        scrolled.set_min_content_height(200)
         scrolled.set_propagate_natural_height(True)
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         
         list_box = Gtk.ListBox()
-        list_box.add_css_class("rich-list")
+        list_box.add_css_class("overlay-scrollbar")
         list_box.set_selection_mode(Gtk.SelectionMode.NONE)
         scrolled.set_child(list_box)
         box.append(scrolled)
