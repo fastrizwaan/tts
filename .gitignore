@@ -10,3 +10,4 @@ en_US-ryan-medium.onnx.json
 # Python bytecode
 __pycache__/
 *.pyc
+.moved

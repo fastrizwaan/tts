@@ -2,7 +2,7 @@
 """
 EPUB/HTML reader for WebKitGTK6 + epub.js with TTS support using Kokoro
 """
-import os
+import os 
 import base64
 import tempfile
 import pathlib

@@ -11099,3 +11099,4 @@ class VirtualTextEditor(Adw.Application):
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     VirtualTextEditor().run(sys.argv)
+#nothing
