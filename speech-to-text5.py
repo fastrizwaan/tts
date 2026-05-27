@@ -222,15 +222,17 @@ class LiveTranscriberApp(Adw.Application):
                 msg = "Alibaba SenseVoice loaded successfully. Ready!"
 
             elif model_key == "parakeet":
-                # We use the generic config object so it safely maps the TDT structure
-                config = sherpa_onnx.OfflineRecognizerConfig()
-                config.model_config.transducer.encoder = str(model_dir / "encoder.int8.onnx")
-                config.model_config.transducer.decoder = str(model_dir / "decoder.int8.onnx")
-                config.model_config.transducer.joiner = str(model_dir / "joiner.int8.onnx")
-                config.model_config.tokens = str(model_dir / "tokens.txt")
-                config.model_config.num_threads = 2
-                
-                self.recognizer_parakeet = sherpa_onnx.OfflineRecognizer(config)
+                # Use the factory method to handle the C++ routing automatically
+                self.recognizer_parakeet = sherpa_onnx.OfflineRecognizer.from_transducer(
+                    encoder=str(model_dir / "encoder.int8.onnx"),
+                    decoder=str(model_dir / "decoder.int8.onnx"),
+                    joiner=str(model_dir / "joiner.int8.onnx"),
+                    tokens=str(model_dir / "tokens.txt"),
+                    num_threads=2,
+                    sample_rate=SAMPLE_RATE,
+                    feature_dim=80,
+                    model_type="nemo_transducer"  # Explicitly tell the engine it's an NVIDIA architecture
+                )
                 msg = "NVIDIA Parakeet TDT loaded successfully. Ready!"
 
             GLib.idle_add(self.on_model_ready, msg)
